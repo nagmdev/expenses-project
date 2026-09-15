@@ -9,7 +9,8 @@ import {
   FilePlus, 
   Wallet,
   ShieldAlert,
-  User as UserIcon
+  User as UserIcon,
+  Flame
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -28,8 +29,11 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg }
     currentUser,
     refreshData,
     requests,
-    isBackendConnected
+    isBackendConnected,
+    isFirebaseConnected,
+    openFirebaseModal,
   } = useApp();
+
 
 
   const [showOrgDropdown, setShowOrgDropdown] = useState(false);
@@ -175,18 +179,44 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg }
               </div>
             </div>
 
-            {/* Environment / Storage Status Badge */}
-            <div 
-              className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border ${
-                isBackendConnected 
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
-                  : 'bg-indigo-50 text-indigo-700 border-indigo-200'
-              }`}
-              title={isBackendConnected ? 'النظام متصل بقاعدة البيانات SQLite' : 'النظام يعمل بوضع التخزين السحابي المرن (Vercel Ready)'}
-            >
-              <span className={`h-1.5 w-1.5 rounded-full ${isBackendConnected ? 'bg-emerald-500' : 'bg-indigo-500 animate-pulse'}`}></span>
-              <span>{isBackendConnected ? 'خادم متصل' : 'سحابي (Vercel)'}</span>
-            </div>
+            {/* Firebase Real-Time Status Badge */}
+            {isFirebaseConnected ? (
+              <button
+                type="button"
+                onClick={openFirebaseModal}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 shadow-xs transition cursor-pointer"
+                title="متصل بقاعدة بيانات Cloud Firestore السحابية — انقر لتعديل الإعدادات"
+              >
+                <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>🔥 Firebase متصل</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={openFirebaseModal}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 shadow-xs transition cursor-pointer hover:scale-102"
+                title="ربط التطبيق بقاعدة بيانات Google Cloud Firestore للمزامنة الفورية"
+              >
+                <Flame className="h-3.5 w-3.5 text-amber-600 animate-pulse" />
+                <span>🔥 ربط Firebase</span>
+              </button>
+            )}
+
+            {/* Local Server Fallback Badge (shown when Firebase is not connected) */}
+            {!isFirebaseConnected && (
+              <div 
+                className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border ${
+                  isBackendConnected 
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                    : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                }`}
+                title={isBackendConnected ? 'النظام متصل بقاعدة البيانات SQLite' : 'النظام يعمل بوضع التخزين السحابي المرن (Vercel Ready)'}
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${isBackendConnected ? 'bg-emerald-500' : 'bg-indigo-500'}`}></span>
+                <span>{isBackendConnected ? 'خادم متصل' : 'تخزين محلي (Local)'}</span>
+              </div>
+            )}
+
 
             {/* Refresh Data */}
             <button

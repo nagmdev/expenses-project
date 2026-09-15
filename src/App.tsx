@@ -10,11 +10,22 @@ import { VendorsManagement } from './components/VendorsManagement';
 import { OrganizationsManagement } from './components/OrganizationsManagement';
 import { NewRequestModal } from './components/NewRequestModal';
 import { RequestDetailModal } from './components/RequestDetailModal';
+import { FirebaseConfigModal } from './components/FirebaseConfigModal';
 import { ExpenseRequest } from './types';
 import { Building2, X } from 'lucide-react';
 
 const MainApp: React.FC = () => {
-  const { activeTab, setActiveTab, addOrganization, organizations, loading, resetToSampleData } = useApp();
+  const { 
+    activeTab, 
+    setActiveTab, 
+    addOrganization, 
+    organizations, 
+    loading, 
+    resetToSampleData,
+    isFirebaseModalOpen,
+    closeFirebaseModal
+  } = useApp();
+
 
   const [isNewRequestModalOpen, setIsNewRequestModalOpen] = useState(false);
   const [selectedRequest, setSelectedRequest] = useState<ExpenseRequest | null>(null);
@@ -133,6 +144,13 @@ const MainApp: React.FC = () => {
         request={selectedRequest}
         onClose={() => setSelectedRequest(null)}
       />
+
+      {/* Firebase Cloud Firestore Modal */}
+      <FirebaseConfigModal 
+        isOpen={isFirebaseModalOpen}
+        onClose={closeFirebaseModal}
+      />
+
 
       {/* Quick Add Org Modal */}
       {isQuickOrgModalOpen && (

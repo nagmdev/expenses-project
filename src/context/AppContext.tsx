@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { 
   Organization, 
   User, 
@@ -16,6 +16,18 @@ import {
   initialProviders,
   initialRequests
 } from '../data/initialData';
+import {
+  isFirebaseConfigured,
+  initFirebase,
+  getDb,
+  setFirestoreDoc,
+  deleteFirestoreDoc,
+  collection,
+  onSnapshot,
+  doc,
+  setDoc,
+  type Firestore
+} from '../lib/firebase';
 
 const STORAGE_KEYS = {
   ORGS: 'expenses_organizations_v2',
@@ -68,6 +80,23 @@ const safeFetchJson = async <T = any>(url: string, options?: RequestInit): Promi
   }
 };
 
+// Seed helper for fresh Firestore deployments
+async function seedInitialDataToFirestore(database: Firestore): Promise<void> {
+  try {
+    const batch = [
+      ...initialOrganizations.map(o => setDoc(doc(database, 'organizations', o.id), o)),
+      ...initialMembers.map(m => setDoc(doc(database, 'members', m.id), m)),
+      ...initialServices.map(s => setDoc(doc(database, 'services', s.id), s)),
+      ...initialProviders.map(p => setDoc(doc(database, 'providers', p.id), p)),
+      ...initialRequests.map(r => setDoc(doc(database, 'requests', r.id), r)),
+    ];
+    await Promise.all(batch);
+    console.log('[Firebase] Successfully seeded sample data to Firestore');
+  } catch (err) {
+    console.error('[Firebase] Failed to seed initial data:', err);
+  }
+}
+
 interface AppContextType {
   organizations: Organization[];
   activeOrgId: string;
@@ -82,10 +111,14 @@ interface AppContextType {
   activeTab: string;
   loading: boolean;
   isBackendConnected: boolean;
+  isFirebaseConnected: boolean;
+  isFirebaseModalOpen: boolean;
   
   setActiveOrgId: (id: string) => void;
   setCurrentRole: (role: 'org_admin' | 'employee') => void;
   setActiveTab: (tab: string) => void;
+  openFirebaseModal: () => void;
+  closeFirebaseModal: () => void;
   
   // Organizations
   addOrganization: (org: Omit<Organization, 'id' | 'createdAt'>) => Promise<void>;
@@ -166,6 +199,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [loading, setLoading] = useState(false);
   const [isBackendConnected, setIsBackendConnected] = useState(false);
+  const [isFirebaseConnected, setIsFirebaseConnected] = useState(false);
+  const [isFirebaseModalOpen, setIsFirebaseModalOpen] = useState(false);
+  const [firebaseSyncCounter, setFirebaseSyncCounter] = useState(0);
+
+  const openFirebaseModal = () => setIsFirebaseModalOpen(true);
+  const closeFirebaseModal = () => {
+    setIsFirebaseModalOpen(false);
+    setFirebaseSyncCounter(prev => prev + 1);
+  };
 
   // Setters with persistent localStorage syncing
   const setActiveOrgId = (id: string) => {
@@ -207,8 +249,105 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     { id: 'user-emp', name: 'الموظف (طالب الصرف والمتابعة)', email: 'hind@ofuq-tech.sa', role: 'employee' }
   ];
 
-  // Refresh data: if backend API is reachable, use it; otherwise stay resiliently in localStorage
-  const refreshData = async () => {
+  // =========================================================================
+  // Real-Time Firebase Listeners (Top Priority if Configured)
+  // =========================================================================
+  useEffect(() => {
+    if (!isFirebaseConfigured()) {
+      setIsFirebaseConnected(false);
+      return;
+    }
+
+    const { db } = initFirebase();
+    if (!db) {
+      setIsFirebaseConnected(false);
+      return;
+    }
+
+    setIsFirebaseConnected(true);
+    let isSeeding = false;
+
+    // 1. Organizations Listener
+    const unsubOrgs = onSnapshot(collection(db, 'organizations'), (snapshot) => {
+      if (snapshot.empty && !isSeeding) {
+        isSeeding = true;
+        seedInitialDataToFirestore(db).finally(() => {
+          isSeeding = false;
+        });
+        return;
+      }
+      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Organization));
+      if (list.length > 0) {
+        setOrganizations(list);
+        safeSetLocal(STORAGE_KEYS.ORGS, list);
+      }
+    }, (err) => {
+      console.warn('[Firebase] Organizations onSnapshot error:', err);
+      setIsFirebaseConnected(false);
+    });
+
+    // 2. Members Listener
+    const unsubMembers = onSnapshot(collection(db, 'members'), (snapshot) => {
+      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as OrganizationMember));
+      if (list.length > 0) {
+        setMembers(list);
+        safeSetLocal(STORAGE_KEYS.MEMBERS, list);
+      }
+    }, (err) => {
+      console.warn('[Firebase] Members onSnapshot error:', err);
+    });
+
+    // 3. Services Listener
+    const unsubServices = onSnapshot(collection(db, 'services'), (snapshot) => {
+      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as ServiceCategory));
+      if (list.length > 0) {
+        setServices(list);
+        safeSetLocal(STORAGE_KEYS.SERVICES, list);
+      }
+    }, (err) => {
+      console.warn('[Firebase] Services onSnapshot error:', err);
+    });
+
+    // 4. Providers Listener
+    const unsubProviders = onSnapshot(collection(db, 'providers'), (snapshot) => {
+      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as ServiceProvider));
+      if (list.length > 0) {
+        setProviders(list);
+        safeSetLocal(STORAGE_KEYS.PROVIDERS, list);
+      }
+    }, (err) => {
+      console.warn('[Firebase] Providers onSnapshot error:', err);
+    });
+
+    // 5. Requests Listener
+    const unsubRequests = onSnapshot(collection(db, 'requests'), (snapshot) => {
+      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as ExpenseRequest));
+      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      if (list.length > 0) {
+        setRequests(list);
+        safeSetLocal(STORAGE_KEYS.REQUESTS, list);
+      }
+    }, (err) => {
+      console.warn('[Firebase] Requests onSnapshot error:', err);
+    });
+
+    return () => {
+      unsubOrgs();
+      unsubMembers();
+      unsubServices();
+      unsubProviders();
+      unsubRequests();
+    };
+  }, [firebaseSyncCounter]);
+
+  // Refresh data: if backend API is reachable and Firebase is not active, sync with local Express API
+  const refreshData = useCallback(async () => {
+    if (isFirebaseConfigured()) {
+      // Re-trigger Firebase listener sync
+      setFirebaseSyncCounter(prev => prev + 1);
+      return;
+    }
+
     try {
       setLoading(true);
       const [orgsData, memsData, srvsData, provsData, reqsData] = await Promise.all([
@@ -254,14 +393,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeOrgId]);
 
   useEffect(() => {
     refreshData();
-  }, []);
+  }, [refreshData]);
 
   // Reset to sample data helper
-  const resetToSampleData = () => {
+  const resetToSampleData = async () => {
     setOrganizations(initialOrganizations);
     setMembers(initialMembers);
     setServices(initialServices);
@@ -281,9 +420,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       localStorage.setItem(STORAGE_KEYS.ROLE, 'org_admin');
       localStorage.setItem(STORAGE_KEYS.ACTIVE_TAB, 'dashboard');
     } catch {}
+
+    // If Firebase is active, reset Cloud Firestore as well
+    const database = getDb();
+    if (database && isFirebaseConfigured()) {
+      await seedInitialDataToFirestore(database);
+    }
   };
 
-  // ======================= ORGANIZATIONS =======================
+  // =========================================================================
+  // MUTATIONS (Firestore First -> Express API -> LocalStorage Fallback)
+  // =========================================================================
+
+  // 1. ORGANIZATIONS
   const addOrganization = async (orgData: Omit<Organization, 'id' | 'createdAt'>) => {
     const id = `org-${Date.now()}`;
     const createdAt = new Date().toISOString();
@@ -306,25 +455,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       active: true,
     };
 
+    // Firebase Firestore Sync
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await Promise.all([
+          setFirestoreDoc('organizations', id, newOrg),
+          setFirestoreDoc('members', newMember.id, newMember)
+        ]);
+      } catch (err) {
+        console.error('[Firebase] Error saving organization:', err);
+      }
+    }
+
+    // Backend Express Sync
     if (isBackendConnected) {
-      const created = await safeFetchJson<Organization>('/api/organizations', {
+      await safeFetchJson<Organization>('/api/organizations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(orgData),
       });
-      if (created) {
-        setOrganizations(prev => {
-          const updated = [created, ...prev];
-          safeSetLocal(STORAGE_KEYS.ORGS, updated);
-          return updated;
-        });
-        setActiveOrgId(created.id);
-        await refreshData();
-        return;
-      }
     }
 
-    // Resilient local fallback
+    // Local state & persistence
     setOrganizations(prev => {
       const updated = [newOrg, ...prev];
       safeSetLocal(STORAGE_KEYS.ORGS, updated);
@@ -338,7 +490,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveOrgId(id);
   };
 
-  // ======================= MEMBERS =======================
+  // 2. MEMBERS
   const addMember = async (memberData: Omit<OrganizationMember, 'id' | 'joinedAt'>) => {
     const newMember: OrganizationMember = {
       ...memberData,
@@ -346,20 +498,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       joinedAt: new Date().toISOString().split('T')[0],
     };
 
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('members', newMember.id, newMember);
+      } catch (err) {
+        console.error('[Firebase] Error adding member:', err);
+      }
+    }
+
     if (isBackendConnected) {
-      const created = await safeFetchJson<OrganizationMember>('/api/members', {
+      await safeFetchJson<OrganizationMember>('/api/members', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(memberData),
       });
-      if (created) {
-        setMembers(prev => {
-          const updated = [created, ...prev];
-          safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
-          return updated;
-        });
-        return;
-      }
     }
 
     setMembers(prev => {
@@ -370,9 +522,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const removeMember = async (memberId: string) => {
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await deleteFirestoreDoc('members', memberId);
+      } catch (err) {
+        console.error('[Firebase] Error removing member:', err);
+      }
+    }
+
     if (isBackendConnected) {
       await safeFetchJson(`/api/members/${memberId}`, { method: 'DELETE' });
     }
+
     setMembers(prev => {
       const updated = prev.filter(m => m.id !== memberId);
       safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
@@ -380,7 +541,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
-  // ======================= SERVICES =======================
+  // 3. SERVICES
   const addService = async (serviceData: Omit<ServiceCategory, 'id' | 'spentAmount'>) => {
     const newService: ServiceCategory = {
       ...serviceData,
@@ -388,20 +549,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       spentAmount: 0,
     };
 
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('services', newService.id, newService);
+      } catch (err) {
+        console.error('[Firebase] Error adding service:', err);
+      }
+    }
+
     if (isBackendConnected) {
-      const created = await safeFetchJson<ServiceCategory>('/api/services', {
+      await safeFetchJson<ServiceCategory>('/api/services', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(serviceData),
       });
-      if (created) {
-        setServices(prev => {
-          const updated = [...prev, created];
-          safeSetLocal(STORAGE_KEYS.SERVICES, updated);
-          return updated;
-        });
-        return;
-      }
     }
 
     setServices(prev => {
@@ -412,20 +573,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateService = async (updatedService: ServiceCategory) => {
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('services', updatedService.id, updatedService);
+      } catch (err) {
+        console.error('[Firebase] Error updating service:', err);
+      }
+    }
+
     if (isBackendConnected) {
-      const saved = await safeFetchJson<ServiceCategory>(`/api/services/${updatedService.id}`, {
+      await safeFetchJson<ServiceCategory>(`/api/services/${updatedService.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedService),
       });
-      if (saved) {
-        setServices(prev => {
-          const updated = prev.map(s => s.id === saved.id ? saved : s);
-          safeSetLocal(STORAGE_KEYS.SERVICES, updated);
-          return updated;
-        });
-        return;
-      }
     }
 
     setServices(prev => {
@@ -436,9 +597,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteService = async (serviceId: string) => {
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await deleteFirestoreDoc('services', serviceId);
+      } catch (err) {
+        console.error('[Firebase] Error deleting service:', err);
+      }
+    }
+
     if (isBackendConnected) {
       await safeFetchJson(`/api/services/${serviceId}`, { method: 'DELETE' });
     }
+
     setServices(prev => {
       const updated = prev.filter(s => s.id !== serviceId);
       safeSetLocal(STORAGE_KEYS.SERVICES, updated);
@@ -446,7 +616,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
-  // ======================= PROVIDERS =======================
+  // 4. PROVIDERS
   const addProvider = async (providerData: Omit<ServiceProvider, 'id' | 'totalPaid'>) => {
     const newProvider: ServiceProvider = {
       ...providerData,
@@ -455,20 +625,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       active: true,
     };
 
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('providers', newProvider.id, newProvider);
+      } catch (err) {
+        console.error('[Firebase] Error adding provider:', err);
+      }
+    }
+
     if (isBackendConnected) {
-      const created = await safeFetchJson<ServiceProvider>('/api/providers', {
+      await safeFetchJson<ServiceProvider>('/api/providers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(providerData),
       });
-      if (created) {
-        setProviders(prev => {
-          const updated = [...prev, created];
-          safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
-          return updated;
-        });
-        return;
-      }
     }
 
     setProviders(prev => {
@@ -479,20 +649,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateProvider = async (updatedProvider: ServiceProvider) => {
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('providers', updatedProvider.id, updatedProvider);
+      } catch (err) {
+        console.error('[Firebase] Error updating provider:', err);
+      }
+    }
+
     if (isBackendConnected) {
-      const saved = await safeFetchJson<ServiceProvider>(`/api/providers/${updatedProvider.id}`, {
+      await safeFetchJson<ServiceProvider>(`/api/providers/${updatedProvider.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedProvider),
       });
-      if (saved) {
-        setProviders(prev => {
-          const updated = prev.map(p => p.id === saved.id ? saved : p);
-          safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
-          return updated;
-        });
-        return;
-      }
     }
 
     setProviders(prev => {
@@ -503,9 +673,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteProvider = async (providerId: string) => {
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await deleteFirestoreDoc('providers', providerId);
+      } catch (err) {
+        console.error('[Firebase] Error deleting provider:', err);
+      }
+    }
+
     if (isBackendConnected) {
       await safeFetchJson(`/api/providers/${providerId}`, { method: 'DELETE' });
     }
+
     setProviders(prev => {
       const updated = prev.filter(p => p.id !== providerId);
       safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
@@ -513,7 +692,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
-  // ======================= EXPENSE REQUESTS =======================
+  // 5. EXPENSE REQUESTS
   const createRequest = async (data: {
     title: string;
     description: string;
@@ -574,36 +753,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedAt: now.toISOString(),
     };
 
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('requests', newRequest.id, newRequest);
+      } catch (err) {
+        console.error('[Firebase] Error creating request:', err);
+      }
+    }
+
     if (isBackendConnected) {
-      const created = await safeFetchJson<ExpenseRequest>('/api/requests', {
+      await safeFetchJson<ExpenseRequest>('/api/requests', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orgId,
-          requesterId: currentUser.id,
-          requesterName: currentUser.name,
-          requesterDepartment: currentRole === 'org_admin' ? 'الإدارة العامة' : 'العمليات والتوريد',
-          serviceCategoryId: data.serviceCategoryId,
-          serviceCategoryName: service?.name || 'خدمة عامة',
-          providerId: data.providerId,
-          providerName: provider?.name || 'مورد عام',
-          title: data.title,
-          description: data.description,
-          justification: data.justification,
-          amount: data.amount,
-          currency: data.currency,
-          urgency: data.urgency,
-          attachmentNames: data.attachmentNames,
-        }),
+        body: JSON.stringify(newRequest),
       });
-      if (created) {
-        setRequests(prev => {
-          const updated = [created, ...prev];
-          safeSetLocal(STORAGE_KEYS.REQUESTS, updated);
-          return updated;
-        });
-        return;
-      }
     }
 
     setRequests(prev => {
@@ -617,21 +780,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-    if (isBackendConnected) {
-      const updated = await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}/approve`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ note, actorName: currentUser.name }),
-      });
-      if (updated) {
-        setRequests(prev => {
-          const list = prev.map(r => r.id === updated.id ? updated : r);
-          safeSetLocal(STORAGE_KEYS.REQUESTS, list);
-          return list;
-        });
-        return;
-      }
-    }
+    let targetUpdated: ExpenseRequest | null = null;
 
     setRequests(prev => {
       const list = prev.map(req => {
@@ -659,38 +808,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             timestamp: dateFormatted,
           }
         ];
-        return {
+        const updated: ExpenseRequest = {
           ...req,
           status: 'approved' as const,
           comments,
           timeline,
           updatedAt: now.toISOString(),
         };
+        targetUpdated = updated;
+        return updated;
       });
       safeSetLocal(STORAGE_KEYS.REQUESTS, list);
       return list;
     });
+
+    if (targetUpdated && isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('requests', requestId, targetUpdated);
+      } catch (err) {
+        console.error('[Firebase] Error approving request:', err);
+      }
+    }
+
+    if (isBackendConnected) {
+      await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}/approve`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note, actorName: currentUser.name }),
+      });
+    }
   };
 
   const rejectRequest = async (requestId: string, reason: string) => {
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-    if (isBackendConnected) {
-      const updated = await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}/reject`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason, actorName: currentUser.name }),
-      });
-      if (updated) {
-        setRequests(prev => {
-          const list = prev.map(r => r.id === updated.id ? updated : r);
-          safeSetLocal(STORAGE_KEYS.REQUESTS, list);
-          return list;
-        });
-        return;
-      }
-    }
+    let targetUpdated: ExpenseRequest | null = null;
 
     setRequests(prev => {
       const list = prev.map(req => {
@@ -718,7 +871,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             timestamp: dateFormatted,
           }
         ];
-        return {
+        const updated: ExpenseRequest = {
           ...req,
           status: 'rejected' as const,
           rejectionReason: reason,
@@ -726,31 +879,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           timeline,
           updatedAt: now.toISOString(),
         };
+        targetUpdated = updated;
+        return updated;
       });
       safeSetLocal(STORAGE_KEYS.REQUESTS, list);
       return list;
     });
+
+    if (targetUpdated && isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('requests', requestId, targetUpdated);
+      } catch (err) {
+        console.error('[Firebase] Error rejecting request:', err);
+      }
+    }
+
+    if (isBackendConnected) {
+      await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}/reject`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason, actorName: currentUser.name }),
+      });
+    }
   };
 
   const requestClarification = async (requestId: string, question: string) => {
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-    if (isBackendConnected) {
-      const updated = await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}/clarify`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, actorName: currentUser.name }),
-      });
-      if (updated) {
-        setRequests(prev => {
-          const list = prev.map(r => r.id === updated.id ? updated : r);
-          safeSetLocal(STORAGE_KEYS.REQUESTS, list);
-          return list;
-        });
-        return;
-      }
-    }
+    let targetUpdated: ExpenseRequest | null = null;
 
     setRequests(prev => {
       const list = prev.map(req => {
@@ -778,38 +935,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             timestamp: dateFormatted,
           }
         ];
-        return {
+        const updated: ExpenseRequest = {
           ...req,
           status: 'clarification_requested' as const,
           comments,
           timeline,
           updatedAt: now.toISOString(),
         };
+        targetUpdated = updated;
+        return updated;
       });
       safeSetLocal(STORAGE_KEYS.REQUESTS, list);
       return list;
     });
+
+    if (targetUpdated && isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('requests', requestId, targetUpdated);
+      } catch (err) {
+        console.error('[Firebase] Error requesting clarification:', err);
+      }
+    }
+
+    if (isBackendConnected) {
+      await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}/clarify`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, actorName: currentUser.name }),
+      });
+    }
   };
 
   const replyClarification = async (requestId: string, replyText: string, attachmentName?: string) => {
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-    if (isBackendConnected) {
-      const updated = await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}/reply`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ replyText, attachmentName, actorName: currentUser.name }),
-      });
-      if (updated) {
-        setRequests(prev => {
-          const list = prev.map(r => r.id === updated.id ? updated : r);
-          safeSetLocal(STORAGE_KEYS.REQUESTS, list);
-          return list;
-        });
-        return;
-      }
-    }
+    let targetUpdated: ExpenseRequest | null = null;
 
     setRequests(prev => {
       const list = prev.map(req => {
@@ -848,7 +1009,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             timestamp: dateFormatted,
           }
         ];
-        return {
+        const updated: ExpenseRequest = {
           ...req,
           status: 'pending' as const,
           attachments,
@@ -856,10 +1017,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           timeline,
           updatedAt: now.toISOString(),
         };
+        targetUpdated = updated;
+        return updated;
       });
       safeSetLocal(STORAGE_KEYS.REQUESTS, list);
       return list;
     });
+
+    if (targetUpdated && isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('requests', requestId, targetUpdated);
+      } catch (err) {
+        console.error('[Firebase] Error replying to clarification:', err);
+      }
+    }
+
+    if (isBackendConnected) {
+      await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}/reply`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ replyText, attachmentName, actorName: currentUser.name }),
+      });
+    }
   };
 
   const disburseRequest = async (
@@ -873,27 +1052,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       details.paymentMethod === 'bank_transfer' ? 'تحويل بنكي' :
       details.paymentMethod === 'cash' ? 'نقداً / خزينة' : 'شيك مصرفي';
 
-    if (isBackendConnected) {
-      const updated = await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}/disburse`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...details, actorName: currentUser.name }),
-      });
-      if (updated) {
-        setRequests(prev => {
-          const list = prev.map(r => r.id === updated.id ? updated : r);
-          safeSetLocal(STORAGE_KEYS.REQUESTS, list);
-          return list;
-        });
-        await refreshData();
-        return;
-      }
-    }
-
-    // Local fallback: update request, service spentAmount, provider totalPaid
     let disbursedAmount = 0;
     let targetServiceId = '';
     let targetProviderId = '';
+    let targetUpdated: ExpenseRequest | null = null;
 
     setRequests(prev => {
       const list = prev.map(req => {
@@ -923,33 +1085,68 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         ];
 
-        return {
+        const updated: ExpenseRequest = {
           ...req,
           status: 'disbursed' as const,
           disbursement,
           timeline,
           updatedAt: now.toISOString(),
         };
+        targetUpdated = updated;
+        return updated;
       });
       safeSetLocal(STORAGE_KEYS.REQUESTS, list);
       return list;
     });
 
+    // Update service and provider spentAmount / totalPaid
     if (disbursedAmount > 0) {
       if (targetServiceId) {
         setServices(prev => {
-          const updated = prev.map(s => s.id === targetServiceId ? { ...s, spentAmount: s.spentAmount + disbursedAmount } : s);
+          const updated = prev.map(s => {
+            if (s.id !== targetServiceId) return s;
+            const newSpent = s.spentAmount + disbursedAmount;
+            const newObj = { ...s, spentAmount: newSpent };
+            if (isFirebaseConfigured() && getDb()) {
+              setFirestoreDoc('services', s.id, newObj).catch(console.error);
+            }
+            return newObj;
+          });
           safeSetLocal(STORAGE_KEYS.SERVICES, updated);
           return updated;
         });
       }
       if (targetProviderId) {
         setProviders(prev => {
-          const updated = prev.map(p => p.id === targetProviderId ? { ...p, totalPaid: p.totalPaid + disbursedAmount } : p);
+          const updated = prev.map(p => {
+            if (p.id !== targetProviderId) return p;
+            const newPaid = p.totalPaid + disbursedAmount;
+            const newObj = { ...p, totalPaid: newPaid };
+            if (isFirebaseConfigured() && getDb()) {
+              setFirestoreDoc('providers', p.id, newObj).catch(console.error);
+            }
+            return newObj;
+          });
           safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
           return updated;
         });
       }
+    }
+
+    if (targetUpdated && isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('requests', requestId, targetUpdated);
+      } catch (err) {
+        console.error('[Firebase] Error disbursing request in Firestore:', err);
+      }
+    }
+
+    if (isBackendConnected) {
+      await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}/disburse`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...details, actorName: currentUser.name }),
+      });
     }
   };
 
@@ -969,9 +1166,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activeTab,
         loading,
         isBackendConnected,
+        isFirebaseConnected,
+        isFirebaseModalOpen,
         setActiveOrgId,
         setCurrentRole,
         setActiveTab,
+        openFirebaseModal,
+        closeFirebaseModal,
         addOrganization,
         addMember,
         removeMember,
