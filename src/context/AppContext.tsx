@@ -10,13 +10,6 @@ import {
   RequestAttachment
 } from '../types';
 import {
-  initialOrganizations,
-  initialMembers,
-  initialServices,
-  initialProviders,
-  initialRequests
-} from '../data/initialData';
-import {
   isFirebaseConfigured,
   initFirebase,
   getDb,
@@ -26,8 +19,15 @@ import {
   onSnapshot,
   doc,
   setDoc,
-  type Firestore
+  type Firestore,
+  signInWithGoogle,
+  logoutUser,
+  subscribeToAuth,
+  purgeSampleDataFromFirestore,
+  type FirebaseUser,
 } from '../lib/firebase';
+
+export { signInWithGoogle, logoutUser } from '../lib/firebase';
 
 const STORAGE_KEYS = {
   ORGS: 'expenses_organizations_v2',
@@ -40,11 +40,31 @@ const STORAGE_KEYS = {
   ACTIVE_TAB: 'expenses_active_tab_v2',
 };
 
+const DUMMY_IDS = new Set([
+  'org-ofq', 'org-rwd', 'mem-1', 'mem-2', 'mem-3',
+  'srv-cloud', 'srv-software', 'srv-hardware', 'srv-legal', 'srv-mkt', 'srv-travel',
+  'prov-aws', 'prov-github', 'prov-jarir', 'prov-law',
+  'req-101', 'req-102', 'req-103'
+]);
+
 const safeGetLocal = <T,>(key: string, fallback: T): T => {
   try {
     const saved = localStorage.getItem(key);
     if (!saved) return fallback;
-    return JSON.parse(saved) as T;
+    const parsed = JSON.parse(saved);
+    if (Array.isArray(parsed)) {
+      const cleaned = parsed.filter((item: any) => {
+        if (!item || typeof item !== 'object') return false;
+        if (DUMMY_IDS.has(item.id) || DUMMY_IDS.has(item.orgId)) return false;
+        if (item.name && typeof item.name === 'string' && item.name.includes('أفق التقنية')) return false;
+        return true;
+      });
+      if (cleaned.length !== parsed.length) {
+        localStorage.setItem(key, JSON.stringify(cleaned));
+      }
+      return cleaned as unknown as T;
+    }
+    return parsed as T;
   } catch (err) {
     console.warn(`[ExpenseSystem] Error parsing ${key} from localStorage:`, err);
     return fallback;
@@ -80,29 +100,13 @@ const safeFetchJson = async <T = any>(url: string, options?: RequestInit): Promi
   }
 };
 
-// Seed helper for fresh Firestore deployments
-async function seedInitialDataToFirestore(database: Firestore): Promise<void> {
-  try {
-    const batch = [
-      ...initialOrganizations.map(o => setDoc(doc(database, 'organizations', o.id), o)),
-      ...initialMembers.map(m => setDoc(doc(database, 'members', m.id), m)),
-      ...initialServices.map(s => setDoc(doc(database, 'services', s.id), s)),
-      ...initialProviders.map(p => setDoc(doc(database, 'providers', p.id), p)),
-      ...initialRequests.map(r => setDoc(doc(database, 'requests', r.id), r)),
-    ];
-    await Promise.all(batch);
-    console.log('[Firebase] Successfully seeded sample data to Firestore');
-  } catch (err) {
-    console.error('[Firebase] Failed to seed initial data:', err);
-  }
-}
-
 interface AppContextType {
   organizations: Organization[];
   activeOrgId: string;
   activeOrg?: Organization;
   users: User[];
   currentUser: User;
+  firebaseUser: FirebaseUser | null;
   currentRole: 'org_admin' | 'employee';
   members: OrganizationMember[];
   services: ServiceCategory[];
@@ -119,6 +123,8 @@ interface AppContextType {
   setActiveTab: (tab: string) => void;
   openFirebaseModal: () => void;
   closeFirebaseModal: () => void;
+  signInWithGoogle: () => Promise<any>;
+  logoutUser: () => Promise<void>;
   
   // Organizations
   addOrganization: (org: Omit<Organization, 'id' | 'createdAt'>) => Promise<void>;
@@ -163,13 +169,18 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Initialize state with localStorage or rich initialData
+  // Initialize state cleanly with zero fake data
   const [organizations, setOrganizations] = useState<Organization[]>(() => {
-    return safeGetLocal<Organization[]>(STORAGE_KEYS.ORGS, initialOrganizations);
+    return safeGetLocal<Organization[]>(STORAGE_KEYS.ORGS, []);
   });
 
   const [activeOrgId, setActiveOrgIdState] = useState<string>(() => {
-    return localStorage.getItem(STORAGE_KEYS.ACTIVE_ORG) || 'org-ofq';
+    const saved = localStorage.getItem(STORAGE_KEYS.ACTIVE_ORG);
+    if (saved === 'org-ofq' || saved === 'org-rwd') {
+      localStorage.removeItem(STORAGE_KEYS.ACTIVE_ORG);
+      return '';
+    }
+    return saved || '';
   });
 
   const [currentRole, setCurrentRoleState] = useState<'org_admin' | 'employee'>(() => {
@@ -182,19 +193,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
 
   const [members, setMembers] = useState<OrganizationMember[]>(() => {
-    return safeGetLocal<OrganizationMember[]>(STORAGE_KEYS.MEMBERS, initialMembers);
+    return safeGetLocal<OrganizationMember[]>(STORAGE_KEYS.MEMBERS, []);
   });
 
   const [services, setServices] = useState<ServiceCategory[]>(() => {
-    return safeGetLocal<ServiceCategory[]>(STORAGE_KEYS.SERVICES, initialServices);
+    return safeGetLocal<ServiceCategory[]>(STORAGE_KEYS.SERVICES, []);
   });
 
   const [providers, setProviders] = useState<ServiceProvider[]>(() => {
-    return safeGetLocal<ServiceProvider[]>(STORAGE_KEYS.PROVIDERS, initialProviders);
+    return safeGetLocal<ServiceProvider[]>(STORAGE_KEYS.PROVIDERS, []);
   });
 
   const [requests, setRequests] = useState<ExpenseRequest[]>(() => {
-    return safeGetLocal<ExpenseRequest[]>(STORAGE_KEYS.REQUESTS, initialRequests);
+    return safeGetLocal<ExpenseRequest[]>(STORAGE_KEYS.REQUESTS, []);
   });
 
   const [loading, setLoading] = useState(false);
@@ -231,26 +242,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {}
   };
 
-  // Dynamic user derived from active organization and role
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+
+  // Subscribe to Firebase Authentication state changes
+  useEffect(() => {
+    const unsubscribe = subscribeToAuth((user) => {
+      setFirebaseUser(user);
+    });
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
+
+  // Dynamic user derived from real active organization member or authenticated Google user
   const activeOrg = organizations.find(o => o.id === activeOrgId);
   const activeOrgMembers = members.filter(m => activeOrgId === 'all' || m.orgId === activeOrgId);
   
   const currentMember = activeOrgMembers.find(m => m.role === currentRole) || activeOrgMembers[0];
-  const currentUser: User = {
-    id: currentMember?.userId || (currentRole === 'org_admin' ? 'user-admin' : 'user-emp'),
-    name: currentMember?.userName || (currentRole === 'org_admin' ? 'م. فيصل الغامدي' : 'هند السالم'),
-    email: currentMember?.userEmail || (currentRole === 'org_admin' ? 'admin@ofuq-tech.sa' : 'hind@ofuq-tech.sa'),
+  const currentUser: User = firebaseUser ? {
+    id: firebaseUser.uid,
+    name: firebaseUser.displayName || currentMember?.userName || firebaseUser.email?.split('@')[0] || 'مستخدم Google',
+    email: firebaseUser.email || currentMember?.userEmail || '',
     role: currentRole,
-    phone: '+966 50 000 0000',
+    avatar: firebaseUser.photoURL || undefined,
+    phone: firebaseUser.phoneNumber || '',
+  } : {
+    id: currentMember?.userId || (currentRole === 'org_admin' ? 'admin-user' : 'employee-user'),
+    name: currentMember?.userName || (currentRole === 'org_admin' ? 'مدير المؤسسة' : 'الموظف / طالب الصرف'),
+    email: currentMember?.userEmail || '',
+    role: currentRole,
   };
 
   const users: User[] = [
-    { id: 'user-admin', name: 'المدير العام (الإدارة والاعتماد)', email: 'admin@ofuq-tech.sa', role: 'org_admin' },
-    { id: 'user-emp', name: 'الموظف (طالب الصرف والمتابعة)', email: 'hind@ofuq-tech.sa', role: 'employee' }
+    ...(firebaseUser ? [{
+      id: firebaseUser.uid,
+      name: `${firebaseUser.displayName || 'مستخدم Google'} (الحالي)`,
+      email: firebaseUser.email || '',
+      role: currentRole,
+      avatar: firebaseUser.photoURL || undefined,
+    }] : []),
+    ...members.map(m => ({
+      id: m.userId,
+      name: m.userName,
+      email: m.userEmail,
+      role: m.role,
+    }))
   ];
+  if (users.length === 0) {
+    users.push(currentUser);
+  }
 
   // =========================================================================
-  // Real-Time Firebase Listeners (Top Priority if Configured)
+  // Real-Time Firebase Listeners (Cloud Firestore First)
   // =========================================================================
   useEffect(() => {
     if (!isFirebaseConfigured()) {
@@ -265,21 +308,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setIsFirebaseConnected(true);
-    let isSeeding = false;
+
+    // One-time cleanup of any legacy sample mock data from Firestore
+    purgeSampleDataFromFirestore().catch(() => {});
 
     // 1. Organizations Listener
     const unsubOrgs = onSnapshot(collection(db, 'organizations'), (snapshot) => {
-      if (snapshot.empty && !isSeeding) {
-        isSeeding = true;
-        seedInitialDataToFirestore(db).finally(() => {
-          isSeeding = false;
-        });
-        return;
-      }
-      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Organization));
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as Organization))
+        .filter(o => !DUMMY_IDS.has(o.id));
+      
+      setOrganizations(list);
+      safeSetLocal(STORAGE_KEYS.ORGS, list);
+
       if (list.length > 0) {
-        setOrganizations(list);
-        safeSetLocal(STORAGE_KEYS.ORGS, list);
+        if (!activeOrgId || !list.some(o => o.id === activeOrgId)) {
+          setActiveOrgId(list[0].id);
+        }
+      } else {
+        setActiveOrgId('');
       }
     }, (err) => {
       console.warn('[Firebase] Organizations onSnapshot error:', err);
@@ -288,45 +335,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // 2. Members Listener
     const unsubMembers = onSnapshot(collection(db, 'members'), (snapshot) => {
-      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as OrganizationMember));
-      if (list.length > 0) {
-        setMembers(list);
-        safeSetLocal(STORAGE_KEYS.MEMBERS, list);
-      }
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as OrganizationMember))
+        .filter(m => !DUMMY_IDS.has(m.id) && !DUMMY_IDS.has(m.orgId));
+      setMembers(list);
+      safeSetLocal(STORAGE_KEYS.MEMBERS, list);
     }, (err) => {
       console.warn('[Firebase] Members onSnapshot error:', err);
     });
 
     // 3. Services Listener
     const unsubServices = onSnapshot(collection(db, 'services'), (snapshot) => {
-      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as ServiceCategory));
-      if (list.length > 0) {
-        setServices(list);
-        safeSetLocal(STORAGE_KEYS.SERVICES, list);
-      }
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as ServiceCategory))
+        .filter(s => !DUMMY_IDS.has(s.id) && !DUMMY_IDS.has(s.orgId));
+      setServices(list);
+      safeSetLocal(STORAGE_KEYS.SERVICES, list);
     }, (err) => {
       console.warn('[Firebase] Services onSnapshot error:', err);
     });
 
     // 4. Providers Listener
     const unsubProviders = onSnapshot(collection(db, 'providers'), (snapshot) => {
-      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as ServiceProvider));
-      if (list.length > 0) {
-        setProviders(list);
-        safeSetLocal(STORAGE_KEYS.PROVIDERS, list);
-      }
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as ServiceProvider))
+        .filter(p => !DUMMY_IDS.has(p.id) && !DUMMY_IDS.has(p.orgId));
+      setProviders(list);
+      safeSetLocal(STORAGE_KEYS.PROVIDERS, list);
     }, (err) => {
       console.warn('[Firebase] Providers onSnapshot error:', err);
     });
 
     // 5. Requests Listener
     const unsubRequests = onSnapshot(collection(db, 'requests'), (snapshot) => {
-      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as ExpenseRequest));
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as ExpenseRequest))
+        .filter(r => !DUMMY_IDS.has(r.id) && !DUMMY_IDS.has(r.orgId));
       list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      if (list.length > 0) {
-        setRequests(list);
-        safeSetLocal(STORAGE_KEYS.REQUESTS, list);
-      }
+      setRequests(list);
+      safeSetLocal(STORAGE_KEYS.REQUESTS, list);
     }, (err) => {
       console.warn('[Firebase] Requests onSnapshot error:', err);
     });
@@ -399,33 +446,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     refreshData();
   }, [refreshData]);
 
-  // Reset to sample data helper
+  // Reset / Clear helper
   const resetToSampleData = async () => {
-    setOrganizations(initialOrganizations);
-    setMembers(initialMembers);
-    setServices(initialServices);
-    setProviders(initialProviders);
-    setRequests(initialRequests);
-    setActiveOrgId('org-ofq');
+    setOrganizations([]);
+    setMembers([]);
+    setServices([]);
+    setProviders([]);
+    setRequests([]);
+    setActiveOrgId('');
     setCurrentRole('org_admin');
     setActiveTab('dashboard');
 
-    safeSetLocal(STORAGE_KEYS.ORGS, initialOrganizations);
-    safeSetLocal(STORAGE_KEYS.MEMBERS, initialMembers);
-    safeSetLocal(STORAGE_KEYS.SERVICES, initialServices);
-    safeSetLocal(STORAGE_KEYS.PROVIDERS, initialProviders);
-    safeSetLocal(STORAGE_KEYS.REQUESTS, initialRequests);
+    safeSetLocal(STORAGE_KEYS.ORGS, []);
+    safeSetLocal(STORAGE_KEYS.MEMBERS, []);
+    safeSetLocal(STORAGE_KEYS.SERVICES, []);
+    safeSetLocal(STORAGE_KEYS.PROVIDERS, []);
+    safeSetLocal(STORAGE_KEYS.REQUESTS, []);
     try {
-      localStorage.setItem(STORAGE_KEYS.ACTIVE_ORG, 'org-ofq');
+      localStorage.removeItem(STORAGE_KEYS.ACTIVE_ORG);
       localStorage.setItem(STORAGE_KEYS.ROLE, 'org_admin');
       localStorage.setItem(STORAGE_KEYS.ACTIVE_TAB, 'dashboard');
     } catch {}
 
-    // If Firebase is active, reset Cloud Firestore as well
-    const database = getDb();
-    if (database && isFirebaseConfigured()) {
-      await seedInitialDataToFirestore(database);
-    }
+    // Purge any legacy sample mock data from Cloud Firestore
+    await purgeSampleDataFromFirestore();
   };
 
   // =========================================================================
@@ -540,6 +584,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return updated;
     });
   };
+
+  // Auto-sync Google user's role and organization membership with Firestore
+  useEffect(() => {
+    if (!firebaseUser || !firebaseUser.email) return;
+
+    const userEmail = firebaseUser.email.toLowerCase();
+    
+    // Check if user's email matches an OrganizationMember in Firestore
+    const activeOrgMember = members.find(
+      m => (activeOrgId === 'all' || m.orgId === activeOrgId) && m.userEmail?.toLowerCase() === userEmail
+    );
+    const matchingMember = activeOrgMember || members.find(
+      m => m.userEmail?.toLowerCase() === userEmail
+    );
+
+    if (matchingMember) {
+      if (matchingMember.role === 'org_admin' || matchingMember.role === 'employee') {
+        setCurrentRoleState(matchingMember.role);
+        try {
+          localStorage.setItem(STORAGE_KEYS.ROLE, matchingMember.role);
+        } catch {}
+      }
+    } else {
+      // If not yet a member, default to employee or let them join the active organization
+      setCurrentRoleState('employee');
+      try {
+        localStorage.setItem(STORAGE_KEYS.ROLE, 'employee');
+      } catch {}
+
+      const targetOrgId = activeOrgId === 'all' ? (organizations[0]?.id || 'org-ofq') : activeOrgId;
+      if (targetOrgId && organizations.length > 0) {
+        const isAlreadyInOrg = members.some(
+          m => m.orgId === targetOrgId && m.userEmail?.toLowerCase() === userEmail
+        );
+        if (!isAlreadyInOrg) {
+          const newMemberData: Omit<OrganizationMember, 'id' | 'joinedAt'> = {
+            orgId: targetOrgId,
+            userId: firebaseUser.uid,
+            userName: firebaseUser.displayName || userEmail.split('@')[0],
+            userEmail: firebaseUser.email,
+            role: 'employee',
+            department: 'العمليات والتوريد',
+            jobTitle: 'موظف',
+            active: true,
+          };
+          addMember(newMemberData).catch(err => {
+            console.warn('[AppContext] Failed to auto-join organization:', err);
+          });
+        }
+      }
+    }
+  }, [firebaseUser, members, activeOrgId, organizations]);
 
   // 3. SERVICES
   const addService = async (serviceData: Omit<ServiceCategory, 'id' | 'spentAmount'>) => {
@@ -706,7 +802,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }) => {
     const service = services.find(s => s.id === data.serviceCategoryId);
     const provider = providers.find(p => p.id === data.providerId);
-    const orgId = activeOrgId === 'all' ? (organizations[0]?.id || 'org-ofq') : activeOrgId;
+    const orgId = activeOrgId && activeOrgId !== 'all' 
+      ? activeOrgId 
+      : (organizations[0]?.id || '');
 
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -1150,6 +1248,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const handleSignInWithGoogle = async () => {
+    return await signInWithGoogle();
+  };
+
+  const handleLogoutUser = async () => {
+    await logoutUser();
+    setFirebaseUser(null);
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -1158,6 +1265,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activeOrg,
         users,
         currentUser,
+        firebaseUser,
         currentRole,
         members,
         services,
@@ -1173,6 +1281,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setActiveTab,
         openFirebaseModal,
         closeFirebaseModal,
+        signInWithGoogle: handleSignInWithGoogle,
+        logoutUser: handleLogoutUser,
         addOrganization,
         addMember,
         removeMember,

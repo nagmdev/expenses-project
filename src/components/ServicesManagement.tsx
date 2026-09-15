@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 
 export const ServicesManagement: React.FC = () => {
-  const { services, activeOrgId, activeOrg, addService, updateService, deleteService } = useApp();
+  const { services, activeOrgId, activeOrg, organizations, addService, updateService, deleteService } = useApp();
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingService, setEditingService] = useState<ServiceCategory | null>(null);
@@ -67,7 +67,7 @@ export const ServicesManagement: React.FC = () => {
       });
     } else {
       addService({
-        orgId: activeOrgId === 'all' ? 'org-1' : activeOrgId,
+        orgId: activeOrgId && activeOrgId !== 'all' ? activeOrgId : (activeOrg?.id || organizations[0]?.id || ''),
         name: name.trim(),
         code: code.trim(),
         description: description.trim(),
@@ -185,6 +185,21 @@ export const ServicesManagement: React.FC = () => {
             </div>
           );
         })}
+        {orgServices.length === 0 && (
+          <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+            <Layers className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+            <h3 className="font-bold text-slate-800 text-sm">لا توجد بنود خدمات مسجلة بعد</h3>
+            <p className="text-xs text-slate-400 mt-1 mb-4">أضف بنود الخدمات ومراكز التكلفة لتحديد ميزانية لكل بند وتتبع المصروفات بدقة</p>
+            <button
+              type="button"
+              onClick={handleOpenAdd}
+              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+            >
+              <Plus className="h-4 w-4" />
+              <span>إضافة أول بند خدمة الآن</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Add/Edit Modal */}

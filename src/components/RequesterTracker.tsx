@@ -27,7 +27,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
   onOpenNewRequest, 
   onSelectRequest 
 }) => {
-  const { requests, currentUser, replyClarification, activeOrgId } = useApp();
+  const { requests, currentUser, currentRole, replyClarification, activeOrgId } = useApp();
 
   const [selectedReqId, setSelectedReqId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
@@ -35,10 +35,10 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Filter requests submitted by this employee or in current org
+  // Filter requests submitted by this employee or all in current org if admin
   const myRequests = requests.filter(r => {
     const matchOrg = activeOrgId === 'all' || r.orgId === activeOrgId;
-    const matchUser = r.requesterId === currentUser.id;
+    const matchUser = r.requesterId === currentUser.id || currentRole === 'org_admin';
     return matchOrg && matchUser;
   });
 

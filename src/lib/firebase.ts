@@ -1,5 +1,13 @@
 import { initializeApp, getApps, getApp, deleteApp, type FirebaseApp, type FirebaseOptions } from 'firebase/app';
 import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
+  onAuthStateChanged,
+  type User as FirebaseUser,
+} from 'firebase/auth';
+import {
   getFirestore,
   collection,
   doc,
@@ -171,6 +179,71 @@ export async function resetFirebaseApp(): Promise<void> {
 // Initial bootstrap
 const { app, db } = initFirebase();
 export { app, db };
+
+// Firebase Authentication
+export const auth = app ? getAuth(app) : getAuth();
+export const googleProvider = new GoogleAuthProvider();
+
+/**
+ * Sign in using Google popup provider
+ */
+export async function signInWithGoogle() {
+  return signInWithPopup(auth, googleProvider);
+}
+
+/**
+ * Sign out the currently authenticated user
+ */
+export async function logoutUser(): Promise<void> {
+  await signOut(auth);
+}
+
+/**
+ * Subscribe to auth state changes
+ */
+export function subscribeToAuth(callback: (user: FirebaseUser | null) => void) {
+  return onAuthStateChanged(auth, callback);
+}
+
+export type { FirebaseUser };
+
+/**
+ * Purge legacy dummy/mock records from Firestore (e.g. org-ofq, org-rwd, req-101, etc.)
+ */
+export async function purgeSampleDataFromFirestore(): Promise<void> {
+  const database = getDb();
+  if (!database) return;
+
+  const sampleTargets = [
+    { col: 'organizations', id: 'org-ofq' },
+    { col: 'organizations', id: 'org-rwd' },
+    { col: 'members', id: 'mem-1' },
+    { col: 'members', id: 'mem-2' },
+    { col: 'members', id: 'mem-3' },
+    { col: 'services', id: 'srv-cloud' },
+    { col: 'services', id: 'srv-software' },
+    { col: 'services', id: 'srv-hardware' },
+    { col: 'services', id: 'srv-legal' },
+    { col: 'services', id: 'srv-mkt' },
+    { col: 'services', id: 'srv-travel' },
+    { col: 'providers', id: 'prov-aws' },
+    { col: 'providers', id: 'prov-github' },
+    { col: 'providers', id: 'prov-jarir' },
+    { col: 'providers', id: 'prov-law' },
+    { col: 'requests', id: 'req-101' },
+    { col: 'requests', id: 'req-102' },
+    { col: 'requests', id: 'req-103' },
+  ];
+
+  try {
+    await Promise.allSettled(
+      sampleTargets.map(t => deleteDoc(doc(database, t.col, t.id)))
+    );
+    console.log('[Firebase] Purged any legacy sample mock data from Cloud Firestore.');
+  } catch (err) {
+    console.warn('[Firebase] Error purging sample mock data:', err);
+  }
+}
 
 /**
  * Get Firestore database instance safely

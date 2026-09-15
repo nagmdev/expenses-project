@@ -9,11 +9,14 @@ interface NewRequestModalProps {
 
 export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClose }) => {
   const { 
+    organizations,
     services, 
     providers, 
     activeOrg, 
     activeOrgId, 
     createRequest, 
+    addService,
+    addProvider,
     currentUser 
   } = useApp();
 
@@ -25,29 +28,91 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [justification, setJustification] = useState('');
   const [amount, setAmount] = useState('');
   const [serviceCategoryId, setServiceCategoryId] = useState(orgServices[0]?.id || '');
+  const [customServiceName, setCustomServiceName] = useState('');
   const [providerId, setProviderId] = useState(orgProviders[0]?.id || '');
+  const [customProviderName, setCustomProviderName] = useState('');
   const [urgency, setUrgency] = useState<'low' | 'medium' | 'high'>('medium');
-  const [attachmentName, setAttachmentName] = useState('عرض_سعر_أولي.pdf');
+  const [attachmentName, setAttachmentName] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  // Sync default selection when services or providers load
+  React.useEffect(() => {
+    if (!serviceCategoryId && orgServices.length > 0) {
+      setServiceCategoryId(orgServices[0].id);
+    }
+  }, [orgServices, serviceCategoryId]);
+
+  React.useEffect(() => {
+    if (!providerId && orgProviders.length > 0) {
+      setProviderId(orgProviders[0].id);
+    }
+  }, [orgProviders, providerId]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const currentEffectiveOrgId = activeOrgId && activeOrgId !== 'all' ? activeOrgId : (organizations[0]?.id || '');
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !amount || Number(amount) <= 0) return;
+    if (!title.trim() || !amount || Number(amount) <= 0 || submitting) return;
 
-    createRequest({
-      title: title.trim(),
-      description: description.trim(),
-      justification: justification.trim(),
-      amount: Number(amount),
-      currency: activeOrg?.currency || 'SAR',
-      serviceCategoryId: serviceCategoryId || orgServices[0]?.id,
-      providerId: providerId || orgProviders[0]?.id,
-      urgency,
-      attachmentNames: attachmentName ? [attachmentName] : [],
-    });
+    setSubmitting(true);
+    try {
+      let finalServiceId = serviceCategoryId;
+      if (!finalServiceId && customServiceName.trim()) {
+        const newSrvId = `srv-${Date.now()}`;
+        await addService({
+          orgId: currentEffectiveOrgId,
+          name: customServiceName.trim(),
+          code: `SRV-${Date.now().toString().slice(-4)}`,
+          description: 'بند خدمة جديد مضاف تلقائياً مع الطلب',
+          budgetLimit: 50000,
+          color: 'emerald',
+          iconName: 'folder',
+        });
+        finalServiceId = newSrvId;
+      }
 
-    onClose();
+      let finalProviderId = providerId;
+      if (!finalProviderId && customProviderName.trim()) {
+        const newProvId = `prov-${Date.now()}`;
+        await addProvider({
+          orgId: currentEffectiveOrgId,
+          name: customProviderName.trim(),
+          serviceCategoryIds: finalServiceId ? [finalServiceId] : [],
+          serviceCategoryNames: customServiceName.trim() ? [customServiceName.trim()] : [],
+          contactPerson: 'مسؤول المبيعات',
+          phone: '+966 50 000 0000',
+          email: 'vendor@example.sa',
+          taxNumber: '300000000000003',
+          crNumber: '1010000000',
+          bankName: 'مصرف الراجحي',
+          iban: 'SA0000000000000000000000',
+          address: 'المملكة العربية السعودية',
+          rating: 5,
+          active: true,
+        });
+        finalProviderId = newProvId;
+      }
+
+      await createRequest({
+        title: title.trim(),
+        description: description.trim(),
+        justification: justification.trim(),
+        amount: Number(amount),
+        currency: activeOrg?.currency || 'SAR',
+        serviceCategoryId: finalServiceId || orgServices[0]?.id || 'srv-default',
+        providerId: finalProviderId || orgProviders[0]?.id || 'prov-default',
+        urgency,
+        attachmentNames: attachmentName.trim() ? [attachmentName.trim()] : ['فاتورة_عرض_سعر.pdf'],
+      });
+
+      onClose();
+    } catch (err) {
+      console.error('[NewRequestModal] Error creating request:', err);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -92,31 +157,57 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           {/* Service & Provider */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block font-bold text-slate-700 mb-1">بند الخدمة / مركز التكلفة *</label>
-              <select
-                required
-                value={serviceCategoryId}
-                onChange={(e) => setServiceCategoryId(e.target.value)}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none"
-              >
-                {orgServices.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-              </select>
+              <label className="block font-bold text-slate-700 mb-1">
+                بند الخدمة / مركز التكلفة *
+              </label>
+              {orgServices.length > 0 ? (
+                <select
+                  required
+                  value={serviceCategoryId}
+                  onChange={(e) => setServiceCategoryId(e.target.value)}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none"
+                >
+                  {orgServices.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  required
+                  value={customServiceName}
+                  onChange={(e) => setCustomServiceName(e.target.value)}
+                  placeholder="اكتب اسم البند (مثال: برمجيات، اتصالات، تجهيزات)"
+                  className="w-full p-2.5 bg-slate-50 border border-emerald-300 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 text-slate-900"
+                />
+              )}
             </div>
 
             <div>
-              <label className="block font-bold text-slate-700 mb-1">مقدم الخدمة / المورد *</label>
-              <select
-                required
-                value={providerId}
-                onChange={(e) => setProviderId(e.target.value)}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none"
-              >
-                {orgProviders.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
+              <label className="block font-bold text-slate-700 mb-1">
+                مقدم الخدمة / المورد *
+              </label>
+              {orgProviders.length > 0 ? (
+                <select
+                  required
+                  value={providerId}
+                  onChange={(e) => setProviderId(e.target.value)}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none"
+                >
+                  {orgProviders.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  required
+                  value={customProviderName}
+                  onChange={(e) => setCustomProviderName(e.target.value)}
+                  placeholder="اكتب اسم المورد (مثال: شركة الاتصالات، جرير، أمازون)"
+                  className="w-full p-2.5 bg-slate-50 border border-emerald-300 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 text-slate-900"
+                />
+              )}
             </div>
           </div>
 

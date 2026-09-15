@@ -43,12 +43,20 @@ export const OrganizationsManagement: React.FC<OrganizationsManagementProps> = (
   const [orgDescription, setOrgDescription] = useState('');
 
   // New Member Form
-  const [selectedOrgForMember, setSelectedOrgForMember] = useState(activeOrgId === 'all' ? 'org-1' : activeOrgId);
+  const [selectedOrgForMember, setSelectedOrgForMember] = useState(
+    activeOrgId && activeOrgId !== 'all' ? activeOrgId : (organizations[0]?.id || '')
+  );
   const [memberName, setMemberName] = useState('');
   const [memberEmail, setMemberEmail] = useState('');
   const [memberRole, setMemberRole] = useState<'org_admin' | 'employee'>('employee');
   const [department, setDepartment] = useState('الشؤون المالية والإدارية');
   const [jobTitle, setJobTitle] = useState('محاسب ومسؤول عهد');
+
+  React.useEffect(() => {
+    if ((!selectedOrgForMember || selectedOrgForMember === 'org-1') && organizations.length > 0) {
+      setSelectedOrgForMember(organizations[0].id);
+    }
+  }, [organizations, selectedOrgForMember]);
 
   const handleCreateOrg = (e: React.FormEvent) => {
     e.preventDefault();
@@ -195,6 +203,21 @@ export const OrganizationsManagement: React.FC<OrganizationsManagementProps> = (
               </div>
             );
           })}
+          {organizations.length === 0 && (
+            <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+              <Building2 className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+              <h3 className="font-bold text-slate-800 text-sm">لا توجد مؤسسات مضافة بعد</h3>
+              <p className="text-xs text-slate-400 mt-1 mb-4">أضف مؤسستك الأولى لتبدأ بإدارة الميزانيات وتتبع طلبات الصرف</p>
+              <button
+                type="button"
+                onClick={() => setIsOrgModalOpen(true)}
+                className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+              >
+                <Plus className="h-4 w-4" />
+                <span>إضافة أول مؤسسة الآن</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -280,6 +303,15 @@ export const OrganizationsManagement: React.FC<OrganizationsManagementProps> = (
                     </tr>
                   );
                 })}
+                {filteredMembers.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="p-8 text-center text-slate-400">
+                      <Users className="h-8 w-8 text-slate-300 mx-auto mb-2" />
+                      <p className="font-medium text-xs">لا يوجد أعضاء مسجلين حالياً</p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">انقر على "إضافة عضو جديد" لإسناد الموظفين والصلاحيات</p>
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

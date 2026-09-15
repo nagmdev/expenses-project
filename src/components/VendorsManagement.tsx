@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 
 export const VendorsManagement: React.FC = () => {
-  const { providers, services, activeOrgId, activeOrg, addProvider, updateProvider, deleteProvider } = useApp();
+  const { providers, services, activeOrgId, activeOrg, organizations, addProvider, updateProvider, deleteProvider } = useApp();
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<ServiceProvider | null>(null);
@@ -31,11 +31,11 @@ export const VendorsManagement: React.FC = () => {
   const [email, setEmail] = useState('');
   const [taxNumber, setTaxNumber] = useState('');
   const [crNumber, setCrNumber] = useState('');
-  const [bankName, setBankName] = useState('مصرف الراجحي');
-  const [iban, setIban] = useState('SA');
-  const [address, setAddress] = useState('الرياض');
+  const [bankName, setBankName] = useState('');
+  const [iban, setIban] = useState('');
+  const [address, setAddress] = useState('');
   const [selectedServices, setSelectedServices] = useState<string[]>([]);
-  const [rating, setRating] = useState(4.8);
+  const [rating, setRating] = useState(5.0);
   const [notes, setNotes] = useState('');
 
   const orgProviders = providers.filter(p => activeOrgId === 'all' || p.orgId === activeOrgId);
@@ -53,13 +53,13 @@ export const VendorsManagement: React.FC = () => {
     setContactPerson('');
     setPhone('');
     setEmail('');
-    setTaxNumber('310' + Math.floor(100000000000 + Math.random() * 900000000000));
-    setCrNumber('1010' + Math.floor(100000 + Math.random() * 900000));
-    setBankName('مصرف الراجحي');
-    setIban('SA' + Math.floor(1000000000000000000000 + Math.random() * 9000000000000000000000));
-    setAddress('الرياض');
+    setTaxNumber('');
+    setCrNumber('');
+    setBankName('');
+    setIban('SA');
+    setAddress('');
     setSelectedServices(orgServices.length > 0 ? [orgServices[0].id] : []);
-    setRating(4.8);
+    setRating(5.0);
     setNotes('');
     setIsModalOpen(true);
   };
@@ -108,7 +108,7 @@ export const VendorsManagement: React.FC = () => {
       });
     } else {
       addProvider({
-        orgId: activeOrgId === 'all' ? 'org-1' : activeOrgId,
+        orgId: activeOrgId && activeOrgId !== 'all' ? activeOrgId : (activeOrg?.id || organizations[0]?.id || ''),
         name: name.trim(),
         contactPerson: contactPerson.trim(),
         phone: phone.trim(),
@@ -258,6 +258,21 @@ export const VendorsManagement: React.FC = () => {
             </div>
           );
         })}
+        {filteredProviders.length === 0 && (
+          <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+            <Building className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+            <h3 className="font-bold text-slate-800 text-sm">لا يوجد موردون أو مقدمو خدمات مسجلين</h3>
+            <p className="text-xs text-slate-400 mt-1 mb-4">أضف مقدمي الخدمات والشركات المتعامل معها وحساباتهم البنكية لتسهيل أوامر الصرف</p>
+            <button
+              type="button"
+              onClick={handleOpenAdd}
+              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+            >
+              <Plus className="h-4 w-4" />
+              <span>إضافة أول مقدم خدمة الآن</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Add/Edit Modal */}
