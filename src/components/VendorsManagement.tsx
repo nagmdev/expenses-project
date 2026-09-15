@@ -1,0 +1,414 @@
+import React, { useState } from 'react';
+import { useApp } from '../context/AppContext';
+import { ServiceProvider } from '../types';
+import { 
+  Building, 
+  Plus, 
+  Phone, 
+  Mail, 
+  MapPin, 
+  CreditCard, 
+  Star, 
+  Edit3, 
+  Trash2, 
+  X, 
+  FileText,
+  Search,
+  CheckCircle
+} from 'lucide-react';
+
+export const VendorsManagement: React.FC = () => {
+  const { providers, services, activeOrgId, activeOrg, addProvider, updateProvider, deleteProvider } = useApp();
+
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingProvider, setEditingProvider] = useState<ServiceProvider | null>(null);
+  const [search, setSearch] = useState('');
+
+  // Form states
+  const [name, setName] = useState('');
+  const [contactPerson, setContactPerson] = useState('');
+  const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
+  const [taxNumber, setTaxNumber] = useState('');
+  const [crNumber, setCrNumber] = useState('');
+  const [bankName, setBankName] = useState('مصرف الراجحي');
+  const [iban, setIban] = useState('SA');
+  const [address, setAddress] = useState('الرياض');
+  const [selectedServices, setSelectedServices] = useState<string[]>([]);
+  const [rating, setRating] = useState(4.8);
+  const [notes, setNotes] = useState('');
+
+  const orgProviders = providers.filter(p => activeOrgId === 'all' || p.orgId === activeOrgId);
+  const orgServices = services.filter(s => activeOrgId === 'all' || s.orgId === activeOrgId);
+
+  const filteredProviders = orgProviders.filter(p => 
+    p.name.toLowerCase().includes(search.toLowerCase()) ||
+    p.contactPerson.toLowerCase().includes(search.toLowerCase()) ||
+    p.phone.includes(search)
+  );
+
+  const handleOpenAdd = () => {
+    setEditingProvider(null);
+    setName('');
+    setContactPerson('');
+    setPhone('');
+    setEmail('');
+    setTaxNumber('310' + Math.floor(100000000000 + Math.random() * 900000000000));
+    setCrNumber('1010' + Math.floor(100000 + Math.random() * 900000));
+    setBankName('مصرف الراجحي');
+    setIban('SA' + Math.floor(1000000000000000000000 + Math.random() * 9000000000000000000000));
+    setAddress('الرياض');
+    setSelectedServices(orgServices.length > 0 ? [orgServices[0].id] : []);
+    setRating(4.8);
+    setNotes('');
+    setIsModalOpen(true);
+  };
+
+  const handleOpenEdit = (prov: ServiceProvider) => {
+    setEditingProvider(prov);
+    setName(prov.name);
+    setContactPerson(prov.contactPerson);
+    setPhone(prov.phone);
+    setEmail(prov.email);
+    setTaxNumber(prov.taxNumber);
+    setCrNumber(prov.crNumber);
+    setBankName(prov.bankName);
+    setIban(prov.iban);
+    setAddress(prov.address);
+    setSelectedServices(prov.serviceCategoryIds);
+    setRating(prov.rating);
+    setNotes(prov.notes || '');
+    setIsModalOpen(true);
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+
+    const matchedServiceNames = orgServices
+      .filter(s => selectedServices.includes(s.id))
+      .map(s => s.name);
+
+    if (editingProvider) {
+      updateProvider({
+        ...editingProvider,
+        name: name.trim(),
+        contactPerson: contactPerson.trim(),
+        phone: phone.trim(),
+        email: email.trim(),
+        taxNumber: taxNumber.trim(),
+        crNumber: crNumber.trim(),
+        bankName: bankName.trim(),
+        iban: iban.trim(),
+        address: address.trim(),
+        serviceCategoryIds: selectedServices,
+        serviceCategoryNames: matchedServiceNames,
+        rating,
+        notes: notes.trim(),
+      });
+    } else {
+      addProvider({
+        orgId: activeOrgId === 'all' ? 'org-1' : activeOrgId,
+        name: name.trim(),
+        contactPerson: contactPerson.trim(),
+        phone: phone.trim(),
+        email: email.trim(),
+        taxNumber: taxNumber.trim(),
+        crNumber: crNumber.trim(),
+        bankName: bankName.trim(),
+        iban: iban.trim(),
+        address: address.trim(),
+        serviceCategoryIds: selectedServices,
+        serviceCategoryNames: matchedServiceNames,
+        rating,
+        notes: notes.trim(),
+        active: true,
+      });
+    }
+
+    setIsModalOpen(false);
+  };
+
+  return (
+    <div className="space-y-6 pb-12">
+      
+      {/* Top Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs">
+        <div>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl font-bold text-slate-900">سجل مقدمي الخدمة والموردين</h1>
+            <span className="text-xs bg-slate-100 text-slate-700 font-semibold px-2.5 py-0.5 rounded-full border border-slate-200">
+              {orgProviders.length} مقدم خدمة معتمد
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 mt-1">
+            إدارة بيانات الموردين، الحسابات البنكية والآيبان، والأرقام الضريبية وتاريخ التعاملات
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleOpenAdd}
+          className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto"
+        >
+          <Plus className="h-4 w-4" />
+          <span>إضافة مقدم خدمة جديد</span>
+        </button>
+      </div>
+
+      {/* Search Bar */}
+      <div className="max-w-md relative">
+        <Search className="h-4 w-4 text-slate-400 absolute right-3 top-2.5" />
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="بحث باسم الشركة، الشخص المسؤول، أو رقم الهاتف..."
+          className="w-full pl-3 pr-9 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+        />
+      </div>
+
+      {/* Vendors Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+        {filteredProviders.map((prov) => {
+          const currency = activeOrg?.currency || 'SAR';
+
+          return (
+            <div 
+              key={prov.id}
+              className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between"
+            >
+              <div>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center font-bold">
+                      <Building className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-slate-900 text-sm">{prov.name}</h3>
+                      <div className="flex items-center gap-1 text-[11px] text-amber-500 font-bold mt-0.5">
+                        <Star className="h-3 w-3 fill-amber-400 text-amber-400" />
+                        <span>{prov.rating}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEdit(prov)}
+                      className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition"
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteProvider(prov.id)}
+                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Details */}
+                <div className="mt-4 space-y-2 text-xs text-slate-600">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400">المسؤول:</span>
+                    <span className="font-semibold text-slate-800">{prov.contactPerson}</span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Phone className="h-3.5 w-3.5 text-slate-400" />
+                    <span className="font-mono text-slate-700">{prov.phone}</span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Mail className="h-3.5 w-3.5 text-slate-400" />
+                    <span className="text-slate-700 truncate">{prov.email}</span>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-100 space-y-1 text-[11px]">
+                    <div>
+                      <span className="text-slate-400">الرقم الضريبي: </span>
+                      <span className="font-mono font-bold text-slate-700">{prov.taxNumber}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">البنك والآيبان: </span>
+                      <span className="font-bold text-slate-800">{prov.bankName}</span>
+                      <span className="font-mono text-slate-500 block truncate">{prov.iban}</span>
+                    </div>
+                  </div>
+
+                  {prov.notes && (
+                    <p className="text-[11px] text-slate-500 bg-slate-50 p-2 rounded-lg mt-2 italic">
+                      {prov.notes}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Total Paid Summary */}
+              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+                <span className="text-slate-400">إجمالي المبالغ المصروفة:</span>
+                <span className="font-black text-emerald-700">
+                  {prov.totalPaid.toLocaleString()} {currency}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Add/Edit Modal */}
+      {isModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-xl w-full shadow-2xl p-6 border border-slate-100 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="font-bold text-slate-900 text-sm">
+                {editingProvider ? 'تعديل بيانات مقدم الخدمة' : 'إضافة مقدم خدمة جديد'}
+              </h3>
+              <button 
+                onClick={() => setIsModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-600"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmit} className="mt-4 space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">اسم المؤسسة / مقدم الخدمة *</label>
+                <input
+                  type="text"
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="مثال: شركة سحابة الخليج للتقنية..."
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">الشخص المسؤول *</label>
+                  <input
+                    type="text"
+                    required
+                    value={contactPerson}
+                    onChange={(e) => setContactPerson(e.target.value)}
+                    placeholder="اسم مسؤول المبيعات..."
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">رقم الهاتف *</label>
+                  <input
+                    type="text"
+                    required
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="+966 50..."
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">البريد الإلكتروني</label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="billing@provider.com"
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">العنوان / المدينة</label>
+                  <input
+                    type="text"
+                    value={address}
+                    onChange={(e) => setAddress(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">الرقم الضريبي (VAT)</label>
+                  <input
+                    type="text"
+                    value={taxNumber}
+                    onChange={(e) => setTaxNumber(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">رقم السجل التجاري (CR)</label>
+                  <input
+                    type="text"
+                    value={crNumber}
+                    onChange={(e) => setCrNumber(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">اسم البنك المعتمد</label>
+                  <input
+                    type="text"
+                    value={bankName}
+                    onChange={(e) => setBankName(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">رقم الآيبان (IBAN)</label>
+                  <input
+                    type="text"
+                    value={iban}
+                    onChange={(e) => setIban(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">ملاحظات وتقييم</label>
+                <textarea
+                  rows={2}
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="ملاحظات حول الأسعار وجودة الخدمة..."
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setIsModalOpen(false)}
+                  className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl"
+                >
+                  حفظ مقدم الخدمة
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+};
