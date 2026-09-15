@@ -31,22 +31,39 @@ export interface FirebaseConfig {
 export const FIREBASE_STORAGE_KEY = 'expenses_firebase_config';
 
 /**
- * Retrieve Firebase credentials from localStorage first, then fallback to Vite environment variables.
+ * Built-in default configuration for the live Firebase Cloud Firestore project: expenses-project-ce1f9
+ * Ensures out-of-the-box connectivity on Vercel and local environments.
+ */
+export const DEFAULT_FIREBASE_CONFIG: FirebaseConfig = {
+  apiKey: "AIzaSyAVdlhJWnybKourhOiNcS9BKPoSb67kZMk",
+  authDomain: "expenses-project-ce1f9.firebaseapp.com",
+  projectId: "expenses-project-ce1f9",
+  storageBucket: "expenses-project-ce1f9.firebasestorage.app",
+  messagingSenderId: "149226675429",
+  appId: "1:149226675429:web:dec67a265ce2516250880c",
+};
+
+/**
+ * Retrieve Firebase credentials from localStorage first, then fallback to Vite environment variables,
+ * and finally fallback to the built-in default configuration.
  */
 export function getFirebaseConfig(): FirebaseConfig | null {
-  // 1. Check localStorage first
+  // 1. Check localStorage first (allows user custom configuration or explicit disconnection)
   try {
     const saved = localStorage.getItem(FIREBASE_STORAGE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
+      if (parsed && parsed.disabled) {
+        return null;
+      }
       if (parsed && parsed.apiKey && parsed.projectId) {
         return {
           apiKey: parsed.apiKey || '',
-          authDomain: parsed.authDomain || '',
+          authDomain: parsed.authDomain || DEFAULT_FIREBASE_CONFIG.authDomain,
           projectId: parsed.projectId || '',
-          storageBucket: parsed.storageBucket || '',
-          messagingSenderId: parsed.messagingSenderId || '',
-          appId: parsed.appId || '',
+          storageBucket: parsed.storageBucket || DEFAULT_FIREBASE_CONFIG.storageBucket,
+          messagingSenderId: parsed.messagingSenderId || DEFAULT_FIREBASE_CONFIG.messagingSenderId,
+          appId: parsed.appId || DEFAULT_FIREBASE_CONFIG.appId,
           measurementId: parsed.measurementId || '',
         };
       }
@@ -62,27 +79,28 @@ export function getFirebaseConfig(): FirebaseConfig | null {
   if (envApiKey && envProjectId) {
     return {
       apiKey: envApiKey,
-      authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
+      authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || DEFAULT_FIREBASE_CONFIG.authDomain,
       projectId: envProjectId,
-      storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '',
-      messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
-      appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
+      storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || DEFAULT_FIREBASE_CONFIG.storageBucket,
+      messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || DEFAULT_FIREBASE_CONFIG.messagingSenderId,
+      appId: import.meta.env.VITE_FIREBASE_APP_ID || DEFAULT_FIREBASE_CONFIG.appId,
       measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || '',
     };
   }
 
-  return null;
+  // 3. Fallback to built-in live Firebase Cloud Firestore default configuration
+  return DEFAULT_FIREBASE_CONFIG;
 }
 
 /**
- * Save Firebase configuration to localStorage or delete it if null
+ * Save Firebase configuration to localStorage or mark as disabled if null
  */
 export function saveFirebaseConfig(config: FirebaseConfig | null): void {
   try {
     if (config) {
       localStorage.setItem(FIREBASE_STORAGE_KEY, JSON.stringify(config));
     } else {
-      localStorage.removeItem(FIREBASE_STORAGE_KEY);
+      localStorage.setItem(FIREBASE_STORAGE_KEY, JSON.stringify({ disabled: true }));
     }
   } catch (err) {
     console.error('[Firebase] Failed to save config to localStorage:', err);
