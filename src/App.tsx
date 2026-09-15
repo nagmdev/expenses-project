@@ -14,7 +14,7 @@ import { ExpenseRequest } from './types';
 import { Building2, X } from 'lucide-react';
 
 const MainApp: React.FC = () => {
-  const { activeTab, setActiveTab, addOrganization, organizations, loading } = useApp();
+  const { activeTab, setActiveTab, addOrganization, organizations, loading, resetToSampleData } = useApp();
 
   const [isNewRequestModalOpen, setIsNewRequestModalOpen] = useState(false);
   const [selectedRequest, setSelectedRequest] = useState<ExpenseRequest | null>(null);
@@ -65,15 +65,24 @@ const MainApp: React.FC = () => {
             </div>
             <h2 className="text-xl font-bold text-slate-900">مرحباً بك في نظام إدارة المصروفات (مصروفي)</h2>
             <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-              قاعدة البيانات الآن حقيقية ونظيفة بنسبة 100% ولا توجد أي بيانات تجريبية ثابتة. ابدأ بإضافة مؤسستك الأولى لبدء العمل.
+              ابدأ بإضافة أول مؤسسة لك أو استورد بيانات تجريبية نموذجية لتجربة كامل خصائص ومخططات النظام فوراً.
             </p>
-            <button
-              type="button"
-              onClick={() => setIsQuickOrgModalOpen(true)}
-              className="mt-6 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer"
-            >
-              إضافة أول مؤسسة الآن
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-3 mt-6">
+              <button
+                type="button"
+                onClick={() => setIsQuickOrgModalOpen(true)}
+                className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer"
+              >
+                إضافة أول مؤسسة الآن
+              </button>
+              <button
+                type="button"
+                onClick={resetToSampleData}
+                className="px-5 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer"
+              >
+                استيراد بيانات نموذجية للتجربة
+              </button>
+            </div>
           </div>
         ) : (
           <>

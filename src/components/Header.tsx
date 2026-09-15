@@ -27,7 +27,8 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg }
     setCurrentRole, 
     currentUser,
     refreshData,
-    requests
+    requests,
+    isBackendConnected
   } = useApp();
 
 
@@ -174,11 +175,24 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg }
               </div>
             </div>
 
+            {/* Environment / Storage Status Badge */}
+            <div 
+              className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border ${
+                isBackendConnected 
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                  : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+              }`}
+              title={isBackendConnected ? 'النظام متصل بقاعدة البيانات SQLite' : 'النظام يعمل بوضع التخزين السحابي المرن (Vercel Ready)'}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${isBackendConnected ? 'bg-emerald-500' : 'bg-indigo-500 animate-pulse'}`}></span>
+              <span>{isBackendConnected ? 'خادم متصل' : 'سحابي (Vercel)'}</span>
+            </div>
+
             {/* Refresh Data */}
             <button
               type="button"
               onClick={refreshData}
-              title="تحديث البيانات من الخادم"
+              title="تحديث البيانات"
               className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition cursor-pointer"
             >
               <RotateCcw className="h-4 w-4" />
