@@ -144,13 +144,13 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto">
       <div 
-        className="bg-white rounded-3xl max-w-2xl w-full shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150 overflow-hidden"
+        className="bg-white rounded-3xl max-w-2xl w-full max-h-[90vh] shadow-2xl border border-slate-100 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 my-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between p-5 border-b border-slate-100 bg-slate-50/50">
+        {/* Header - Always visible at top */}
+        <div className="shrink-0 flex items-center justify-between p-4 sm:p-5 border-b border-slate-100 bg-slate-50/80 sticky top-0 z-10">
           <div>
             <h3 className="text-base font-bold text-slate-900">إنشاء طلب صرف ومطالبة مالية</h3>
             <p className="text-xs text-slate-500 mt-0.5">
@@ -166,8 +166,11 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           </button>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-4 text-xs">
+        {/* Form Container */}
+        <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          
+          {/* Scrollable Form Body */}
+          <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
           
           {/* Title */}
           <div>
@@ -400,20 +403,21 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               <span className="text-[11px] text-slate-400">PDF, JPG, PNG</span>
             </div>
           </div>
+        </div>
 
-          {/* Footer Buttons */}
-          <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
+          {/* Footer Buttons - Pinned at bottom */}
+          <div className="shrink-0 flex items-center justify-end gap-3 p-4 border-t border-slate-100 bg-slate-50/80">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+              className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer font-medium"
             >
               إلغاء
             </button>
             <button
               type="submit"
               disabled={submitting}
-              className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-md transition cursor-pointer disabled:opacity-50"
+              className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 flex items-center gap-2"
             >
               {submitting ? 'جاري الإرسال...' : 'إرسال الطلب للاعتماد'}
             </button>
