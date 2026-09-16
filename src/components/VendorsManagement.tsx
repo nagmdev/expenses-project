@@ -63,7 +63,7 @@ export const VendorsManagement: React.FC = () => {
     setTaxNumber('');
     setCrNumber('');
     setBankName('');
-    setIban('SA');
+    setIban('');
     setAddress('');
     setSelectedServices(orgServices.length > 0 ? [orgServices[0].id] : []);
     setRating(5.0);
@@ -220,32 +220,44 @@ export const VendorsManagement: React.FC = () => {
 
                 {/* Details */}
                 <div className="mt-4 space-y-2 text-xs text-slate-600">
-                  <div className="flex items-center gap-2">
-                    <span className="text-slate-400">المسؤول:</span>
-                    <span className="font-semibold text-slate-800">{prov.contactPerson}</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <Phone className="h-3.5 w-3.5 text-slate-400" />
-                    <span className="font-mono text-slate-700">{prov.phone}</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <Mail className="h-3.5 w-3.5 text-slate-400" />
-                    <span className="text-slate-700 truncate">{prov.email}</span>
-                  </div>
-
-                  <div className="pt-2 border-t border-slate-100 space-y-1 text-[11px]">
-                    <div>
-                      <span className="text-slate-400">الرقم الضريبي: </span>
-                      <span className="font-mono font-bold text-slate-700">{prov.taxNumber}</span>
+                  {prov.contactPerson && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-400">المسؤول:</span>
+                      <span className="font-semibold text-slate-800">{prov.contactPerson}</span>
                     </div>
-                    <div>
-                      <span className="text-slate-400">البنك والآيبان: </span>
-                      <span className="font-bold text-slate-800">{prov.bankName}</span>
-                      <span className="font-mono text-slate-500 block truncate">{prov.iban}</span>
+                  )}
+
+                  {prov.phone && (
+                    <div className="flex items-center gap-2">
+                      <Phone className="h-3.5 w-3.5 text-slate-400" />
+                      <span className="font-mono text-slate-700">{prov.phone}</span>
                     </div>
-                  </div>
+                  )}
+
+                  {prov.email && (
+                    <div className="flex items-center gap-2">
+                      <Mail className="h-3.5 w-3.5 text-slate-400" />
+                      <span className="text-slate-700 truncate">{prov.email}</span>
+                    </div>
+                  )}
+
+                  {(prov.taxNumber || prov.iban || prov.bankName) && (
+                    <div className="pt-2 border-t border-slate-100 space-y-1 text-[11px]">
+                      {prov.taxNumber && (
+                        <div>
+                          <span className="text-slate-400">الرقم الضريبي: </span>
+                          <span className="font-mono font-bold text-slate-700">{prov.taxNumber}</span>
+                        </div>
+                      )}
+                      {(prov.bankName || prov.iban) && (
+                        <div>
+                          <span className="text-slate-400">البنك والآيبان: </span>
+                          {prov.bankName && <span className="font-bold text-slate-800 ml-1">{prov.bankName}</span>}
+                          {prov.iban && <span className="font-mono text-slate-500 block truncate">{prov.iban}</span>}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {prov.notes && (
                     <p className="text-[11px] text-slate-500 bg-slate-50 p-2 rounded-lg mt-2 italic">
@@ -313,10 +325,9 @@ export const VendorsManagement: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">الشخص المسؤول *</label>
+                  <label className="block font-bold text-slate-700 mb-1">الشخص المسؤول (اختياري)</label>
                   <input
                     type="text"
-                    required
                     value={contactPerson}
                     onChange={(e) => setContactPerson(e.target.value)}
                     placeholder="اسم مسؤول المبيعات..."
@@ -324,15 +335,14 @@ export const VendorsManagement: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">رقم الهاتف * (أرقام فقط)</label>
+                  <label className="block font-bold text-slate-700 mb-1">رقم الهاتف (اختياري)</label>
                   <input
                     type="tel"
                     inputMode="numeric"
-                    required
                     value={phone}
                     onKeyDown={(e) => handleNumericKeyDown(e, false)}
                     onChange={(e) => setPhone(sanitizePhone(e.target.value))}
-                    placeholder="+966 50..."
+                    placeholder="+966 50... أو 010..."
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
                   />
                 </div>

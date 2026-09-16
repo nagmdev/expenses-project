@@ -9,7 +9,7 @@ export interface Organization {
   createdAt: string;
 }
 
-export type Role = 'super_admin' | 'org_admin' | 'employee';
+export type Role = 'super_admin' | 'org_admin' | 'employee' | 'data_entry';
 
 export interface User {
   id: string;

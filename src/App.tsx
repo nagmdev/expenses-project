@@ -72,7 +72,7 @@ const MainApp: React.FC = () => {
 
     addOrganization({
       name: newOrgName.trim(),
-      code: newOrgCode.trim().toUpperCase() || 'NEW',
+      code: newOrgCode.trim().toUpperCase() || newOrgName.trim().slice(0, 3).toUpperCase() || 'ORG',
       currency: newOrgCurrency,
       budget: Number(newOrgBudget) || 0,
       description: 'مؤسسة جديدة أضيفت للنظام.',
@@ -151,16 +151,16 @@ const MainApp: React.FC = () => {
             onSelectRequest={setSelectedRequest}
           />
         ) : (
-          /* Admin / Super Admin Multi-Tab View */
+          /* Admin / Super Admin / Data Entry Multi-Tab View */
           <>
-            {activeTab === 'dashboard' && (
+            {activeTab === 'dashboard' && currentRole !== 'data_entry' && (
               <DashboardAnalytics 
                 onSelectRequest={setSelectedRequest}
                 onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
               />
             )}
 
-            {activeTab === 'requests' && (
+            {activeTab === 'requests' && currentRole !== 'data_entry' && (
               <ExpenseRequestsList 
                 onSelectRequest={setSelectedRequest}
                 onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
@@ -212,8 +212,8 @@ const MainApp: React.FC = () => {
         onClose={() => setIsProfileModalOpen(false)}
       />
 
-      {/* Quick Add Org Modal (Super Admin Only) */}
-      {isQuickOrgModalOpen && currentRole === 'super_admin' && (
+      {/* Quick Add Org Modal (Super Admin & Data Entry) */}
+      {isQuickOrgModalOpen && (currentRole === 'super_admin' || currentRole === 'data_entry') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
@@ -244,13 +244,12 @@ const MainApp: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">رمز الشركة (Code)</label>
+                  <label className="block font-bold text-slate-700 mb-1">رمز الشركة (اختياري)</label>
                   <input
                     type="text"
-                    required
                     value={newOrgCode}
                     onChange={(e) => setNewOrgCode(sanitizeCode(e.target.value, 5))}
-                    placeholder="RWD"
+                    placeholder="RWD (تلقائي إن ترك فارغاً)"
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono uppercase"
                   />
                 </div>

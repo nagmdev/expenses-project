@@ -171,14 +171,14 @@ interface AppContextType {
   // Admin User Provisioning
   createCompanyUser: (data: {
     name: string;
-    email: string;
-    password: string;
+    email?: string;
+    password?: string;
     phone?: string;
-    role: 'org_admin' | 'employee';
+    role: Role;
     department?: string;
     jobTitle?: string;
     orgId?: string;
-  }) => Promise<{ success: boolean; message?: string }>;
+  }) => Promise<{ success: boolean; message?: string; credentials?: { email: string; password: string } }>;
 
   // Organizations
   addOrganization: (org: Omit<Organization, 'id' | 'createdAt'>) => Promise<void>;
@@ -394,6 +394,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (activeTab === 'dashboard' || activeTab === 'services' || activeTab === 'providers' || activeTab === 'organizations') {
         setActiveTab('my-requests');
       }
+    } else if (resolvedRole === 'data_entry') {
+      if (activeTab === 'dashboard' || activeTab === 'requests') {
+        setActiveTab('providers');
+      }
     }
   }, [resolvedRole, firebaseUser, activeTab]);
 
@@ -402,7 +406,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // =========================================================================
   const scopedOrganizations = useMemo(() => {
     if (!firebaseUser) return [];
-    if (resolvedRole === 'super_admin') return rawOrganizations;
+    if (resolvedRole === 'super_admin' || resolvedRole === 'data_entry') return rawOrganizations;
     return rawOrganizations.filter(o => o.id === effectiveOrgId);
   }, [firebaseUser, resolvedRole, rawOrganizations, effectiveOrgId]);
 
@@ -412,7 +416,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const scopedMembers = useMemo(() => {
     if (!firebaseUser) return [];
-    if (resolvedRole === 'super_admin') {
+    if (resolvedRole === 'super_admin' || resolvedRole === 'data_entry') {
       return effectiveOrgId === 'all' ? rawMembers : rawMembers.filter(m => m.orgId === effectiveOrgId);
     }
     return rawMembers.filter(m => m.orgId === effectiveOrgId);
@@ -420,7 +424,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const scopedServices = useMemo(() => {
     if (!firebaseUser) return [];
-    if (resolvedRole === 'super_admin') {
+    if (resolvedRole === 'super_admin' || resolvedRole === 'data_entry') {
       return effectiveOrgId === 'all' ? rawServices : rawServices.filter(s => s.orgId === effectiveOrgId);
     }
     return rawServices.filter(s => s.orgId === effectiveOrgId);
@@ -428,7 +432,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const scopedProviders = useMemo(() => {
     if (!firebaseUser) return [];
-    if (resolvedRole === 'super_admin') {
+    if (resolvedRole === 'super_admin' || resolvedRole === 'data_entry') {
       return effectiveOrgId === 'all' ? rawProviders : rawProviders.filter(p => p.orgId === effectiveOrgId);
     }
     return rawProviders.filter(p => p.orgId === effectiveOrgId);
@@ -711,24 +715,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // =========================================================================
   const createCompanyUser = async (data: {
     name: string;
-    email: string;
-    password: string;
+    email?: string;
+    password?: string;
     phone?: string;
-    role: 'org_admin' | 'employee';
+    role: Role;
     department?: string;
     jobTitle?: string;
     orgId?: string;
-  }): Promise<{ success: boolean; message?: string }> => {
+  }): Promise<{ success: boolean; message?: string; credentials?: { email: string; password: string } }> => {
     try {
       const targetOrgId = data.orgId || effectiveOrgId;
       if (!targetOrgId || targetOrgId === 'all') {
         return { success: false, message: 'يرجى تحديد المؤسسة أولاً لإضافة الموظف إليها.' };
       }
 
+      const effectiveEmail = data.email?.trim().toLowerCase() || `emp_${Date.now().toString().slice(-6)}@company.local`;
+      const effectivePassword = data.password?.trim() || '123456';
+
       let createdUid = `user-${Date.now()}`;
       if (isFirebaseConfigured()) {
         try {
-          const res = await adminCreateUserAccount(data.email, data.password, data.name);
+          const res = await adminCreateUserAccount(effectiveEmail, effectivePassword, data.name);
           createdUid = res.uid;
         } catch (authErr: any) {
           console.error('[Admin Provision Auth Error]', authErr);
@@ -742,16 +749,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
+      const defaultJobTitle = data.role === 'org_admin' 
+        ? 'مدير المؤسسة' 
+        : data.role === 'data_entry' 
+        ? 'مدخل بيانات' 
+        : 'موظف';
+
       const newMember: OrganizationMember = {
         id: `mem-${Date.now()}`,
         orgId: targetOrgId,
         userId: createdUid,
         userName: data.name.trim(),
-        userEmail: data.email.trim().toLowerCase(),
+        userEmail: effectiveEmail,
         phone: data.phone?.trim() || '',
         role: data.role,
-        department: data.department?.trim() || 'العمليات والتوريد',
-        jobTitle: data.jobTitle?.trim() || (data.role === 'org_admin' ? 'مدير المؤسسة' : 'موظف'),
+        department: data.department?.trim() || (data.role === 'data_entry' ? 'إدخال البيانات والتسجيل' : 'العمليات والتوريد'),
+        jobTitle: data.jobTitle?.trim() || defaultJobTitle,
         joinedAt: new Date().toISOString().split('T')[0],
         active: true,
       };
@@ -766,7 +779,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return updated;
       });
 
-      return { success: true, message: 'تم إنشاء وتفعيل حساب الموظف بنجاح!' };
+      return { 
+        success: true, 
+        message: 'تم إنشاء وتفعيل حساب الموظف بنجاح!',
+        credentials: {
+          email: effectiveEmail,
+          password: effectivePassword
+        }
+      };
     } catch (err: any) {
       console.error('[Create Company User Error]', err);
       return { success: false, message: err?.message || 'حدث خطأ أثناء إنشاء الحساب.' };
@@ -784,6 +804,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newOrg: Organization = {
       id,
       ...orgData,
+      code: orgData.code?.trim().toUpperCase() || orgData.name.trim().slice(0, 3).toUpperCase() || 'ORG',
       createdAt,
     };
 

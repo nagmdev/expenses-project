@@ -58,11 +58,13 @@ export const ServicesManagement: React.FC = () => {
     e.preventDefault();
     if (!name.trim()) return;
 
+    const finalCode = code.trim() || `SRV-${Math.floor(100 + Math.random() * 900)}`;
+
     if (editingService) {
       updateService({
         ...editingService,
         name: name.trim(),
-        code: code.trim(),
+        code: finalCode,
         description: description.trim(),
         budgetLimit: Number(budgetLimit) || 0,
         color,
@@ -71,7 +73,7 @@ export const ServicesManagement: React.FC = () => {
       addService({
         orgId: activeOrgId && activeOrgId !== 'all' ? activeOrgId : (activeOrg?.id || organizations[0]?.id || ''),
         name: name.trim(),
-        code: code.trim(),
+        code: finalCode,
         description: description.trim(),
         budgetLimit: Number(budgetLimit) || 0,
         color,
@@ -235,7 +237,7 @@ export const ServicesManagement: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">رمز الخدمة (Code)</label>
+                  <label className="block font-bold text-slate-700 mb-1">رمز الخدمة (اختياري)</label>
                   <input
                     type="text"
                     value={code}
@@ -246,7 +248,7 @@ export const ServicesManagement: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">سقف الميزانية التقديرية (أرقام فقط)</label>
+                  <label className="block font-bold text-slate-700 mb-1">سقف الميزانية التقديرية (اختياري)</label>
                   <input
                     type="text"
                     inputMode="numeric"

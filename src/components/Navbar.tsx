@@ -82,6 +82,33 @@ export const Navbar: React.FC = () => {
         badge: null,
       }
     );
+  } else if (currentRole === 'data_entry') {
+    navItems.push(
+      {
+        id: 'providers',
+        label: 'مقدمي الخدمة والموردين',
+        icon: Building,
+        badge: null,
+      },
+      {
+        id: 'services',
+        label: 'الخدمات وبنود الصرف',
+        icon: Layers,
+        badge: null,
+      },
+      {
+        id: 'organizations',
+        label: '🏛️ إدارة الشركات والمستخدمين',
+        icon: Building2,
+        badge: null,
+      },
+      {
+        id: 'my-requests',
+        label: 'طلباتي الشخصية',
+        icon: Clock3,
+        badge: null,
+      }
+    );
   } else {
     // super_admin
     navItems.push(

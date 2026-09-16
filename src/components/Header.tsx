@@ -11,7 +11,8 @@ import {
   User as UserIcon,
   Flame,
   LogOut,
-  Crown
+  Crown,
+  Edit3
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -80,8 +81,8 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
           {/* Org Switcher & Official Role Badge & Actions */}
           <div className="flex items-center gap-3">
             
-            {/* Organization Selector (Visible ONLY to Super Admin) */}
-            {currentRole === 'super_admin' ? (
+            {/* Organization Selector (Visible to Super Admin & Data Entry) */}
+            {(currentRole === 'super_admin' || currentRole === 'data_entry') ? (
               <div className="relative">
                 <button
                   type="button"
@@ -177,6 +178,13 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
               <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-900 border border-emerald-200 rounded-xl text-xs font-bold shadow-2xs">
                 <UserIcon className="h-4 w-4 text-emerald-600" />
                 <span>👤 موظف</span>
+              </div>
+            )}
+
+            {currentRole === 'data_entry' && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-50 text-sky-900 border border-sky-200 rounded-xl text-xs font-bold shadow-2xs">
+                <Edit3 className="h-4 w-4 text-sky-600" />
+                <span>✍️ مدخل بيانات</span>
               </div>
             )}
 

@@ -71,7 +71,7 @@ export const OrganizationsManagement: React.FC = () => {
   const [memberEmail, setMemberEmail] = useState('');
   const [memberPassword, setMemberPassword] = useState('');
   const [memberPhone, setMemberPhone] = useState('');
-  const [memberRole, setMemberRole] = useState<'org_admin' | 'employee'>('employee');
+  const [memberRole, setMemberRole] = useState<Role>('employee');
   const [department, setDepartment] = useState('العمليات والتشغيل');
   const [jobTitle, setJobTitle] = useState('موظف');
   
@@ -96,9 +96,11 @@ export const OrganizationsManagement: React.FC = () => {
     e.preventDefault();
     if (!orgName.trim()) return;
 
+    const codeToUse = orgCode.trim().toUpperCase() || orgName.trim().slice(0, 3).toUpperCase() || `ORG${Date.now().toString().slice(-3)}`;
+
     addOrganization({
       name: orgName.trim(),
-      code: orgCode.trim() || 'ORG',
+      code: codeToUse,
       currency: orgCurrency,
       budget: Number(orgBudget) || 0,
       description: orgDescription.trim(),
@@ -112,14 +114,14 @@ export const OrganizationsManagement: React.FC = () => {
 
   const handleProvisionUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!memberName.trim() || !memberEmail.trim() || !memberPassword.trim()) return;
+    if (!memberName.trim()) return;
 
-    if (!isValidEmail(memberEmail.trim())) {
+    if (memberEmail.trim() && !isValidEmail(memberEmail.trim())) {
       setProvisionError('يرجى إدخال بريد إلكتروني مهني صحيح (مثال: user@company.com).');
       return;
     }
 
-    if (memberPassword.trim().length < 6) {
+    if (memberPassword.trim() && memberPassword.trim().length < 6) {
       setProvisionError('يجب أن تتكون كلمة المرور من 6 خانات على الأقل.');
       return;
     }
@@ -143,11 +145,11 @@ export const OrganizationsManagement: React.FC = () => {
 
     setProvisionLoading(false);
 
-    if (res.success) {
+    if (res.success && res.credentials) {
       setCreatedCredentials({
         name: memberName.trim(),
-        email: memberEmail.trim(),
-        password: memberPassword.trim(),
+        email: res.credentials.email,
+        password: res.credentials.password,
         phone: memberPhone.trim(),
         orgName: targetOrgName,
       });
@@ -182,8 +184,9 @@ export const OrganizationsManagement: React.FC = () => {
     setTimeout(() => setCopiedLink(false), 2500);
   };
 
-  // Organizations to display (Super admin sees all; Org admin sees strictly their company)
-  const displayOrgs = isSuperAdmin ? allOrganizations : organizations;
+  // Organizations to display (Super admin & data entry see all; Org admin sees strictly their company)
+  const canManageOrgs = isSuperAdmin || currentRole === 'data_entry';
+  const displayOrgs = canManageOrgs ? allOrganizations : organizations;
   const filteredMembers = members;
 
   return (
@@ -230,16 +233,16 @@ export const OrganizationsManagement: React.FC = () => {
           <div>
             <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
               <Building2 className="h-5 w-5 text-emerald-600" />
-              <span>{isSuperAdmin ? 'إدارة كافة الشركات والمؤسسات' : 'بيانات الشركة التابع لها'}</span>
+              <span>{canManageOrgs ? 'إدارة كافة الشركات والمؤسسات' : 'بيانات الشركة التابع لها'}</span>
             </h1>
             <p className="text-xs text-slate-500 mt-1">
-              {isSuperAdmin 
+              {canManageOrgs 
                 ? 'فصل وعزل تام بين كل شركة؛ لا يمكن لشركة الاطلاع على بيانات أو موظفي أو طلبات أي شركة أخرى.' 
                 : 'نظام عزل مشفر بنسبة 100% يمنع أي شركة أو موظف خارجي من الاطلاع على بياناتك.'}
             </p>
           </div>
 
-          {isSuperAdmin && (
+          {canManageOrgs && (
             <button
               type="button"
               onClick={() => setIsOrgModalOpen(true)}
@@ -407,6 +410,10 @@ export const OrganizationsManagement: React.FC = () => {
                             <ShieldCheck className="h-3 w-3" />
                             <span>مدير الشركة</span>
                           </span>
+                        ) : mem.role === 'data_entry' ? (
+                          <span className="inline-flex items-center gap-1 bg-sky-50 text-sky-800 border border-sky-200 px-2.5 py-0.5 rounded-full font-bold text-[11px]">
+                            <span>✍️ مدخل بيانات</span>
+                          </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-0.5 rounded-full font-semibold text-[11px]">
                             <span>موظف (طالب صرف)</span>
@@ -526,9 +533,9 @@ export const OrganizationsManagement: React.FC = () => {
                   </div>
                 )}
 
-                {isSuperAdmin && (
+                {canManageOrgs && (
                   <div>
-                    <label className="block font-bold text-slate-700 mb-1">الشركة التابع لها الموظف *</label>
+                    <label className="block font-bold text-slate-700 mb-1">الشركة التابع لها الموظف</label>
                     <select
                       value={selectedOrgForMember}
                       onChange={(e) => setSelectedOrgForMember(e.target.value)}
@@ -542,7 +549,7 @@ export const OrganizationsManagement: React.FC = () => {
                 )}
 
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">الاسم الكامل للموظف *</label>
+                  <label className="block font-bold text-slate-700 mb-1">الاسم الكامل للموظف أو المستخدم *</label>
                   <input
                     type="text"
                     required
@@ -555,19 +562,18 @@ export const OrganizationsManagement: React.FC = () => {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block font-bold text-slate-700 mb-1">البريد الإلكتروني المهني *</label>
+                    <label className="block font-bold text-slate-700 mb-1">البريد الإلكتروني (اختياري)</label>
                     <input
                       type="email"
-                      required
                       value={memberEmail}
                       onChange={(e) => setMemberEmail(e.target.value)}
-                      placeholder="ahmed@company.com"
+                      placeholder="ahmed@company.com (تلقائي إن ترك فارغاً)"
                       className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-xs"
                     />
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slate-700 mb-1">رقم الهاتف المحمول (أرقام فقط)</label>
+                    <label className="block font-bold text-slate-700 mb-1">رقم الهاتف المحمول (اختياري)</label>
                     <input
                       type="tel"
                       inputMode="numeric"
@@ -582,14 +588,12 @@ export const OrganizationsManagement: React.FC = () => {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block font-bold text-slate-700 mb-1">كلمة المرور الأولية للحساب *</label>
+                    <label className="block font-bold text-slate-700 mb-1">كلمة المرور (اختياري - الافتراضي 123456)</label>
                     <input
                       type="text"
-                      required
-                      minLength={6}
                       value={memberPassword}
                       onChange={(e) => setMemberPassword(e.target.value)}
-                      placeholder="كلمة مرور مكونة من 6 خانات أو أكثر"
+                      placeholder="123456"
                       className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-xs text-slate-900"
                     />
                   </div>
@@ -602,6 +606,7 @@ export const OrganizationsManagement: React.FC = () => {
                       className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold"
                     >
                       <option value="employee">موظف عادي (طالب صرف)</option>
+                      <option value="data_entry">مدخل بيانات (Data Entry - تسجيل الموردين والشركات والخدمات والمستخدمين)</option>
                       <option value="org_admin">مدير معتمد للشركة</option>
                     </select>
                   </div>
@@ -709,8 +714,8 @@ export const OrganizationsManagement: React.FC = () => {
         </div>
       )}
 
-      {/* Add Org Modal (Super Admin only) */}
-      {isOrgModalOpen && isSuperAdmin && (
+      {/* Add Org Modal (Super Admin & Data Entry) */}
+      {isOrgModalOpen && canManageOrgs && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl p-6 border border-slate-100">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
@@ -735,13 +740,12 @@ export const OrganizationsManagement: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">كود الشركة (3-5 أحرف)</label>
+                  <label className="block font-bold text-slate-700 mb-1">كود الشركة (اختياري)</label>
                   <input
                     type="text"
-                    required
                     value={orgCode}
                     onChange={(e) => setOrgCode(sanitizeCode(e.target.value, 5))}
-                    placeholder="LOG"
+                    placeholder="LOG (تلقائي إن ترك فارغاً)"
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono uppercase"
                   />
                 </div>
