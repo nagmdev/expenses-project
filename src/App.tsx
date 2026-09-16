@@ -12,6 +12,7 @@ import { OrganizationsManagement } from './components/OrganizationsManagement';
 import { NewRequestModal } from './components/NewRequestModal';
 import { RequestDetailModal } from './components/RequestDetailModal';
 import { FirebaseConfigModal } from './components/FirebaseConfigModal';
+import { UserProfileModal } from './components/UserProfileModal';
 import { ExpenseRequest } from './types';
 import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
@@ -35,6 +36,7 @@ const MainApp: React.FC = () => {
   } = useApp();
 
   const [isNewRequestModalOpen, setIsNewRequestModalOpen] = useState(false);
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [selectedRequest, setSelectedRequest] = useState<ExpenseRequest | null>(null);
   
   // Quick Org modal for super admin
@@ -88,6 +90,7 @@ const MainApp: React.FC = () => {
       <Header 
         onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
         onOpenNewOrg={() => setIsQuickOrgModalOpen(true)}
+        onOpenProfile={() => setIsProfileModalOpen(true)}
       />
 
       {/* Firebase Permission / Connection Alert */}
@@ -122,7 +125,7 @@ const MainApp: React.FC = () => {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {!loading && organizations.length === 0 && currentRole === 'super_admin' ? (
+        {!loading && organizations.length === 0 && currentRole === 'super_admin' && activeTab === 'dashboard' ? (
           <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-xl mx-auto text-center shadow-md my-8">
             <div className="h-16 w-16 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto mb-4">
               <Building2 className="h-8 w-8" />
@@ -201,6 +204,12 @@ const MainApp: React.FC = () => {
       <FirebaseConfigModal 
         isOpen={isFirebaseModalOpen}
         onClose={closeFirebaseModal}
+      />
+
+      {/* User Profile & Password Change Modal */}
+      <UserProfileModal 
+        isOpen={isProfileModalOpen}
+        onClose={() => setIsProfileModalOpen(false)}
       />
 
       {/* Quick Add Org Modal (Super Admin Only) */}

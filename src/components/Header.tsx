@@ -17,9 +17,10 @@ import {
 interface HeaderProps {
   onOpenNewRequest: () => void;
   onOpenNewOrg: () => void;
+  onOpenProfile?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg }) => {
+export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, onOpenProfile }) => {
   const { 
     organizations, 
     activeOrgId, 
@@ -182,32 +183,42 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg }
 
             {/* Authenticated User Profile & Logout */}
             {firebaseUser && (
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50/90 shadow-2xs">
-                {firebaseUser.photoURL ? (
-                  <img
-                    src={firebaseUser.photoURL}
-                    alt={currentUser.name}
-                    className="h-7 w-7 rounded-full object-cover ring-2 ring-emerald-500/30"
-                    referrerPolicy="no-referrer"
-                  />
-                ) : (
-                  <div className="h-7 w-7 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold text-xs shadow-2xs">
-                    {(currentUser.name || firebaseUser.email || 'U').slice(0, 2).toUpperCase()}
+              <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50/90 hover:bg-slate-100 shadow-2xs transition">
+                <button
+                  type="button"
+                  onClick={onOpenProfile}
+                  className="flex items-center gap-2 text-right cursor-pointer group"
+                  title="فتح الملف الشخصي وتغيير كلمة المرور"
+                >
+                  {firebaseUser.photoURL ? (
+                    <img
+                      src={firebaseUser.photoURL}
+                      alt={currentUser.name}
+                      className="h-7 w-7 rounded-full object-cover ring-2 ring-emerald-500/30 group-hover:ring-emerald-500 transition"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <div className="h-7 w-7 rounded-full bg-emerald-600 group-hover:bg-emerald-700 text-white flex items-center justify-center font-bold text-xs shadow-2xs transition">
+                      {(currentUser.name || firebaseUser.email || 'U').slice(0, 2).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="text-right flex flex-col justify-center leading-tight hidden sm:flex">
+                    <span className="font-bold text-xs text-slate-900 max-w-[120px] truncate group-hover:text-emerald-700 transition">
+                      {currentUser.name}
+                    </span>
+                    <span className="text-[10px] text-slate-500 max-w-[120px] truncate font-mono">
+                      {firebaseUser.email}
+                    </span>
                   </div>
-                )}
-                <div className="text-right flex flex-col justify-center leading-tight hidden sm:flex">
-                  <span className="font-bold text-xs text-slate-900 max-w-[120px] truncate">
-                    {currentUser.name}
-                  </span>
-                  <span className="text-[10px] text-slate-500 max-w-[120px] truncate font-mono">
-                    {firebaseUser.email}
-                  </span>
-                </div>
+                </button>
+
+                <div className="h-4 w-[1px] bg-slate-200 mx-0.5"></div>
+
                 <button
                   type="button"
                   onClick={handleLogout}
                   disabled={isAuthProcessing}
-                  className="mr-1 flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200/60 transition cursor-pointer disabled:opacity-50"
+                  className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200/60 transition cursor-pointer disabled:opacity-50"
                   title="تسجيل الخروج من الحساب"
                 >
                   <LogOut className="h-3.5 w-3.5" />

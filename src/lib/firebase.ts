@@ -7,6 +7,9 @@ import {
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
   updateProfile,
+  updatePassword,
+  reauthenticateWithCredential,
+  EmailAuthProvider,
   signOut,
   onAuthStateChanged,
   type User as FirebaseUser,
@@ -237,6 +240,29 @@ export async function adminCreateUserAccount(
       await deleteApp(tempApp);
     } catch {}
   }
+}
+
+/**
+ * Change password for the current authenticated user
+ */
+export async function changeUserPassword(currentPassword: string, newPassword: string): Promise<void> {
+  if (!auth.currentUser || !auth.currentUser.email) {
+    throw new Error('لا يوجد مستخدم مسجل حالياً.');
+  }
+  const credential = EmailAuthProvider.credential(auth.currentUser.email, currentPassword);
+  await reauthenticateWithCredential(auth.currentUser, credential);
+  await updatePassword(auth.currentUser, newPassword);
+}
+
+/**
+ * Update current user's profile
+ */
+export async function updateUserProfile(displayName: string, photoURL?: string): Promise<void> {
+  if (!auth.currentUser) throw new Error('لا يوجد مستخدم مسجل حالياً.');
+  await updateProfile(auth.currentUser, { 
+    displayName: displayName.trim(), 
+    photoURL: photoURL || auth.currentUser.photoURL 
+  });
 }
 
 /**

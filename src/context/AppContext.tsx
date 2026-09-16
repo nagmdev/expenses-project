@@ -16,12 +16,15 @@ import {
   initFirebase,
   getDb,
   setFirestoreDoc,
+  updateFirestoreDoc,
   deleteFirestoreDoc,
   collection,
   onSnapshot,
   doc,
   setDoc,
   type Firestore,
+  changeUserPassword,
+  updateUserProfile,
   signInWithGoogle,
   loginWithEmailPassword,
   sendPasswordReset,
@@ -162,6 +165,8 @@ interface AppContextType {
   loginWithEmail: (email: string, password: string) => Promise<any>;
   resetPassword: (email: string) => Promise<any>;
   logoutUser: () => Promise<void>;
+  updateUserProfileInfo: (displayName: string, phone?: string) => Promise<{ success: boolean; error?: string }>;
+  changeCurrentUserPassword: (currentPass: string, newPass: string) => Promise<{ success: boolean; error?: string }>;
   
   // Admin User Provisioning
   createCompanyUser: (data: {
@@ -298,7 +303,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Super admin emails list (loaded from default, env, local storage, and Firestore 'super_admins' collection)
   const [superAdminEmails, setSuperAdminEmails] = useState<string[]>(() => {
-    const defaultAdmins = ['marwanagib813@gmail.com'];
+    const defaultAdmins = ['marwanagib813@gmail.com', 'mahmoud@tieapps.com'];
     const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
     const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
     const localAdmins = safeGetLocal<string[]>(SUPER_ADMINS_STORAGE_KEY, []);
@@ -318,7 +323,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const isSuperAdmin = useMemo(() => {
     if (!userEmail) return false;
-    if (userEmail === 'marwanagib813@gmail.com') return true;
+    if (userEmail === 'marwanagib813@gmail.com' || userEmail === 'mahmoud@tieapps.com') return true;
     if (superAdminEmails.some(e => e.trim().toLowerCase() === userEmail)) return true;
     if (userMemberRecord?.role === 'super_admin') return true;
     return false;
@@ -363,9 +368,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
+    const defaultAdminName = userEmail === 'marwanagib813@gmail.com' ? 'مروه نجيب' : userEmail === 'mahmoud@tieapps.com' ? 'محمود' : userEmail.split('@')[0];
+
     return {
       id: firebaseUser.uid,
-      name: userMemberRecord?.userName || firebaseUser.displayName || (isSuperAdmin ? 'مروه نجيب' : userEmail.split('@')[0]) || 'مستخدم',
+      name: userMemberRecord?.userName || firebaseUser.displayName || defaultAdminName || 'مستخدم',
       email: firebaseUser.email || '',
       role: resolvedRole,
       avatar: firebaseUser.photoURL || undefined,
@@ -1489,6 +1496,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {}
   };
 
+  const handleChangeCurrentUserPassword = async (currentPass: string, newPass: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      await changeUserPassword(currentPass, newPass);
+      return { success: true };
+    } catch (err: any) {
+      console.error('[ChangePassword Error]', err);
+      const code = err?.code || '';
+      if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        return { success: false, error: 'كلمة المرور الحالية غير صحيحة.' };
+      } else if (code === 'auth/weak-password') {
+        return { success: false, error: 'كلمة المرور الجديدة ضعيفة. يجب أن تتكون من 6 خانات على الأقل.' };
+      } else if (code === 'auth/too-many-requests') {
+        return { success: false, error: 'تم تجاوز عدد المحاولات مؤقتاً. يرجى الانتظار قليلاً.' };
+      }
+      return { success: false, error: err?.message || 'تعذر تغيير كلمة المرور.' };
+    }
+  };
+
+  const handleUpdateUserProfileInfo = async (displayName: string, phone?: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      await updateUserProfile(displayName);
+      
+      if (isSuperAdmin && userEmail) {
+        const docId = userEmail.replace(/[^a-zA-Z0-9]/g, '_');
+        await setFirestoreDoc('super_admins', docId, {
+          name: displayName.trim(),
+          phone: phone ? phone.trim() : '',
+          updatedAt: new Date().toISOString()
+        });
+      }
+      
+      if (userMemberRecord) {
+        await updateFirestoreDoc('members', userMemberRecord.id, {
+          userName: displayName.trim(),
+          phone: phone ? phone.trim() : (userMemberRecord.phone || '')
+        });
+      }
+
+      setFirebaseSyncCounter(prev => prev + 1);
+      return { success: true };
+    } catch (err: any) {
+      console.error('[UpdateProfile Error]', err);
+      return { success: false, error: err?.message || 'تعذر تحديث البيانات الشخصية.' };
+    }
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -1523,6 +1576,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         loginWithEmail: handleLoginWithEmail,
         resetPassword: handleResetPassword,
         logoutUser: handleLogoutUser,
+        updateUserProfileInfo: handleUpdateUserProfileInfo,
+        changeCurrentUserPassword: handleChangeCurrentUserPassword,
         createCompanyUser,
         addOrganization,
         addMember,
