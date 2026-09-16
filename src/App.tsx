@@ -93,8 +93,8 @@ const MainApp: React.FC = () => {
         onOpenProfile={() => setIsProfileModalOpen(true)}
       />
 
-      {/* Firebase Permission / Connection Alert */}
-      {firebaseError && (
+      {/* Firebase Permission / Connection Alert (Super Admin Only) */}
+      {firebaseError && currentRole === 'super_admin' && (
         <div className="bg-amber-50 border-b border-amber-200 px-4 py-2.5 text-xs text-amber-900 flex items-center justify-between gap-3 shadow-xs">
           <div className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />

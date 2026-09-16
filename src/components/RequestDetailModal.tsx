@@ -276,11 +276,11 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
           {/* ACTION FORMS ACCORDING TO ROLES */}
 
-          {/* Manager Action Buttons Bar */}
-          {currentRole === 'org_admin' && (
+          {/* Manager & Super Admin Action Buttons Bar */}
+          {(currentRole === 'org_admin' || currentRole === 'super_admin') && (
             <div className="pt-4 border-t border-slate-100">
               <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-xs font-bold text-slate-500">إجراءات مدير المؤسسة:</span>
+                <span className="text-xs font-bold text-slate-500">إجراءات الاعتماد والصرف المالي:</span>
                 
                 <div className="flex items-center gap-2 flex-wrap">
                   {/* If pending or clarification_requested: can approve, clarify, reject */}
@@ -490,8 +490,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
             </div>
           )}
 
-          {/* Employee Action: Reply if clarification requested */}
-          {currentRole === 'employee' && request.status === 'clarification_requested' && (
+          {/* Requester Action: Reply if clarification requested */}
+          {(currentRole === 'employee' || request.requesterId === currentUser.id || (request.requesterEmail && currentUser.email && request.requesterEmail.toLowerCase() === currentUser.email.toLowerCase())) && request.status === 'clarification_requested' && (
             <div className="pt-4 border-t border-slate-100">
               <form onSubmit={handleReply} className="p-4 bg-rose-50/70 border border-rose-300 rounded-xl space-y-3">
                 <h5 className="font-bold text-rose-900 text-xs">الرد على طلب التوضيح وتقديم المستندات:</h5>

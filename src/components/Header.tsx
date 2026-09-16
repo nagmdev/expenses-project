@@ -53,8 +53,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
 
   // Count pending actions for badge
   const pendingCount = requests.filter(r => 
-    (activeOrgId === 'all' || r.orgId === activeOrgId) && 
-    (r.status === 'pending' || r.status === 'clarification_requested')
+    r.status === 'pending' || r.status === 'clarification_requested'
   ).length;
 
   return (
@@ -227,26 +226,26 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
               </div>
             )}
 
-            {/* Firebase Real-Time Status Badge */}
-            {isFirebaseConnected ? (
-              <button
-                type="button"
-                onClick={openFirebaseModal}
-                className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 shadow-2xs transition cursor-pointer"
-                title="متصل بالسحابة المشفرة"
-              >
-                <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                <span>🔥 متصل سحابياً</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={openFirebaseModal}
-                className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 shadow-2xs transition cursor-pointer"
-              >
-                <Flame className="h-3.5 w-3.5 text-amber-600 animate-pulse" />
-                <span>إعداد Firebase</span>
-              </button>
+            {/* Firebase Real-Time Status Badge (Restricted to Super Admin Only) */}
+            {currentRole === 'super_admin' && (
+              isFirebaseConnected ? (
+                <div
+                  className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border border-emerald-300 bg-emerald-50 text-emerald-700 shadow-2xs select-none"
+                  title="متصل بالسحابة المشفرة"
+                >
+                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span>🔥 متصل سحابياً</span>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={openFirebaseModal}
+                  className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 shadow-2xs transition cursor-pointer"
+                >
+                  <Flame className="h-3.5 w-3.5 text-amber-600 animate-pulse" />
+                  <span>إعداد Firebase</span>
+                </button>
+              )
             )}
 
             {/* Refresh Data */}

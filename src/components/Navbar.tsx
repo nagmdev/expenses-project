@@ -15,11 +15,13 @@ export const Navbar: React.FC = () => {
   const { activeTab, setActiveTab, requests, activeOrgId, currentRole, currentUser } = useApp();
 
   // Requests that need attention
-  const filteredRequests = requests.filter(r => activeOrgId === 'all' || r.orgId === activeOrgId);
-  const pendingRequestsCount = filteredRequests.filter(r => r.status === 'pending').length;
+  const pendingRequestsCount = requests.filter(r => r.status === 'pending').length;
   
   // My requests count
-  const myRequests = requests.filter(r => r.requesterId === currentUser.id);
+  const myRequests = requests.filter(r => 
+    r.requesterId === currentUser.id || 
+    (r.requesterEmail && currentUser.email && r.requesterEmail.toLowerCase() === currentUser.email.toLowerCase())
+  );
   const myClarificationCount = myRequests.filter(r => r.status === 'clarification_requested').length;
 
   // Build nav items dynamically based on role

@@ -36,8 +36,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     currentUser 
   } = useApp();
 
-  const orgServices = services.filter(s => activeOrgId === 'all' || s.orgId === activeOrgId);
-  const orgProviders = providers.filter(p => activeOrgId === 'all' || p.orgId === activeOrgId);
+  const orgServices = activeOrgId && activeOrgId !== 'all' ? services.filter(s => s.orgId === activeOrgId) : services;
+  const orgProviders = activeOrgId && activeOrgId !== 'all' ? providers.filter(p => p.orgId === activeOrgId) : providers;
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -125,6 +125,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         attachmentNames: attachmentName.trim() ? [attachmentName.trim()] : ['فاتورة_عرض_سعر.pdf'],
         preferredPaymentMethod,
         paymentAccountDetails: paymentAccountDetails.trim(),
+        orgId: currentEffectiveOrgId || undefined,
       });
 
       onClose();

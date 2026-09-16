@@ -33,7 +33,6 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   const [categoryFilter, setCategoryFilter] = useState('all');
 
   const filteredRequests = requests.filter(req => {
-    const matchOrg = activeOrgId === 'all' || req.orgId === activeOrgId;
     const matchStatus = statusFilter === 'all' || req.status === statusFilter;
     const matchCategory = categoryFilter === 'all' || req.serviceCategoryId === categoryFilter;
     const matchSearch = 
@@ -42,7 +41,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
       req.requesterName.toLowerCase().includes(search.toLowerCase()) ||
       req.providerName.toLowerCase().includes(search.toLowerCase());
 
-    return matchOrg && matchStatus && matchCategory && matchSearch;
+    return matchStatus && matchCategory && matchSearch;
   });
 
   const getStatusBadge = (status: ExpenseRequest['status']) => {

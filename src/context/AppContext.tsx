@@ -210,6 +210,7 @@ interface AppContextType {
     attachmentNames?: string[];
     preferredPaymentMethod?: PaymentMethod;
     paymentAccountDetails?: string;
+    orgId?: string;
   }) => Promise<void>;
   
   approveRequest: (requestId: string, note?: string) => Promise<void>;
@@ -347,15 +348,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return activeOrgId || (rawOrganizations[0]?.id || '');
   }, [isSuperAdmin, activeOrgId, userMemberRecord, rawOrganizations]);
 
-  // Keep activeOrgId in sync with effectiveOrgId for non-super admins
+  // Keep activeOrgId in sync with effectiveOrgId and prevent empty string deadlock
   useEffect(() => {
     if (!isSuperAdmin && effectiveOrgId && effectiveOrgId !== activeOrgId) {
       setActiveOrgIdState(effectiveOrgId);
       try {
         localStorage.setItem(STORAGE_KEYS.ACTIVE_ORG, effectiveOrgId);
       } catch {}
+    } else if (isSuperAdmin && !activeOrgId && rawOrganizations.length > 0) {
+      setActiveOrgIdState(rawOrganizations[0].id);
+      try {
+        localStorage.setItem(STORAGE_KEYS.ACTIVE_ORG, rawOrganizations[0].id);
+      } catch {}
     }
-  }, [isSuperAdmin, effectiveOrgId, activeOrgId]);
+  }, [isSuperAdmin, effectiveOrgId, activeOrgId, rawOrganizations]);
 
   // Dynamic currentUser object
   const currentUser: User = useMemo(() => {
@@ -435,28 +441,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const scopedRequests = useMemo(() => {
     if (!firebaseUser) return [];
 
+    const myUid = firebaseUser.uid;
+    const myEmail = userEmail.toLowerCase().trim();
+    const myName = currentUser.name?.trim();
+
     if (resolvedRole === 'super_admin') {
       if (effectiveOrgId && effectiveOrgId !== 'all') {
-        return rawRequests.filter(r => r.orgId === effectiveOrgId);
+        // Super admin sees requests for the selected org, plus any legacy unassigned requests
+        return rawRequests.filter(r => r.orgId === effectiveOrgId || !r.orgId);
       }
       return rawRequests;
     }
 
     if (resolvedRole === 'org_admin') {
-      return rawRequests.filter(r => r.orgId === effectiveOrgId);
+      return rawRequests.filter(r => 
+        r.orgId === effectiveOrgId || 
+        r.requesterId === myUid || 
+        (r.requesterEmail && myEmail && r.requesterEmail.toLowerCase() === myEmail)
+      );
     }
 
-    // Role is employee:
-    const myUid = firebaseUser.uid;
-    const myEmail = userEmail;
-    const myName = currentUser.name;
-
+    // Role is employee: strictly sees their own submitted requests (100% permanently retained)
     return rawRequests.filter(r => {
-      const matchOrg = r.orgId === effectiveOrgId;
-      const isMyRequest = r.requesterId === myUid || 
-                          r.requesterId === currentUser.id || 
-                          (r.requesterName && myName && r.requesterName.trim() === myName.trim());
-      return matchOrg && isMyRequest;
+      const isMyRequest = 
+        r.requesterId === myUid || 
+        r.requesterId === currentUser.id || 
+        (r.requesterEmail && myEmail && r.requesterEmail.toLowerCase() === myEmail) ||
+        (r.requesterName && myName && r.requesterName.trim() === myName);
+      return isMyRequest;
     });
   }, [firebaseUser, resolvedRole, rawRequests, effectiveOrgId, userEmail, currentUser]);
 
@@ -1015,10 +1027,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     attachmentNames?: string[];
     preferredPaymentMethod?: PaymentMethod;
     paymentAccountDetails?: string;
+    orgId?: string;
   }) => {
     const service = rawServices.find(s => s.id === data.serviceCategoryId);
     const provider = rawProviders.find(p => p.id === data.providerId);
-    const orgId = effectiveOrgId || (rawOrganizations[0]?.id || '');
+    
+    // Resolve organization ID rigorously
+    let targetOrgId = data.orgId || (effectiveOrgId && effectiveOrgId !== 'all' ? effectiveOrgId : '');
+    if (!targetOrgId) {
+      if (userMemberRecord?.orgId) {
+        targetOrgId = userMemberRecord.orgId;
+      } else if (rawOrganizations.length > 0) {
+        targetOrgId = rawOrganizations[0].id;
+      } else {
+        // Auto-provision default organization so no order is ever orphaned
+        const defaultOrgId = `org-${Date.now()}`;
+        const defaultOrg: Organization = {
+          id: defaultOrgId,
+          name: 'المؤسسة الرئيسية',
+          code: 'MAIN',
+          currency: data.currency || 'SAR',
+          budget: 500000,
+          description: 'المؤسسة الرئيسية المعتمدة للنظام',
+          createdAt: new Date().toISOString(),
+        };
+        targetOrgId = defaultOrgId;
+        if (isFirebaseConfigured() && getDb()) {
+          try {
+            await setFirestoreDoc('organizations', defaultOrgId, defaultOrg);
+          } catch (e) {
+            console.error('[Firebase] Auto create default org error:', e);
+          }
+        }
+        setRawOrganizations([defaultOrg]);
+        safeSetLocal(STORAGE_KEYS.ORGS, [defaultOrg]);
+      }
+    }
 
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -1034,9 +1078,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newRequest: ExpenseRequest = {
       id: `req-${Date.now()}`,
       requestNumber: `REQ-${Math.floor(10000 + Math.random() * 90000)}`,
-      orgId,
+      orgId: targetOrgId,
       requesterId: currentUser.id,
       requesterName: currentUser.name,
+      requesterEmail: currentUser.email || userEmail,
       requesterDepartment: currentUser.role === 'org_admin' ? 'الإدارة العامة' : (userMemberRecord?.department || 'العمليات والتوريد'),
       requesterPhone: currentUser.phone || userMemberRecord?.phone,
       preferredPaymentMethod: data.preferredPaymentMethod || 'instapay',

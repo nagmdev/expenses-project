@@ -48,10 +48,10 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
 
   const [timeFilter, setTimeFilter] = useState<'all' | 'q3' | 'month'>('all');
 
-  // Filter requests by organization
-  const orgRequests = requests.filter(r => activeOrgId === 'all' || r.orgId === activeOrgId);
-  const currentOrgServices = services.filter(s => activeOrgId === 'all' || s.orgId === activeOrgId);
-  const currentOrgProviders = providers.filter(p => activeOrgId === 'all' || p.orgId === activeOrgId);
+  // Scoped data already verified and isolated by AppContext
+  const orgRequests = requests;
+  const currentOrgServices = services;
+  const currentOrgProviders = providers;
 
   // Financial Metrics
   const disbursedRequests = orgRequests.filter(r => r.status === 'disbursed');

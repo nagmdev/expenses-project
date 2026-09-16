@@ -122,6 +122,7 @@ export interface ExpenseRequest {
   requesterId: string;
   requesterName: string;
   requesterDepartment: string;
+  requesterEmail?: string;
   requesterPhone?: string;
   preferredPaymentMethod?: PaymentMethod;
   paymentAccountDetails?: string; // e.g. InstaPay IPA (user@instapay) or IBAN or Mobile Wallet #
