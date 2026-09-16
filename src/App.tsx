@@ -14,6 +14,7 @@ import { RequestDetailModal } from './components/RequestDetailModal';
 import { FirebaseConfigModal } from './components/FirebaseConfigModal';
 import { ExpenseRequest } from './types';
 import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
+import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
 
 const MainApp: React.FC = () => {
   const { 
@@ -239,7 +240,7 @@ const MainApp: React.FC = () => {
                     type="text"
                     required
                     value={newOrgCode}
-                    onChange={(e) => setNewOrgCode(e.target.value.toUpperCase())}
+                    onChange={(e) => setNewOrgCode(sanitizeCode(e.target.value, 5))}
                     placeholder="RWD"
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono uppercase"
                   />
@@ -261,13 +262,14 @@ const MainApp: React.FC = () => {
               </div>
 
               <div>
-                <label className="block font-bold text-slate-700 mb-1">الميزانية السنوية التقديرية</label>
+                <label className="block font-bold text-slate-700 mb-1">الميزانية السنوية التقديرية (أرقام فقط)</label>
                 <input
-                  type="number"
-                  min="0"
+                  type="text"
+                  inputMode="numeric"
                   value={newOrgBudget}
-                  onChange={(e) => setNewOrgBudget(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                  onKeyDown={(e) => handleNumericKeyDown(e, false)}
+                  onChange={(e) => setNewOrgBudget(sanitizeDigitsOnly(e.target.value, 12))}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
                 />
               </div>
 

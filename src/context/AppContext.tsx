@@ -318,7 +318,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const isSuperAdmin = useMemo(() => {
     if (!userEmail) return false;
-    if (superAdminEmails.includes(userEmail)) return true;
+    if (userEmail === 'marwanagib813@gmail.com') return true;
+    if (superAdminEmails.some(e => e.trim().toLowerCase() === userEmail)) return true;
     if (userMemberRecord?.role === 'super_admin') return true;
     return false;
   }, [userEmail, superAdminEmails, userMemberRecord]);
@@ -485,7 +486,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
+    // Await authentication before attaching listeners to avoid security rule permission-denied
+    if (!firebaseUser) {
+      return;
+    }
+
     setIsFirebaseConnected(true);
+    setFirebaseError(null);
     purgeSampleDataFromFirestore().catch(() => {});
 
     // 1. Organizations Listener
@@ -575,7 +582,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubRequests();
       unsubSuperAdmins();
     };
-  }, [firebaseSyncCounter]);
+  }, [firebaseUser?.uid, firebaseSyncCounter]);
 
   // Refresh data: sync with local Express API if present and Firebase is not active
   const refreshData = useCallback(async () => {
@@ -1457,11 +1464,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const handleSignInWithGoogle = async () => {
-    return await signInWithGoogle();
+    const res = await signInWithGoogle();
+    setFirebaseSyncCounter(prev => prev + 1);
+    return res;
   };
 
   const handleLoginWithEmail = async (email: string, pass: string) => {
-    return await loginWithEmailPassword(email, pass);
+    const res = await loginWithEmailPassword(email, pass);
+    setFirebaseSyncCounter(prev => prev + 1);
+    return res;
   };
 
   const handleResetPassword = async (email: string) => {

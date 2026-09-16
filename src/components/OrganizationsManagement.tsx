@@ -21,6 +21,13 @@ import {
   KeyRound
 } from 'lucide-react';
 import { Role } from '../types';
+import { 
+  sanitizeDigitsOnly, 
+  sanitizePhone, 
+  sanitizeCode, 
+  handleNumericKeyDown, 
+  isValidEmail 
+} from '../utils/validation';
 
 export const OrganizationsManagement: React.FC = () => {
   const { 
@@ -106,6 +113,16 @@ export const OrganizationsManagement: React.FC = () => {
   const handleProvisionUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!memberName.trim() || !memberEmail.trim() || !memberPassword.trim()) return;
+
+    if (!isValidEmail(memberEmail.trim())) {
+      setProvisionError('يرجى إدخال بريد إلكتروني مهني صحيح (مثال: user@company.com).');
+      return;
+    }
+
+    if (memberPassword.trim().length < 6) {
+      setProvisionError('يجب أن تتكون كلمة المرور من 6 خانات على الأقل.');
+      return;
+    }
 
     setProvisionError(null);
     setProvisionLoading(true);
@@ -550,11 +567,13 @@ export const OrganizationsManagement: React.FC = () => {
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slate-700 mb-1">رقم الهاتف المحمول</label>
+                    <label className="block font-bold text-slate-700 mb-1">رقم الهاتف المحمول (أرقام فقط)</label>
                     <input
-                      type="text"
+                      type="tel"
+                      inputMode="numeric"
                       value={memberPhone}
-                      onChange={(e) => setMemberPhone(e.target.value)}
+                      onKeyDown={(e) => handleNumericKeyDown(e, false)}
+                      onChange={(e) => setMemberPhone(sanitizePhone(e.target.value))}
                       placeholder="010xxxxxxxx أو 05xxxxxxxx"
                       className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-xs"
                     />
@@ -716,12 +735,12 @@ export const OrganizationsManagement: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">كود الشركة (3-4 أحرف)</label>
+                  <label className="block font-bold text-slate-700 mb-1">كود الشركة (3-5 أحرف)</label>
                   <input
                     type="text"
                     required
                     value={orgCode}
-                    onChange={(e) => setOrgCode(e.target.value.toUpperCase())}
+                    onChange={(e) => setOrgCode(sanitizeCode(e.target.value, 5))}
                     placeholder="LOG"
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono uppercase"
                   />
@@ -743,13 +762,14 @@ export const OrganizationsManagement: React.FC = () => {
               </div>
 
               <div>
-                <label className="block font-bold text-slate-700 mb-1">الميزانية السنوية التقديرية</label>
+                <label className="block font-bold text-slate-700 mb-1">الميزانية السنوية التقديرية (أرقام فقط)</label>
                 <input
-                  type="number"
-                  min="0"
+                  type="text"
+                  inputMode="numeric"
                   value={orgBudget}
-                  onChange={(e) => setOrgBudget(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                  onKeyDown={(e) => handleNumericKeyDown(e, false)}
+                  onChange={(e) => setOrgBudget(sanitizeDigitsOnly(e.target.value, 12))}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
                 />
               </div>
 

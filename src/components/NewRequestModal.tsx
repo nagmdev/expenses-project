@@ -10,6 +10,13 @@ import {
   CreditCard 
 } from 'lucide-react';
 import { PaymentMethod } from '../types';
+import { 
+  sanitizeAmount, 
+  sanitizeDigitalWallet, 
+  sanitizeIBAN, 
+  sanitizeInstaPay, 
+  handleNumericKeyDown 
+} from '../utils/validation';
 
 interface NewRequestModalProps {
   isOpen: boolean;
@@ -231,12 +238,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                 المبلغ المطلوب ({activeOrg?.currency || 'SAR'}) *
               </label>
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 required
-                min="1"
-                step="0.01"
                 value={amount}
-                onChange={(e) => setAmount(e.target.value)}
+                onKeyDown={(e) => handleNumericKeyDown(e, true)}
+                onChange={(e) => setAmount(sanitizeAmount(e.target.value))}
                 placeholder="0.00"
                 className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 font-bold text-slate-900"
               />
@@ -268,7 +275,10 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                 <label className="block font-bold text-slate-700 mb-1">طريقة التحويل المفضلة</label>
                 <select
                   value={preferredPaymentMethod}
-                  onChange={(e: any) => setPreferredPaymentMethod(e.target.value)}
+                  onChange={(e: any) => {
+                    setPreferredPaymentMethod(e.target.value);
+                    setPaymentAccountDetails('');
+                  }}
                   className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-bold"
                 >
                   <option value="instapay">انستاباي (InstaPay)</option>
@@ -281,18 +291,35 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               <div>
                 <label className="block font-bold text-slate-700 mb-1">
                   {preferredPaymentMethod === 'instapay' ? 'عنوان انستاباي (IPA / رقم الهاتف)' :
-                   preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية' :
+                   preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية (أرقام فقط)' :
                    preferredPaymentMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN)' : 'جهة الاستلام'}
                 </label>
                 <input
                   type="text"
                   required
+                  inputMode={preferredPaymentMethod === 'digital_wallet' ? 'numeric' : 'text'}
                   value={paymentAccountDetails}
-                  onChange={(e) => setPaymentAccountDetails(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (preferredPaymentMethod === 'digital_wallet') {
+                      handleNumericKeyDown(e, false);
+                    }
+                  }}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    if (preferredPaymentMethod === 'digital_wallet') {
+                      setPaymentAccountDetails(sanitizeDigitalWallet(raw));
+                    } else if (preferredPaymentMethod === 'bank_transfer') {
+                      setPaymentAccountDetails(sanitizeIBAN(raw));
+                    } else if (preferredPaymentMethod === 'instapay') {
+                      setPaymentAccountDetails(sanitizeInstaPay(raw));
+                    } else {
+                      setPaymentAccountDetails(raw);
+                    }
+                  }}
                   placeholder={
                     preferredPaymentMethod === 'instapay' ? 'user@instapay أو رقم الهاتف' :
-                    preferredPaymentMethod === 'digital_wallet' ? '010xxxxxxxx' :
-                    preferredPaymentMethod === 'bank_transfer' ? 'EG... / SA...' : 'الفرع أو الخزينة'
+                    preferredPaymentMethod === 'digital_wallet' ? '010xxxxxxxx (أرقام فقط)' :
+                    preferredPaymentMethod === 'bank_transfer' ? 'EG... / SA... (حروف وأرقام)' : 'الفرع أو الخزينة'
                   }
                   className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-mono text-xs"
                 />

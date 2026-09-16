@@ -14,6 +14,8 @@ import {
   Wallet
 } from 'lucide-react';
 
+import { isValidEmail } from '../utils/validation';
+
 export const LoginPage: React.FC = () => {
   const { loginWithEmail, signInWithGoogle, resetPassword } = useApp();
 
@@ -32,13 +34,19 @@ export const LoginPage: React.FC = () => {
 
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim() || !password) return;
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !password) return;
+
+    if (!isValidEmail(cleanEmail)) {
+      setError('يرجى إدخال صيغة بريد إلكتروني صحيحة (مثال: name@company.com).');
+      return;
+    }
 
     setError(null);
     setIsLoading(true);
 
     try {
-      await loginWithEmail(email.trim(), password);
+      await loginWithEmail(cleanEmail, password);
     } catch (err: any) {
       console.error('[Login Error]', err);
       const code = err?.code || '';
@@ -75,13 +83,19 @@ export const LoginPage: React.FC = () => {
 
   const handleResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!resetEmail.trim()) return;
+    const cleanEmail = resetEmail.trim().toLowerCase();
+    if (!cleanEmail) return;
+
+    if (!isValidEmail(cleanEmail)) {
+      setResetError('يرجى إدخال بريد إلكتروني صحيح لاستعادة كلمة المرور.');
+      return;
+    }
 
     setResetError(null);
     setResetLoading(true);
 
     try {
-      await resetPassword(resetEmail.trim());
+      await resetPassword(cleanEmail);
       setResetSuccess(true);
     } catch (err: any) {
       console.error('[Reset Password Error]', err);

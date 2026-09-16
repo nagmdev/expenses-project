@@ -17,6 +17,8 @@ import {
   Warehouse 
 } from 'lucide-react';
 
+import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from '../utils/validation';
+
 export const ServicesManagement: React.FC = () => {
   const { services, activeOrgId, activeOrg, organizations, addService, updateService, deleteService } = useApp();
 
@@ -237,20 +239,22 @@ export const ServicesManagement: React.FC = () => {
                   <input
                     type="text"
                     value={code}
-                    onChange={(e) => setCode(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
+                    onChange={(e) => setCode(sanitizeCode(e.target.value, 6))}
+                    placeholder="SRV-01"
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono uppercase"
                   />
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">سقف الميزانية التقديرية</label>
+                  <label className="block font-bold text-slate-700 mb-1">سقف الميزانية التقديرية (أرقام فقط)</label>
                   <input
-                    type="number"
-                    min="0"
+                    type="text"
+                    inputMode="numeric"
                     value={budgetLimit}
-                    onChange={(e) => setBudgetLimit(e.target.value)}
-                    placeholder="50,000"
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                    onKeyDown={(e) => handleNumericKeyDown(e, false)}
+                    onChange={(e) => setBudgetLimit(sanitizeDigitsOnly(e.target.value, 12))}
+                    placeholder="50000"
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
                   />
                 </div>
               </div>

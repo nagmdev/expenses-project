@@ -17,6 +17,13 @@ import {
   CheckCircle
 } from 'lucide-react';
 
+import { 
+  sanitizePhone, 
+  sanitizeTaxOrCR, 
+  sanitizeIBAN, 
+  handleNumericKeyDown 
+} from '../utils/validation';
+
 export const VendorsManagement: React.FC = () => {
   const { providers, services, activeOrgId, activeOrg, organizations, addProvider, updateProvider, deleteProvider } = useApp();
 
@@ -317,12 +324,14 @@ export const VendorsManagement: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">رقم الهاتف *</label>
+                  <label className="block font-bold text-slate-700 mb-1">رقم الهاتف * (أرقام فقط)</label>
                   <input
-                    type="text"
+                    type="tel"
+                    inputMode="numeric"
                     required
                     value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
+                    onKeyDown={(e) => handleNumericKeyDown(e, false)}
+                    onChange={(e) => setPhone(sanitizePhone(e.target.value))}
                     placeholder="+966 50..."
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
                   />
@@ -335,7 +344,7 @@ export const VendorsManagement: React.FC = () => {
                   <input
                     type="email"
                     value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                    onChange={(e) => setEmail(e.target.value.trim().toLowerCase())}
                     placeholder="billing@provider.com"
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                   />
@@ -353,20 +362,26 @@ export const VendorsManagement: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">الرقم الضريبي (VAT)</label>
+                  <label className="block font-bold text-slate-700 mb-1">الرقم الضريبي (أرقام فقط)</label>
                   <input
                     type="text"
+                    inputMode="numeric"
                     value={taxNumber}
-                    onChange={(e) => setTaxNumber(e.target.value)}
+                    onKeyDown={(e) => handleNumericKeyDown(e, false)}
+                    onChange={(e) => setTaxNumber(sanitizeTaxOrCR(e.target.value, 15))}
+                    placeholder="300000000000003"
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">رقم السجل التجاري (CR)</label>
+                  <label className="block font-bold text-slate-700 mb-1">رقم السجل التجاري (أرقام فقط)</label>
                   <input
                     type="text"
+                    inputMode="numeric"
                     value={crNumber}
-                    onChange={(e) => setCrNumber(e.target.value)}
+                    onKeyDown={(e) => handleNumericKeyDown(e, false)}
+                    onChange={(e) => setCrNumber(sanitizeTaxOrCR(e.target.value, 10))}
+                    placeholder="1010000000"
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
                   />
                 </div>
@@ -387,8 +402,9 @@ export const VendorsManagement: React.FC = () => {
                   <input
                     type="text"
                     value={iban}
-                    onChange={(e) => setIban(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono"
+                    onChange={(e) => setIban(sanitizeIBAN(e.target.value))}
+                    placeholder="SA..."
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono uppercase"
                   />
                 </div>
               </div>
