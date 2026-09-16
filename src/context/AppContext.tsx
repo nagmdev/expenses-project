@@ -365,7 +365,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return {
       id: firebaseUser.uid,
-      name: userMemberRecord?.userName || firebaseUser.displayName || userEmail.split('@')[0] || 'مستخدم',
+      name: userMemberRecord?.userName || firebaseUser.displayName || (isSuperAdmin ? 'مروه نجيب' : userEmail.split('@')[0]) || 'مستخدم',
       email: firebaseUser.email || '',
       role: resolvedRole,
       avatar: firebaseUser.photoURL || undefined,
