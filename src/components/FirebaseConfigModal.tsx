@@ -34,7 +34,7 @@ export const FirebaseConfigModal: React.FC<FirebaseConfigModalProps> = ({
   onClose,
   onConfigSaved,
 }) => {
-  const [activeTab, setActiveTab] = useState<'config' | 'guide'>('config');
+  const [activeTab, setActiveTab] = useState<'config' | 'rules' | 'guide'>('config');
   const [rawSnippet, setRawSnippet] = useState('');
   const [apiKey, setApiKey] = useState(() => getFirebaseConfig()?.apiKey || '');
   const [authDomain, setAuthDomain] = useState(() => getFirebaseConfig()?.authDomain || '');
@@ -229,31 +229,44 @@ export const FirebaseConfigModal: React.FC<FirebaseConfigModalProps> = ({
         </div>
 
         {/* Modal Tabs */}
-        <div className="flex border-b border-slate-200 bg-slate-50 px-6 pt-3 gap-2">
+        <div className="flex border-b border-slate-200 bg-slate-50 px-6 pt-3 gap-2 overflow-x-auto">
           <button
             type="button"
             onClick={() => setActiveTab('config')}
-            className={`pb-3 px-4 text-xs font-bold transition border-b-2 flex items-center gap-2 cursor-pointer ${
+            className={`pb-3 px-4 text-xs font-bold transition border-b-2 flex items-center gap-2 cursor-pointer whitespace-nowrap ${
               activeTab === 'config'
                 ? 'border-orange-500 text-orange-600 bg-white rounded-t-xl shadow-xs'
                 : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
             <Server className="h-4 w-4" />
-            <span>بيانات الاتصال المباشر (UI Config)</span>
+            <span>بيانات الاتصال المباشر (Config)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('rules')}
+            className={`pb-3 px-4 text-xs font-bold transition border-b-2 flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+              activeTab === 'rules'
+                ? 'border-amber-500 text-amber-700 bg-white rounded-t-xl shadow-xs'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <ShieldCheck className="h-4 w-4 text-amber-600" />
+            <span>قواعد الأمان (Firestore Rules)</span>
           </button>
           
           <button
             type="button"
             onClick={() => setActiveTab('guide')}
-            className={`pb-3 px-4 text-xs font-bold transition border-b-2 flex items-center gap-2 cursor-pointer ${
+            className={`pb-3 px-4 text-xs font-bold transition border-b-2 flex items-center gap-2 cursor-pointer whitespace-nowrap ${
               activeTab === 'guide'
                 ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-xl shadow-xs'
                 : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
-            <ShieldCheck className="h-4 w-4" />
-            <span>دليل النشر في Vercel وقواعد الأمان</span>
+            <Layers className="h-4 w-4" />
+            <span>متغيرات Vercel</span>
           </button>
         </div>
 
@@ -430,8 +443,64 @@ export const FirebaseConfigModal: React.FC<FirebaseConfigModalProps> = ({
                 </div>
               </div>
             </form>
+          ) : activeTab === 'rules' ? (
+            /* Rules Tab */
+            <div className="space-y-4 text-xs">
+              <div className="bg-amber-50/80 border border-amber-200 rounded-2xl p-5">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="font-bold text-amber-900 text-sm flex items-center gap-2">
+                    <ShieldCheck className="h-5 w-5 text-amber-600" />
+                    <span>تفعيل صلاحيات القراءة والكتابة (Firestore Security Rules):</span>
+                  </h4>
+                  <a
+                    href="https://console.firebase.google.com/project/expenses-project-ce1f9/firestore/rules"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold text-xs shadow-xs transition"
+                  >
+                    <span>فتح صفحة القواعد في Firebase Console</span>
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                </div>
+                <p className="text-amber-800 leading-relaxed text-xs mb-3">
+                  افتراضياً، ينشئ Firebase قواعد حظر تمنع أي قراءة أو كتابة (Permission Denied). لتفعيل الاتصال والمزامنة الفورية، انسخ الكود التالي وضعه في صفحة القواعد:
+                </p>
+
+                <div className="relative">
+                  <pre className="p-4 bg-slate-900 text-emerald-400 font-mono text-xs rounded-xl overflow-x-auto text-left dir-ltr leading-relaxed shadow-inner">
+{`rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}`}
+                  </pre>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(`rules_version = '2';\n\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /{document=**} {\n      allow read, write: if true;\n    }\n  }\n}`, 'rules_main')}
+                    className="absolute top-3 right-3 bg-slate-800/90 hover:bg-slate-700 text-white text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                  >
+                    {copiedVar === 'rules_main' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                    <span>{copiedVar === 'rules_main' ? 'تم النسخ!' : 'نسخ القواعد'}</span>
+                  </button>
+                </div>
+
+                <div className="mt-4 pt-3 border-t border-amber-200/60 space-y-1.5 text-amber-900">
+                  <div className="font-bold text-xs">خطوات التطبيق (تستغرق 10 ثوانٍ):</div>
+                  <ol className="list-decimal list-inside space-y-1 text-xs text-amber-800">
+                    <li>اضغط على زر <strong>"فتح صفحة القواعد في Firebase Console"</strong> بالأعلى.</li>
+                    <li>حدد النص الموجود في محرر القواعد واستبدله بالكود المنسوخ أعلاه.</li>
+                    <li>اضغط على زر <strong>Publish (نشر)</strong> الأزرق في أعلى صفحة Firebase.</li>
+                    <li>عد إلى هنا واضغط على زر "اختبار وحفظ الاتصال" أو أعد تحميل الصفحة ليتم الاتصال فورياً!</li>
+                  </ol>
+                </div>
+              </div>
+            </div>
           ) : (
-            /* Guide Tab for Vercel & Firebase Rules */
+            /* Guide Tab for Vercel */
             <div className="space-y-4 text-xs">
               <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
                 <div className="flex items-center justify-between mb-2">

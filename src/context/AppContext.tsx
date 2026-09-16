@@ -30,15 +30,27 @@ import {
 export { signInWithGoogle, logoutUser } from '../lib/firebase';
 
 const STORAGE_KEYS = {
-  ORGS: 'expenses_organizations_v2',
-  MEMBERS: 'expenses_members_v2',
-  SERVICES: 'expenses_services_v2',
-  PROVIDERS: 'expenses_providers_v2',
-  REQUESTS: 'expenses_requests_v2',
-  ACTIVE_ORG: 'expenses_active_org_id_v2',
-  ROLE: 'expenses_current_role_v2',
-  ACTIVE_TAB: 'expenses_active_tab_v2',
+  ORGS: 'expenses_organizations_v3',
+  MEMBERS: 'expenses_members_v3',
+  SERVICES: 'expenses_services_v3',
+  PROVIDERS: 'expenses_providers_v3',
+  REQUESTS: 'expenses_requests_v3',
+  ACTIVE_ORG: 'expenses_active_org_id_v3',
+  ROLE: 'expenses_current_role_v3',
+  ACTIVE_TAB: 'expenses_active_tab_v3',
 };
+
+// Immediate purge of all legacy v1 and v2 localStorage keys
+try {
+  const keysToRemove: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && (k.startsWith('expenses_') || k.includes('ofq')) && !k.endsWith('_v3')) {
+      keysToRemove.push(k);
+    }
+  }
+  keysToRemove.forEach(k => localStorage.removeItem(k));
+} catch {}
 
 const DUMMY_IDS = new Set([
   'org-ofq', 'org-rwd', 'mem-1', 'mem-2', 'mem-3',
@@ -117,6 +129,8 @@ interface AppContextType {
   isBackendConnected: boolean;
   isFirebaseConnected: boolean;
   isFirebaseModalOpen: boolean;
+  firebaseError: string | null;
+  clearFirebaseError: () => void;
   
   setActiveOrgId: (id: string) => void;
   setCurrentRole: (role: 'org_admin' | 'employee') => void;
@@ -212,8 +226,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isBackendConnected, setIsBackendConnected] = useState(false);
   const [isFirebaseConnected, setIsFirebaseConnected] = useState(false);
   const [isFirebaseModalOpen, setIsFirebaseModalOpen] = useState(false);
+  const [firebaseError, setFirebaseError] = useState<string | null>(null);
   const [firebaseSyncCounter, setFirebaseSyncCounter] = useState(0);
 
+  const clearFirebaseError = () => setFirebaseError(null);
   const openFirebaseModal = () => setIsFirebaseModalOpen(true);
   const closeFirebaseModal = () => {
     setIsFirebaseModalOpen(false);
@@ -314,6 +330,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // 1. Organizations Listener
     const unsubOrgs = onSnapshot(collection(db, 'organizations'), (snapshot) => {
+      setIsFirebaseConnected(true);
+      setFirebaseError(null);
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as Organization))
         .filter(o => !DUMMY_IDS.has(o.id));
@@ -328,9 +346,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } else {
         setActiveOrgId('');
       }
-    }, (err) => {
+    }, (err: any) => {
       console.warn('[Firebase] Organizations onSnapshot error:', err);
       setIsFirebaseConnected(false);
+      if (err?.code === 'permission-denied') {
+        setFirebaseError('قواعد أمان Firebase تمنع الوصول (Permission Denied). يرجى فتح Firebase Console -> Cloud Firestore -> Rules وضبط القواعد للسماح بالقراءة والكتابة.');
+      } else {
+        setFirebaseError(err?.message || 'تعذر الاتصال بقاعدة بيانات Firebase السحابية');
+      }
     });
 
     // 2. Members Listener
@@ -1276,6 +1299,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isBackendConnected,
         isFirebaseConnected,
         isFirebaseModalOpen,
+        firebaseError,
+        clearFirebaseError,
         setActiveOrgId,
         setCurrentRole,
         setActiveTab,
