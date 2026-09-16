@@ -7,7 +7,8 @@ import {
   Users2, 
   Building, 
   Clock3,
-  BadgeAlert
+  BadgeAlert,
+  Building2
 } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
@@ -21,26 +22,13 @@ export const Navbar: React.FC = () => {
   const myRequests = requests.filter(r => r.requesterId === currentUser.id);
   const myClarificationCount = myRequests.filter(r => r.status === 'clarification_requested').length;
 
-  const navItems = [
-    {
-      id: 'dashboard',
-      label: 'لوحة التحكم والتحليلات',
-      icon: BarChart3,
-      badge: null,
-    },
-    {
-      id: 'requests',
-      label: 'سجل طلبات المصروفات',
-      icon: Receipt,
-      badge: pendingRequestsCount > 0 && currentRole === 'org_admin' ? (
-        <span className="bg-amber-100 text-amber-800 text-xs px-2 py-0.5 rounded-full font-bold">
-          {pendingRequestsCount} للاعتماد
-        </span>
-      ) : null,
-    },
-    {
+  // Build nav items dynamically based on role
+  const navItems = [];
+
+  if (currentRole === 'employee') {
+    navItems.push({
       id: 'my-requests',
-      label: 'تتبع طلباتي (شاشة الموظف)',
+      label: '💳 طلباتي ومتابعة التحويلات (InstaPay / البنك)',
       icon: Clock3,
       badge: myClarificationCount > 0 ? (
         <span className="bg-red-100 text-red-700 text-xs px-2 py-0.5 rounded-full font-bold flex items-center gap-1 animate-pulse">
@@ -48,26 +36,95 @@ export const Navbar: React.FC = () => {
           {myClarificationCount} بحاجة لتوضيح
         </span>
       ) : null,
-    },
-    {
-      id: 'services',
-      label: 'الخدمات وبنود الصرف',
-      icon: Layers,
-      badge: null,
-    },
-    {
-      id: 'providers',
-      label: 'مقدمي الخدمة والموردين',
-      icon: Building,
-      badge: null,
-    },
-    {
-      id: 'organizations',
-      label: 'المؤسسات والأعضاء',
-      icon: Users2,
-      badge: null,
-    },
-  ];
+    });
+  } else if (currentRole === 'org_admin') {
+    navItems.push(
+      {
+        id: 'dashboard',
+        label: 'لوحة تحكم الشركة والتحليلات',
+        icon: BarChart3,
+        badge: null,
+      },
+      {
+        id: 'requests',
+        label: 'طلبات الموظفين للاعتماد والصرف',
+        icon: Receipt,
+        badge: pendingRequestsCount > 0 ? (
+          <span className="bg-amber-100 text-amber-800 text-xs px-2 py-0.5 rounded-full font-bold">
+            {pendingRequestsCount} للاعتماد
+          </span>
+        ) : null,
+      },
+      {
+        id: 'organizations',
+        label: '👥 موظفو الشركة وحساباتهم',
+        icon: Users2,
+        badge: null,
+      },
+      {
+        id: 'services',
+        label: 'بنود الصرف والميزانيات',
+        icon: Layers,
+        badge: null,
+      },
+      {
+        id: 'providers',
+        label: 'مقدمي الخدمة والموردين',
+        icon: Building,
+        badge: null,
+      },
+      {
+        id: 'my-requests',
+        label: 'طلباتي الشخصية',
+        icon: Clock3,
+        badge: null,
+      }
+    );
+  } else {
+    // super_admin
+    navItems.push(
+      {
+        id: 'dashboard',
+        label: 'لوحة التحكم والتحليلات العامة',
+        icon: BarChart3,
+        badge: null,
+      },
+      {
+        id: 'requests',
+        label: 'سجل طلبات المصروفات',
+        icon: Receipt,
+        badge: pendingRequestsCount > 0 ? (
+          <span className="bg-amber-100 text-amber-800 text-xs px-2 py-0.5 rounded-full font-bold">
+            {pendingRequestsCount} بانتظار الإجراء
+          </span>
+        ) : null,
+      },
+      {
+        id: 'organizations',
+        label: '🏛️ إدارة الشركات والمستخدمين',
+        icon: Building2,
+        badge: null,
+      },
+      {
+        id: 'services',
+        label: 'الخدمات وبنود الصرف',
+        icon: Layers,
+        badge: null,
+      },
+      {
+        id: 'providers',
+        label: 'مقدمي الخدمة والموردين',
+        icon: Building,
+        badge: null,
+      },
+      {
+        id: 'my-requests',
+        label: 'تتبع الطلبات الفردية',
+        icon: Clock3,
+        badge: null,
+      }
+    );
+  }
 
   return (
     <nav className="bg-white border-b border-slate-200">

@@ -3,6 +3,10 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+  updateProfile,
   signOut,
   onAuthStateChanged,
   type User as FirebaseUser,
@@ -189,6 +193,50 @@ export const googleProvider = new GoogleAuthProvider();
  */
 export async function signInWithGoogle() {
   return signInWithPopup(auth, googleProvider);
+}
+
+/**
+ * Sign in using Email and Password
+ */
+export async function loginWithEmailPassword(email: string, password: string) {
+  return signInWithEmailAndPassword(auth, email.trim(), password);
+}
+
+/**
+ * Send password reset email
+ */
+export async function sendPasswordReset(email: string) {
+  return sendPasswordResetEmail(auth, email.trim());
+}
+
+/**
+ * Admin provision of a new employee account (Email, Password, Display Name)
+ * Uses an isolated secondary Firebase app so the logged-in administrator is NOT logged out!
+ */
+export async function adminCreateUserAccount(
+  email: string,
+  password: string,
+  displayName: string
+): Promise<{ uid: string; email: string }> {
+  const config = getFirebaseConfig();
+  if (!config) throw new Error('Firebase configuration not found');
+
+  const tempAppName = `temp-admin-provision-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const tempApp = initializeApp(config as FirebaseOptions, tempAppName);
+  try {
+    const tempAuth = getAuth(tempApp);
+    const userCredential = await createUserWithEmailAndPassword(tempAuth, email.trim(), password);
+    if (displayName) {
+      await updateProfile(userCredential.user, { displayName: displayName.trim() });
+    }
+    const uid = userCredential.user.uid;
+    await signOut(tempAuth);
+    return { uid, email: userCredential.user.email || email };
+  } finally {
+    try {
+      await deleteApp(tempApp);
+    } catch {}
+  }
 }
 
 /**

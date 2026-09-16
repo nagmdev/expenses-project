@@ -18,6 +18,7 @@ export interface User {
   role: Role;
   avatar?: string;
   phone?: string;
+  orgId?: string;
 }
 
 export interface OrganizationMember {
@@ -26,11 +27,12 @@ export interface OrganizationMember {
   userId: string;
   userName: string;
   userEmail: string;
-  role: 'org_admin' | 'employee';
+  role: Role;
   department: string;
   jobTitle: string;
   joinedAt: string;
   active: boolean;
+  phone?: string;
 }
 
 export interface ServiceCategory {
@@ -101,12 +103,15 @@ export interface TimelineEvent {
   timestamp: string;
 }
 
+export type PaymentMethod = 'instapay' | 'bank_transfer' | 'digital_wallet' | 'cash' | 'cheque';
+
 export interface DisbursementDetails {
   disbursedAt: string;
   disbursedBy: string;
-  paymentMethod: 'bank_transfer' | 'cash' | 'cheque';
+  paymentMethod: PaymentMethod;
   referenceNumber: string;
   bankName?: string;
+  receiptUrl?: string;
   notes?: string;
 }
 
@@ -117,6 +122,9 @@ export interface ExpenseRequest {
   requesterId: string;
   requesterName: string;
   requesterDepartment: string;
+  requesterPhone?: string;
+  preferredPaymentMethod?: PaymentMethod;
+  paymentAccountDetails?: string; // e.g. InstaPay IPA (user@instapay) or IBAN or Mobile Wallet #
   serviceCategoryId: string;
   serviceCategoryName: string;
   providerId: string;

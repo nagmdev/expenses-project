@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   Organization, 
   User, 
@@ -7,7 +7,9 @@ import {
   ServiceProvider, 
   ExpenseRequest, 
   DisbursementDetails,
-  RequestAttachment
+  RequestAttachment,
+  Role,
+  PaymentMethod
 } from '../types';
 import {
   isFirebaseConfigured,
@@ -21,13 +23,24 @@ import {
   setDoc,
   type Firestore,
   signInWithGoogle,
+  loginWithEmailPassword,
+  sendPasswordReset,
+  adminCreateUserAccount,
   logoutUser,
   subscribeToAuth,
   purgeSampleDataFromFirestore,
   type FirebaseUser,
 } from '../lib/firebase';
 
-export { signInWithGoogle, logoutUser } from '../lib/firebase';
+export { 
+  signInWithGoogle, 
+  logoutUser, 
+  loginWithEmailPassword, 
+  sendPasswordReset, 
+  adminCreateUserAccount 
+} from '../lib/firebase';
+
+export const SUPER_ADMINS_STORAGE_KEY = 'expenses_super_admins_v3';
 
 const STORAGE_KEYS = {
   ORGS: 'expenses_organizations_v3',
@@ -113,13 +126,16 @@ const safeFetchJson = async <T = any>(url: string, options?: RequestInit): Promi
 };
 
 interface AppContextType {
+  // Scoped Data (Strict isolation based on role & org)
   organizations: Organization[];
+  allOrganizations: Organization[]; // For super admin management
   activeOrgId: string;
   activeOrg?: Organization;
   users: User[];
   currentUser: User;
   firebaseUser: FirebaseUser | null;
-  currentRole: 'org_admin' | 'employee';
+  authLoading: boolean;
+  currentRole: Role;
   members: OrganizationMember[];
   services: ServiceCategory[];
   providers: ServiceProvider[];
@@ -132,14 +148,33 @@ interface AppContextType {
   firebaseError: string | null;
   clearFirebaseError: () => void;
   
+  // Controls
   setActiveOrgId: (id: string) => void;
-  setCurrentRole: (role: 'org_admin' | 'employee') => void;
+  setCurrentRole: (role: Role) => void;
   setActiveTab: (tab: string) => void;
   openFirebaseModal: () => void;
   closeFirebaseModal: () => void;
+  
+  // Auth & Roles
+  superAdminEmails: string[];
+  addSuperAdminEmail: (email: string) => Promise<void>;
   signInWithGoogle: () => Promise<any>;
+  loginWithEmail: (email: string, password: string) => Promise<any>;
+  resetPassword: (email: string) => Promise<any>;
   logoutUser: () => Promise<void>;
   
+  // Admin User Provisioning
+  createCompanyUser: (data: {
+    name: string;
+    email: string;
+    password: string;
+    phone?: string;
+    role: 'org_admin' | 'employee';
+    department?: string;
+    jobTitle?: string;
+    orgId?: string;
+  }) => Promise<{ success: boolean; message?: string }>;
+
   // Organizations
   addOrganization: (org: Omit<Organization, 'id' | 'createdAt'>) => Promise<void>;
   
@@ -168,6 +203,8 @@ interface AppContextType {
     providerId: string;
     urgency: 'low' | 'medium' | 'high';
     attachmentNames?: string[];
+    preferredPaymentMethod?: PaymentMethod;
+    paymentAccountDetails?: string;
   }) => Promise<void>;
   
   approveRequest: (requestId: string, note?: string) => Promise<void>;
@@ -183,8 +220,8 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Initialize state cleanly with zero fake data
-  const [organizations, setOrganizations] = useState<Organization[]>(() => {
+  // Raw internal states populated by real-time Firestore listeners
+  const [rawOrganizations, setRawOrganizations] = useState<Organization[]>(() => {
     return safeGetLocal<Organization[]>(STORAGE_KEYS.ORGS, []);
   });
 
@@ -197,32 +234,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved || '';
   });
 
-  const [currentRole, setCurrentRoleState] = useState<'org_admin' | 'employee'>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.ROLE);
-    return (saved === 'employee' || saved === 'org_admin') ? saved : 'org_admin';
-  });
-
   const [activeTab, setActiveTabState] = useState<string>(() => {
     return localStorage.getItem(STORAGE_KEYS.ACTIVE_TAB) || 'dashboard';
   });
 
-  const [members, setMembers] = useState<OrganizationMember[]>(() => {
+  const [rawMembers, setRawMembers] = useState<OrganizationMember[]>(() => {
     return safeGetLocal<OrganizationMember[]>(STORAGE_KEYS.MEMBERS, []);
   });
 
-  const [services, setServices] = useState<ServiceCategory[]>(() => {
+  const [rawServices, setRawServices] = useState<ServiceCategory[]>(() => {
     return safeGetLocal<ServiceCategory[]>(STORAGE_KEYS.SERVICES, []);
   });
 
-  const [providers, setProviders] = useState<ServiceProvider[]>(() => {
+  const [rawProviders, setRawProviders] = useState<ServiceProvider[]>(() => {
     return safeGetLocal<ServiceProvider[]>(STORAGE_KEYS.PROVIDERS, []);
   });
 
-  const [requests, setRequests] = useState<ExpenseRequest[]>(() => {
+  const [rawRequests, setRawRequests] = useState<ExpenseRequest[]>(() => {
     return safeGetLocal<ExpenseRequest[]>(STORAGE_KEYS.REQUESTS, []);
   });
 
   const [loading, setLoading] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+
   const [isBackendConnected, setIsBackendConnected] = useState(false);
   const [isFirebaseConnected, setIsFirebaseConnected] = useState(false);
   const [isFirebaseModalOpen, setIsFirebaseModalOpen] = useState(false);
@@ -236,18 +271,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setFirebaseSyncCounter(prev => prev + 1);
   };
 
-  // Setters with persistent localStorage syncing
   const setActiveOrgId = (id: string) => {
     setActiveOrgIdState(id);
     try {
       localStorage.setItem(STORAGE_KEYS.ACTIVE_ORG, id);
-    } catch {}
-  };
-
-  const setCurrentRole = (role: 'org_admin' | 'employee') => {
-    setCurrentRoleState(role);
-    try {
-      localStorage.setItem(STORAGE_KEYS.ROLE, role);
     } catch {}
   };
 
@@ -258,58 +285,192 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {}
   };
 
-  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
-
-  // Subscribe to Firebase Authentication state changes
+  // Subscribe to Firebase Authentication state
   useEffect(() => {
     const unsubscribe = subscribeToAuth((user) => {
       setFirebaseUser(user);
+      setAuthLoading(false);
     });
     return () => {
       if (unsubscribe) unsubscribe();
     };
   }, []);
 
-  // Dynamic user derived from real active organization member or authenticated Google user
-  const activeOrg = organizations.find(o => o.id === activeOrgId);
-  const activeOrgMembers = members.filter(m => activeOrgId === 'all' || m.orgId === activeOrgId);
-  
-  const currentMember = activeOrgMembers.find(m => m.role === currentRole) || activeOrgMembers[0];
-  const currentUser: User = firebaseUser ? {
-    id: firebaseUser.uid,
-    name: firebaseUser.displayName || currentMember?.userName || firebaseUser.email?.split('@')[0] || 'مستخدم Google',
-    email: firebaseUser.email || currentMember?.userEmail || '',
-    role: currentRole,
-    avatar: firebaseUser.photoURL || undefined,
-    phone: firebaseUser.phoneNumber || '',
-  } : {
-    id: currentMember?.userId || (currentRole === 'org_admin' ? 'admin-user' : 'employee-user'),
-    name: currentMember?.userName || (currentRole === 'org_admin' ? 'مدير المؤسسة' : 'الموظف / طالب الصرف'),
-    email: currentMember?.userEmail || '',
-    role: currentRole,
-  };
-
-  const users: User[] = [
-    ...(firebaseUser ? [{
-      id: firebaseUser.uid,
-      name: `${firebaseUser.displayName || 'مستخدم Google'} (الحالي)`,
-      email: firebaseUser.email || '',
-      role: currentRole,
-      avatar: firebaseUser.photoURL || undefined,
-    }] : []),
-    ...members.map(m => ({
-      id: m.userId,
-      name: m.userName,
-      email: m.userEmail,
-      role: m.role,
-    }))
-  ];
-  if (users.length === 0) {
-    users.push(currentUser);
-  }
+  // Super admin emails list (loaded from env, local storage, and Firestore 'super_admins' collection)
+  const [superAdminEmails, setSuperAdminEmails] = useState<string[]>(() => {
+    const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
+    const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
+    const localAdmins = safeGetLocal<string[]>(SUPER_ADMINS_STORAGE_KEY, []);
+    return Array.from(new Set([...envList, ...localAdmins]));
+  });
 
   // =========================================================================
-  // Real-Time Firebase Listeners (Cloud Firestore First)
+  // RBAC & ROLE RESOLUTION
+  // =========================================================================
+  const userEmail = firebaseUser?.email?.toLowerCase().trim() || '';
+
+  // Find membership in organizations
+  const userMemberRecord = useMemo(() => {
+    if (!userEmail) return null;
+    return rawMembers.find(m => m.userEmail?.toLowerCase().trim() === userEmail) || null;
+  }, [userEmail, rawMembers]);
+
+  const isSuperAdmin = useMemo(() => {
+    if (!userEmail) return false;
+    if (superAdminEmails.includes(userEmail)) return true;
+    if (userMemberRecord?.role === 'super_admin') return true;
+    return false;
+  }, [userEmail, superAdminEmails, userMemberRecord]);
+
+  // Determine active role
+  const resolvedRole: Role = useMemo(() => {
+    if (isSuperAdmin) return 'super_admin';
+    if (userMemberRecord) return userMemberRecord.role;
+    return 'employee';
+  }, [isSuperAdmin, userMemberRecord]);
+
+  // Determine effective organization ID
+  const effectiveOrgId = useMemo(() => {
+    if (isSuperAdmin) {
+      return activeOrgId || (rawOrganizations[0]?.id || '');
+    }
+    if (userMemberRecord?.orgId) {
+      return userMemberRecord.orgId;
+    }
+    return activeOrgId || (rawOrganizations[0]?.id || '');
+  }, [isSuperAdmin, activeOrgId, userMemberRecord, rawOrganizations]);
+
+  // Keep activeOrgId in sync with effectiveOrgId for non-super admins
+  useEffect(() => {
+    if (!isSuperAdmin && effectiveOrgId && effectiveOrgId !== activeOrgId) {
+      setActiveOrgIdState(effectiveOrgId);
+      try {
+        localStorage.setItem(STORAGE_KEYS.ACTIVE_ORG, effectiveOrgId);
+      } catch {}
+    }
+  }, [isSuperAdmin, effectiveOrgId, activeOrgId]);
+
+  // Dynamic currentUser object
+  const currentUser: User = useMemo(() => {
+    if (!firebaseUser) {
+      return {
+        id: 'guest',
+        name: 'زائر غير مسجل',
+        email: '',
+        role: 'employee',
+      };
+    }
+
+    return {
+      id: firebaseUser.uid,
+      name: userMemberRecord?.userName || firebaseUser.displayName || userEmail.split('@')[0] || 'مستخدم',
+      email: firebaseUser.email || '',
+      role: resolvedRole,
+      avatar: firebaseUser.photoURL || undefined,
+      phone: userMemberRecord?.phone || firebaseUser.phoneNumber || '',
+      orgId: effectiveOrgId,
+    };
+  }, [firebaseUser, userMemberRecord, userEmail, resolvedRole, effectiveOrgId]);
+
+  // Adjust active tab on role switch (e.g. employee defaults to my-requests / tracker)
+  useEffect(() => {
+    if (!firebaseUser) return;
+    if (resolvedRole === 'employee') {
+      if (activeTab === 'dashboard' || activeTab === 'services' || activeTab === 'providers' || activeTab === 'organizations') {
+        setActiveTab('my-requests');
+      }
+    }
+  }, [resolvedRole, firebaseUser, activeTab]);
+
+  // =========================================================================
+  // ZERO DATA LEAKAGE: Strict Tenant and Employee Scoping
+  // =========================================================================
+  const scopedOrganizations = useMemo(() => {
+    if (!firebaseUser) return [];
+    if (resolvedRole === 'super_admin') return rawOrganizations;
+    return rawOrganizations.filter(o => o.id === effectiveOrgId);
+  }, [firebaseUser, resolvedRole, rawOrganizations, effectiveOrgId]);
+
+  const activeOrg = useMemo(() => {
+    return rawOrganizations.find(o => o.id === effectiveOrgId);
+  }, [rawOrganizations, effectiveOrgId]);
+
+  const scopedMembers = useMemo(() => {
+    if (!firebaseUser) return [];
+    if (resolvedRole === 'super_admin') {
+      return effectiveOrgId === 'all' ? rawMembers : rawMembers.filter(m => m.orgId === effectiveOrgId);
+    }
+    return rawMembers.filter(m => m.orgId === effectiveOrgId);
+  }, [firebaseUser, resolvedRole, rawMembers, effectiveOrgId]);
+
+  const scopedServices = useMemo(() => {
+    if (!firebaseUser) return [];
+    if (resolvedRole === 'super_admin') {
+      return effectiveOrgId === 'all' ? rawServices : rawServices.filter(s => s.orgId === effectiveOrgId);
+    }
+    return rawServices.filter(s => s.orgId === effectiveOrgId);
+  }, [firebaseUser, resolvedRole, rawServices, effectiveOrgId]);
+
+  const scopedProviders = useMemo(() => {
+    if (!firebaseUser) return [];
+    if (resolvedRole === 'super_admin') {
+      return effectiveOrgId === 'all' ? rawProviders : rawProviders.filter(p => p.orgId === effectiveOrgId);
+    }
+    return rawProviders.filter(p => p.orgId === effectiveOrgId);
+  }, [firebaseUser, resolvedRole, rawProviders, effectiveOrgId]);
+
+  // STRICT REQUEST SCOPING:
+  // - super_admin: sees all requests (or filtered by activeOrgId if specific org chosen)
+  // - org_admin: sees requests for their company only
+  // - employee: strictly sees their OWN requests only! Absolutely zero leakage of other employees' requests!
+  const scopedRequests = useMemo(() => {
+    if (!firebaseUser) return [];
+
+    if (resolvedRole === 'super_admin') {
+      if (effectiveOrgId && effectiveOrgId !== 'all') {
+        return rawRequests.filter(r => r.orgId === effectiveOrgId);
+      }
+      return rawRequests;
+    }
+
+    if (resolvedRole === 'org_admin') {
+      return rawRequests.filter(r => r.orgId === effectiveOrgId);
+    }
+
+    // Role is employee:
+    const myUid = firebaseUser.uid;
+    const myEmail = userEmail;
+    const myName = currentUser.name;
+
+    return rawRequests.filter(r => {
+      const matchOrg = r.orgId === effectiveOrgId;
+      const isMyRequest = r.requesterId === myUid || 
+                          r.requesterId === currentUser.id || 
+                          (r.requesterName && myName && r.requesterName.trim() === myName.trim());
+      return matchOrg && isMyRequest;
+    });
+  }, [firebaseUser, resolvedRole, rawRequests, effectiveOrgId, userEmail, currentUser]);
+
+  const users: User[] = useMemo(() => {
+    if (!firebaseUser) return [];
+    const list: User[] = [currentUser];
+    scopedMembers.forEach(m => {
+      if (m.userId !== currentUser.id) {
+        list.push({
+          id: m.userId,
+          name: m.userName,
+          email: m.userEmail,
+          role: m.role,
+          phone: m.phone,
+          orgId: m.orgId,
+        });
+      }
+    });
+    return list;
+  }, [firebaseUser, currentUser, scopedMembers]);
+
+  // =========================================================================
+  // Real-Time Firebase Listeners
   // =========================================================================
   useEffect(() => {
     if (!isFirebaseConfigured()) {
@@ -324,8 +485,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setIsFirebaseConnected(true);
-
-    // One-time cleanup of any legacy sample mock data from Firestore
     purgeSampleDataFromFirestore().catch(() => {});
 
     // 1. Organizations Listener
@@ -336,23 +495,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         .map(d => ({ id: d.id, ...d.data() } as Organization))
         .filter(o => !DUMMY_IDS.has(o.id));
       
-      setOrganizations(list);
+      setRawOrganizations(list);
       safeSetLocal(STORAGE_KEYS.ORGS, list);
-
-      if (list.length > 0) {
-        if (!activeOrgId || !list.some(o => o.id === activeOrgId)) {
-          setActiveOrgId(list[0].id);
-        }
-      } else {
-        setActiveOrgId('');
-      }
     }, (err: any) => {
       console.warn('[Firebase] Organizations onSnapshot error:', err);
       setIsFirebaseConnected(false);
       if (err?.code === 'permission-denied') {
-        setFirebaseError('قواعد أمان Firebase تمنع الوصول (Permission Denied). يرجى فتح Firebase Console -> Cloud Firestore -> Rules وضبط القواعد للسماح بالقراءة والكتابة.');
+        setFirebaseError('قواعد أمان Firebase تمنع الوصول (Permission Denied). يرجى ضبط القواعد في Firebase Console.');
       } else {
-        setFirebaseError(err?.message || 'تعذر الاتصال بقاعدة بيانات Firebase السحابية');
+        setFirebaseError(err?.message || 'تعذر الاتصال بقاعدة بيانات Firebase');
       }
     });
 
@@ -361,7 +512,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as OrganizationMember))
         .filter(m => !DUMMY_IDS.has(m.id) && !DUMMY_IDS.has(m.orgId));
-      setMembers(list);
+      setRawMembers(list);
       safeSetLocal(STORAGE_KEYS.MEMBERS, list);
     }, (err) => {
       console.warn('[Firebase] Members onSnapshot error:', err);
@@ -372,7 +523,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as ServiceCategory))
         .filter(s => !DUMMY_IDS.has(s.id) && !DUMMY_IDS.has(s.orgId));
-      setServices(list);
+      setRawServices(list);
       safeSetLocal(STORAGE_KEYS.SERVICES, list);
     }, (err) => {
       console.warn('[Firebase] Services onSnapshot error:', err);
@@ -383,7 +534,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as ServiceProvider))
         .filter(p => !DUMMY_IDS.has(p.id) && !DUMMY_IDS.has(p.orgId));
-      setProviders(list);
+      setRawProviders(list);
       safeSetLocal(STORAGE_KEYS.PROVIDERS, list);
     }, (err) => {
       console.warn('[Firebase] Providers onSnapshot error:', err);
@@ -395,10 +546,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         .map(d => ({ id: d.id, ...d.data() } as ExpenseRequest))
         .filter(r => !DUMMY_IDS.has(r.id) && !DUMMY_IDS.has(r.orgId));
       list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setRequests(list);
+      setRawRequests(list);
       safeSetLocal(STORAGE_KEYS.REQUESTS, list);
     }, (err) => {
       console.warn('[Firebase] Requests onSnapshot error:', err);
+    });
+
+    // 6. Super Admins Listener
+    const unsubSuperAdmins = onSnapshot(collection(db, 'super_admins'), (snapshot) => {
+      const dbAdmins = snapshot.docs.map(d => (d.data().email || d.id || '').toLowerCase().trim()).filter(Boolean);
+      if (dbAdmins.length > 0) {
+        setSuperAdminEmails(prev => {
+          const merged = Array.from(new Set([...prev, ...dbAdmins]));
+          safeSetLocal(SUPER_ADMINS_STORAGE_KEY, merged);
+          return merged;
+        });
+      }
+    }, (err) => {
+      console.warn('[Firebase] Super admins onSnapshot error:', err);
     });
 
     return () => {
@@ -407,13 +572,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubServices();
       unsubProviders();
       unsubRequests();
+      unsubSuperAdmins();
     };
   }, [firebaseSyncCounter]);
 
-  // Refresh data: if backend API is reachable and Firebase is not active, sync with local Express API
+  // Refresh data: sync with local Express API if present and Firebase is not active
   const refreshData = useCallback(async () => {
     if (isFirebaseConfigured()) {
-      // Re-trigger Firebase listener sync
       setFirebaseSyncCounter(prev => prev + 1);
       return;
     }
@@ -430,54 +595,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (orgsData && Array.isArray(orgsData)) {
         setIsBackendConnected(true);
-        setOrganizations(orgsData);
+        setRawOrganizations(orgsData);
         safeSetLocal(STORAGE_KEYS.ORGS, orgsData);
 
         if (memsData && Array.isArray(memsData)) {
-          setMembers(memsData);
+          setRawMembers(memsData);
           safeSetLocal(STORAGE_KEYS.MEMBERS, memsData);
         }
         if (srvsData && Array.isArray(srvsData)) {
-          setServices(srvsData);
+          setRawServices(srvsData);
           safeSetLocal(STORAGE_KEYS.SERVICES, srvsData);
         }
         if (provsData && Array.isArray(provsData)) {
-          setProviders(provsData);
+          setRawProviders(provsData);
           safeSetLocal(STORAGE_KEYS.PROVIDERS, provsData);
         }
         if (reqsData && Array.isArray(reqsData)) {
-          setRequests(reqsData);
+          setRawRequests(reqsData);
           safeSetLocal(STORAGE_KEYS.REQUESTS, reqsData);
         }
-
-        if (orgsData.length > 0 && activeOrgId === 'all') {
-          setActiveOrgId(orgsData[0].id);
-        }
       } else {
-        // Backend offline / Vercel static deployment
         setIsBackendConnected(false);
       }
     } catch (err) {
-      console.warn('[ExpenseSystem] Operating in resilient localStorage mode:', err);
+      console.warn('[ExpenseSystem] Fallback mode:', err);
       setIsBackendConnected(false);
     } finally {
       setLoading(false);
     }
-  }, [activeOrgId]);
+  }, []);
 
   useEffect(() => {
     refreshData();
   }, [refreshData]);
 
-  // Reset / Clear helper
+  // Reset to empty
   const resetToSampleData = async () => {
-    setOrganizations([]);
-    setMembers([]);
-    setServices([]);
-    setProviders([]);
-    setRequests([]);
+    setRawOrganizations([]);
+    setRawMembers([]);
+    setRawServices([]);
+    setRawProviders([]);
+    setRawRequests([]);
     setActiveOrgId('');
-    setCurrentRole('org_admin');
     setActiveTab('dashboard');
 
     safeSetLocal(STORAGE_KEYS.ORGS, []);
@@ -487,16 +646,108 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     safeSetLocal(STORAGE_KEYS.REQUESTS, []);
     try {
       localStorage.removeItem(STORAGE_KEYS.ACTIVE_ORG);
-      localStorage.setItem(STORAGE_KEYS.ROLE, 'org_admin');
       localStorage.setItem(STORAGE_KEYS.ACTIVE_TAB, 'dashboard');
     } catch {}
 
-    // Purge any legacy sample mock data from Cloud Firestore
     await purgeSampleDataFromFirestore();
   };
 
   // =========================================================================
-  // MUTATIONS (Firestore First -> Express API -> LocalStorage Fallback)
+  // SUPER ADMIN MANAGEMENT
+  // =========================================================================
+  const addSuperAdminEmail = async (email: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail) return;
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        const docId = cleanEmail.replace(/[^a-zA-Z0-9]/g, '_');
+        await setFirestoreDoc('super_admins', docId, {
+          email: cleanEmail,
+          createdAt: new Date().toISOString(),
+          active: true,
+        });
+      } catch (err) {
+        console.error('[Firebase] Error saving super admin email:', err);
+      }
+    }
+
+    setSuperAdminEmails(prev => {
+      const updated = Array.from(new Set([...prev, cleanEmail]));
+      safeSetLocal(SUPER_ADMINS_STORAGE_KEY, updated);
+      return updated;
+    });
+  };
+
+  // =========================================================================
+  // USER PROVISIONING BY ORG ADMIN / SUPER ADMIN
+  // =========================================================================
+  const createCompanyUser = async (data: {
+    name: string;
+    email: string;
+    password: string;
+    phone?: string;
+    role: 'org_admin' | 'employee';
+    department?: string;
+    jobTitle?: string;
+    orgId?: string;
+  }): Promise<{ success: boolean; message?: string }> => {
+    try {
+      const targetOrgId = data.orgId || effectiveOrgId;
+      if (!targetOrgId || targetOrgId === 'all') {
+        return { success: false, message: 'يرجى تحديد المؤسسة أولاً لإضافة الموظف إليها.' };
+      }
+
+      let createdUid = `user-${Date.now()}`;
+      if (isFirebaseConfigured()) {
+        try {
+          const res = await adminCreateUserAccount(data.email, data.password, data.name);
+          createdUid = res.uid;
+        } catch (authErr: any) {
+          console.error('[Admin Provision Auth Error]', authErr);
+          if (authErr?.code === 'auth/email-already-in-use') {
+            return { success: false, message: 'هذا البريد الإلكتروني مسجل مسبقاً في النظام.' };
+          } else if (authErr?.code === 'auth/weak-password') {
+            return { success: false, message: 'كلمة المرور يجب ألا تقل عن 6 خانات.' };
+          } else {
+            return { success: false, message: authErr?.message || 'تعذر إنشاء حساب المصادقة.' };
+          }
+        }
+      }
+
+      const newMember: OrganizationMember = {
+        id: `mem-${Date.now()}`,
+        orgId: targetOrgId,
+        userId: createdUid,
+        userName: data.name.trim(),
+        userEmail: data.email.trim().toLowerCase(),
+        phone: data.phone?.trim() || '',
+        role: data.role,
+        department: data.department?.trim() || 'العمليات والتوريد',
+        jobTitle: data.jobTitle?.trim() || (data.role === 'org_admin' ? 'مدير المؤسسة' : 'موظف'),
+        joinedAt: new Date().toISOString().split('T')[0],
+        active: true,
+      };
+
+      if (isFirebaseConfigured() && getDb()) {
+        await setFirestoreDoc('members', newMember.id, newMember);
+      }
+
+      setRawMembers(prev => {
+        const updated = [newMember, ...prev.filter(m => m.userEmail !== newMember.userEmail)];
+        safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
+        return updated;
+      });
+
+      return { success: true, message: 'تم إنشاء وتفعيل حساب الموظف بنجاح!' };
+    } catch (err: any) {
+      console.error('[Create Company User Error]', err);
+      return { success: false, message: err?.message || 'حدث خطأ أثناء إنشاء الحساب.' };
+    }
+  };
+
+  // =========================================================================
+  // MUTATIONS
   // =========================================================================
 
   // 1. ORGANIZATIONS
@@ -509,32 +760,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt,
     };
 
-    const newMember: OrganizationMember = {
-      id: `mem-${Date.now()}`,
-      orgId: id,
-      userId: 'user-admin',
-      userName: 'المدير العام',
-      userEmail: `admin@${orgData.code.toLowerCase() || 'company'}.com`,
-      role: 'org_admin',
-      department: 'الإدارة العامة',
-      jobTitle: 'المدير العام',
-      joinedAt: createdAt.split('T')[0],
-      active: true,
-    };
-
-    // Firebase Firestore Sync
     if (isFirebaseConfigured() && getDb()) {
       try {
-        await Promise.all([
-          setFirestoreDoc('organizations', id, newOrg),
-          setFirestoreDoc('members', newMember.id, newMember)
-        ]);
+        await setFirestoreDoc('organizations', id, newOrg);
       } catch (err) {
         console.error('[Firebase] Error saving organization:', err);
       }
     }
 
-    // Backend Express Sync
     if (isBackendConnected) {
       await safeFetchJson<Organization>('/api/organizations', {
         method: 'POST',
@@ -543,17 +776,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    // Local state & persistence
-    setOrganizations(prev => {
+    setRawOrganizations(prev => {
       const updated = [newOrg, ...prev];
       safeSetLocal(STORAGE_KEYS.ORGS, updated);
       return updated;
     });
-    setMembers(prev => {
-      const updated = [newMember, ...prev];
-      safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
-      return updated;
-    });
+
     setActiveOrgId(id);
   };
 
@@ -581,7 +809,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    setMembers(prev => {
+    setRawMembers(prev => {
       const updated = [newMember, ...prev];
       safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
       return updated;
@@ -601,64 +829,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await safeFetchJson(`/api/members/${memberId}`, { method: 'DELETE' });
     }
 
-    setMembers(prev => {
+    setRawMembers(prev => {
       const updated = prev.filter(m => m.id !== memberId);
       safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
       return updated;
     });
   };
-
-  // Auto-sync Google user's role and organization membership with Firestore
-  useEffect(() => {
-    if (!firebaseUser || !firebaseUser.email) return;
-
-    const userEmail = firebaseUser.email.toLowerCase();
-    
-    // Check if user's email matches an OrganizationMember in Firestore
-    const activeOrgMember = members.find(
-      m => (activeOrgId === 'all' || m.orgId === activeOrgId) && m.userEmail?.toLowerCase() === userEmail
-    );
-    const matchingMember = activeOrgMember || members.find(
-      m => m.userEmail?.toLowerCase() === userEmail
-    );
-
-    if (matchingMember) {
-      if (matchingMember.role === 'org_admin' || matchingMember.role === 'employee') {
-        setCurrentRoleState(matchingMember.role);
-        try {
-          localStorage.setItem(STORAGE_KEYS.ROLE, matchingMember.role);
-        } catch {}
-      }
-    } else {
-      // If not yet a member, default to employee or let them join the active organization
-      setCurrentRoleState('employee');
-      try {
-        localStorage.setItem(STORAGE_KEYS.ROLE, 'employee');
-      } catch {}
-
-      const targetOrgId = activeOrgId === 'all' ? (organizations[0]?.id || 'org-ofq') : activeOrgId;
-      if (targetOrgId && organizations.length > 0) {
-        const isAlreadyInOrg = members.some(
-          m => m.orgId === targetOrgId && m.userEmail?.toLowerCase() === userEmail
-        );
-        if (!isAlreadyInOrg) {
-          const newMemberData: Omit<OrganizationMember, 'id' | 'joinedAt'> = {
-            orgId: targetOrgId,
-            userId: firebaseUser.uid,
-            userName: firebaseUser.displayName || userEmail.split('@')[0],
-            userEmail: firebaseUser.email,
-            role: 'employee',
-            department: 'العمليات والتوريد',
-            jobTitle: 'موظف',
-            active: true,
-          };
-          addMember(newMemberData).catch(err => {
-            console.warn('[AppContext] Failed to auto-join organization:', err);
-          });
-        }
-      }
-    }
-  }, [firebaseUser, members, activeOrgId, organizations]);
 
   // 3. SERVICES
   const addService = async (serviceData: Omit<ServiceCategory, 'id' | 'spentAmount'>) => {
@@ -684,7 +860,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    setServices(prev => {
+    setRawServices(prev => {
       const updated = [...prev, newService];
       safeSetLocal(STORAGE_KEYS.SERVICES, updated);
       return updated;
@@ -708,7 +884,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    setServices(prev => {
+    setRawServices(prev => {
       const updated = prev.map(s => s.id === updatedService.id ? updatedService : s);
       safeSetLocal(STORAGE_KEYS.SERVICES, updated);
       return updated;
@@ -728,7 +904,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await safeFetchJson(`/api/services/${serviceId}`, { method: 'DELETE' });
     }
 
-    setServices(prev => {
+    setRawServices(prev => {
       const updated = prev.filter(s => s.id !== serviceId);
       safeSetLocal(STORAGE_KEYS.SERVICES, updated);
       return updated;
@@ -760,7 +936,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    setProviders(prev => {
+    setRawProviders(prev => {
       const updated = [...prev, newProvider];
       safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
       return updated;
@@ -784,7 +960,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    setProviders(prev => {
+    setRawProviders(prev => {
       const updated = prev.map(p => p.id === updatedProvider.id ? updatedProvider : p);
       safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
       return updated;
@@ -804,7 +980,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await safeFetchJson(`/api/providers/${providerId}`, { method: 'DELETE' });
     }
 
-    setProviders(prev => {
+    setRawProviders(prev => {
       const updated = prev.filter(p => p.id !== providerId);
       safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
       return updated;
@@ -822,12 +998,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     providerId: string;
     urgency: 'low' | 'medium' | 'high';
     attachmentNames?: string[];
+    preferredPaymentMethod?: PaymentMethod;
+    paymentAccountDetails?: string;
   }) => {
-    const service = services.find(s => s.id === data.serviceCategoryId);
-    const provider = providers.find(p => p.id === data.providerId);
-    const orgId = activeOrgId && activeOrgId !== 'all' 
-      ? activeOrgId 
-      : (organizations[0]?.id || '');
+    const service = rawServices.find(s => s.id === data.serviceCategoryId);
+    const provider = rawProviders.find(p => p.id === data.providerId);
+    const orgId = effectiveOrgId || (rawOrganizations[0]?.id || '');
 
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -846,7 +1022,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       orgId,
       requesterId: currentUser.id,
       requesterName: currentUser.name,
-      requesterDepartment: currentRole === 'org_admin' ? 'الإدارة العامة' : 'العمليات والتوريد',
+      requesterDepartment: currentUser.role === 'org_admin' ? 'الإدارة العامة' : (userMemberRecord?.department || 'العمليات والتوريد'),
+      requesterPhone: currentUser.phone || userMemberRecord?.phone,
+      preferredPaymentMethod: data.preferredPaymentMethod || 'instapay',
+      paymentAccountDetails: data.paymentAccountDetails || '',
       serviceCategoryId: data.serviceCategoryId,
       serviceCategoryName: service?.name || 'خدمة عامة',
       providerId: data.providerId,
@@ -865,7 +1044,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           id: `tl-${Date.now()}`,
           status: 'created',
           title: 'تم إنشاء وتقديم طلب الصرف',
-          description: 'تم إرسال الطلب للاعتماد المالي والإداري',
+          description: data.paymentAccountDetails 
+            ? `طريقة التحويل المفضلة: ${data.preferredPaymentMethod || 'انستاباي'} (${data.paymentAccountDetails})`
+            : 'تم إرسال الطلب للاعتماد المالي والإداري',
           actorName: currentUser.name,
           timestamp: dateFormatted,
         }
@@ -890,7 +1071,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    setRequests(prev => {
+    setRawRequests(prev => {
       const updated = [newRequest, ...prev];
       safeSetLocal(STORAGE_KEYS.REQUESTS, updated);
       return updated;
@@ -903,7 +1084,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     let targetUpdated: ExpenseRequest | null = null;
 
-    setRequests(prev => {
+    setRawRequests(prev => {
       const list = prev.map(req => {
         if (req.id !== requestId) return req;
         const comments = [...req.comments];
@@ -966,7 +1147,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     let targetUpdated: ExpenseRequest | null = null;
 
-    setRequests(prev => {
+    setRawRequests(prev => {
       const list = prev.map(req => {
         if (req.id !== requestId) return req;
         const comments = [
@@ -1030,7 +1211,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     let targetUpdated: ExpenseRequest | null = null;
 
-    setRequests(prev => {
+    setRawRequests(prev => {
       const list = prev.map(req => {
         if (req.id !== requestId) return req;
         const comments = [
@@ -1093,7 +1274,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     let targetUpdated: ExpenseRequest | null = null;
 
-    setRequests(prev => {
+    setRawRequests(prev => {
       const list = prev.map(req => {
         if (req.id !== requestId) return req;
         const attachments = [...req.attachments];
@@ -1170,7 +1351,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
     const methodLabel = 
+      details.paymentMethod === 'instapay' ? 'انستاباي (InstaPay)' :
       details.paymentMethod === 'bank_transfer' ? 'تحويل بنكي' :
+      details.paymentMethod === 'digital_wallet' ? 'محفظة إلكترونية' :
       details.paymentMethod === 'cash' ? 'نقداً / خزينة' : 'شيك مصرفي';
 
     let disbursedAmount = 0;
@@ -1178,7 +1361,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let targetProviderId = '';
     let targetUpdated: ExpenseRequest | null = null;
 
-    setRequests(prev => {
+    setRawRequests(prev => {
       const list = prev.map(req => {
         if (req.id !== requestId) return req;
         disbursedAmount = req.amount;
@@ -1188,7 +1371,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const disbursement: DisbursementDetails = {
           paymentMethod: details.paymentMethod,
           referenceNumber: details.referenceNumber,
-          bankName: details.bankName || 'المصرف الرئيسي',
+          bankName: details.bankName || 'انستاباي / المصرف الرئيسي',
+          receiptUrl: details.receiptUrl,
           notes: details.notes,
           disbursedAt: dateFormatted,
           disbursedBy: currentUser.name,
@@ -1199,8 +1383,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           {
             id: `tl-${Date.now()}`,
             status: 'disbursed' as const,
-            title: 'تم تنفيذ وصرف المبلغ المالي بنجاح',
-            description: `طريقة الصرف: ${methodLabel} | رقم المرجع: ${details.referenceNumber}`,
+            title: 'تم تحويل وصرف المبلغ بنجاح',
+            description: `طريقة الصرف: ${methodLabel} | رقم العملية/المرجع: ${details.referenceNumber}`,
             actorName: currentUser.name,
             timestamp: dateFormatted,
           }
@@ -1220,10 +1404,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return list;
     });
 
-    // Update service and provider spentAmount / totalPaid
+    // Update spentAmount / totalPaid
     if (disbursedAmount > 0) {
       if (targetServiceId) {
-        setServices(prev => {
+        setRawServices(prev => {
           const updated = prev.map(s => {
             if (s.id !== targetServiceId) return s;
             const newSpent = s.spentAmount + disbursedAmount;
@@ -1238,7 +1422,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
       }
       if (targetProviderId) {
-        setProviders(prev => {
+        setRawProviders(prev => {
           const updated = prev.map(p => {
             if (p.id !== targetProviderId) return p;
             const newPaid = p.totalPaid + disbursedAmount;
@@ -1275,25 +1459,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return await signInWithGoogle();
   };
 
+  const handleLoginWithEmail = async (email: string, pass: string) => {
+    return await loginWithEmailPassword(email, pass);
+  };
+
+  const handleResetPassword = async (email: string) => {
+    return await sendPasswordReset(email);
+  };
+
   const handleLogoutUser = async () => {
     await logoutUser();
     setFirebaseUser(null);
+    setActiveOrgIdState('');
+    try {
+      localStorage.removeItem(STORAGE_KEYS.ACTIVE_ORG);
+      localStorage.removeItem(STORAGE_KEYS.ACTIVE_TAB);
+    } catch {}
   };
 
   return (
     <AppContext.Provider
       value={{
-        organizations,
-        activeOrgId,
+        organizations: scopedOrganizations,
+        allOrganizations: rawOrganizations,
+        activeOrgId: effectiveOrgId,
         activeOrg,
         users,
         currentUser,
         firebaseUser,
-        currentRole,
-        members,
-        services,
-        providers,
-        requests,
+        authLoading,
+        currentRole: resolvedRole,
+        members: scopedMembers,
+        services: scopedServices,
+        providers: scopedProviders,
+        requests: scopedRequests,
         activeTab,
         loading,
         isBackendConnected,
@@ -1302,12 +1501,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         firebaseError,
         clearFirebaseError,
         setActiveOrgId,
-        setCurrentRole,
+        setCurrentRole: () => {}, // Role is strictly resolved from authentication & membership
         setActiveTab,
         openFirebaseModal,
         closeFirebaseModal,
+        superAdminEmails,
+        addSuperAdminEmail,
         signInWithGoogle: handleSignInWithGoogle,
+        loginWithEmail: handleLoginWithEmail,
+        resetPassword: handleResetPassword,
         logoutUser: handleLogoutUser,
+        createCompanyUser,
         addOrganization,
         addMember,
         removeMember,

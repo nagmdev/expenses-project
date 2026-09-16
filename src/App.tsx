@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
+import { LoginPage } from './components/LoginPage';
 import { Header } from './components/Header';
 import { Navbar } from './components/Navbar';
 import { DashboardAnalytics } from './components/DashboardAnalytics';
@@ -12,7 +13,7 @@ import { NewRequestModal } from './components/NewRequestModal';
 import { RequestDetailModal } from './components/RequestDetailModal';
 import { FirebaseConfigModal } from './components/FirebaseConfigModal';
 import { ExpenseRequest } from './types';
-import { Building2, X, AlertTriangle } from 'lucide-react';
+import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
 
 const MainApp: React.FC = () => {
   const { 
@@ -21,7 +22,10 @@ const MainApp: React.FC = () => {
     addOrganization, 
     organizations, 
     loading, 
-    resetToSampleData,
+    authLoading,
+    firebaseUser,
+    currentRole,
+    currentUser,
     isFirebaseModalOpen,
     closeFirebaseModal,
     openFirebaseModal,
@@ -29,17 +33,35 @@ const MainApp: React.FC = () => {
     clearFirebaseError,
   } = useApp();
 
-
   const [isNewRequestModalOpen, setIsNewRequestModalOpen] = useState(false);
   const [selectedRequest, setSelectedRequest] = useState<ExpenseRequest | null>(null);
   
-  // Quick Org modal
+  // Quick Org modal for super admin
   const [isQuickOrgModalOpen, setIsQuickOrgModalOpen] = useState(false);
   const [newOrgName, setNewOrgName] = useState('');
   const [newOrgCode, setNewOrgCode] = useState('');
   const [newOrgCurrency, setNewOrgCurrency] = useState('SAR');
   const [newOrgBudget, setNewOrgBudget] = useState('500000');
 
+  // 1. Mandatory Loading State
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-200">
+        <div className="h-14 w-14 rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center text-slate-950 shadow-2xl shadow-emerald-500/30 mb-4 animate-pulse">
+          <Wallet className="h-7 w-7 stroke-[2.5]" />
+        </div>
+        <div className="flex items-center gap-2 text-xs font-bold text-slate-400">
+          <Loader2 className="h-4 w-4 animate-spin text-emerald-400" />
+          <span>جاري التحقق من أمان الجلسة والشهادة الرقمية...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Mandatory Authentication Gate
+  if (!firebaseUser) {
+    return <LoginPage />;
+  }
 
   const handleQuickAddOrg = (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,14 +121,14 @@ const MainApp: React.FC = () => {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {!loading && organizations.length === 0 ? (
+        {!loading && organizations.length === 0 && currentRole === 'super_admin' ? (
           <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-xl mx-auto text-center shadow-md my-8">
             <div className="h-16 w-16 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto mb-4">
               <Building2 className="h-8 w-8" />
             </div>
-            <h2 className="text-xl font-bold text-slate-900">مرحباً بك في نظام إدارة المصروفات (مصروفي)</h2>
+            <h2 className="text-xl font-bold text-slate-900">مرحباً بك في لوحة تحكم المنصة (Super Admin)</h2>
             <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-              ابدأ بإضافة مؤسستك الأولى لإدارة المصروفات، مراكز التكلفة، الموردين، وسير دورات الاعتماد والصرف فورياً.
+              ابدأ بإنشاء الشركة الأولى وتعيين مدير لها ليبدأ في إضافة الموظفين واعتماد المصروفات.
             </p>
             <div className="flex flex-wrap items-center justify-center gap-3 mt-6">
               <button
@@ -114,11 +136,18 @@ const MainApp: React.FC = () => {
                 onClick={() => setIsQuickOrgModalOpen(true)}
                 className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer"
               >
-                + إضافة مؤسستك الأولى الآن
+                + إنشاء الشركة الأولى الآن
               </button>
             </div>
           </div>
+        ) : currentRole === 'employee' ? (
+          /* Employee Experience: Dedicated Banking Tracker */
+          <RequesterTracker 
+            onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+            onSelectRequest={setSelectedRequest}
+          />
         ) : (
+          /* Admin / Super Admin Multi-Tab View */
           <>
             {activeTab === 'dashboard' && (
               <DashboardAnalytics 
@@ -156,7 +185,6 @@ const MainApp: React.FC = () => {
         )}
       </main>
 
-
       {/* Modals */}
       <NewRequestModal 
         isOpen={isNewRequestModalOpen}
@@ -174,15 +202,14 @@ const MainApp: React.FC = () => {
         onClose={closeFirebaseModal}
       />
 
-
-      {/* Quick Add Org Modal */}
-      {isQuickOrgModalOpen && (
+      {/* Quick Add Org Modal (Super Admin Only) */}
+      {isQuickOrgModalOpen && currentRole === 'super_admin' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
                 <Building2 className="h-4 w-4 text-emerald-600" />
-                <span>إضافة مؤسسة منفصلة جديدة</span>
+                <span>إضافة شركة / مؤسسة جديدة</span>
               </h3>
               <button 
                 onClick={() => setIsQuickOrgModalOpen(false)}
@@ -194,26 +221,26 @@ const MainApp: React.FC = () => {
 
             <form onSubmit={handleQuickAddOrg} className="mt-4 space-y-3 text-xs">
               <div>
-                <label className="block font-bold text-slate-700 mb-1">اسم المؤسسة *</label>
+                <label className="block font-bold text-slate-700 mb-1">اسم المؤسسة أو الشركة *</label>
                 <input
                   type="text"
                   required
                   value={newOrgName}
                   onChange={(e) => setNewOrgName(e.target.value)}
-                  placeholder="مثال: شركة التطوير والابتكار..."
+                  placeholder="مثال: شركة الرواد للتجارة..."
                   className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">رمز المؤسسة (Code)</label>
+                  <label className="block font-bold text-slate-700 mb-1">رمز الشركة (Code)</label>
                   <input
                     type="text"
                     required
                     value={newOrgCode}
                     onChange={(e) => setNewOrgCode(e.target.value.toUpperCase())}
-                    placeholder="DEV"
+                    placeholder="RWD"
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono uppercase"
                   />
                 </div>
@@ -226,8 +253,8 @@ const MainApp: React.FC = () => {
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                   >
                     <option value="SAR">SAR (ريال سعودي)</option>
-                    <option value="AED">AED (درهم إماراتي)</option>
                     <option value="EGP">EGP (جنيه مصري)</option>
+                    <option value="AED">AED (درهم إماراتي)</option>
                     <option value="USD">USD (دولار أمريكي)</option>
                   </select>
                 </div>
@@ -256,7 +283,7 @@ const MainApp: React.FC = () => {
                   type="submit"
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl"
                 >
-                  حفظ المؤسسة
+                  حفظ وإنشاء الشركة
                 </button>
               </div>
             </form>
@@ -266,7 +293,7 @@ const MainApp: React.FC = () => {
 
       {/* Footer */}
       <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-400">
-        نظام إدارة المصروفات والعهد متعدد المؤسسات © 2026 — مصمم للشركات والمؤسسات المستقلة
+        نظام إدارة المصروفات والعهد متعدد الشركات © 2026 — بيئة مشفرة ومعزولة مصرفياً
       </footer>
 
     </div>
