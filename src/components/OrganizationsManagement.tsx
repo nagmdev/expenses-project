@@ -20,7 +20,7 @@ import {
   ExternalLink,
   KeyRound
 } from 'lucide-react';
-import { Role } from '../types';
+import { Role, SUPPORTED_CURRENCIES } from '../types';
 import { 
   sanitizeDigitsOnly, 
   sanitizePhone, 
@@ -753,10 +753,11 @@ export const OrganizationsManagement: React.FC = () => {
                     onChange={(e) => setOrgCurrency(e.target.value)}
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                   >
-                    <option value="SAR">SAR (ريال سعودي)</option>
-                    <option value="EGP">EGP (جنيه مصري)</option>
-                    <option value="AED">AED (درهم إماراتي)</option>
-                    <option value="USD">USD (دولار أمريكي)</option>
+                    {SUPPORTED_CURRENCIES.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>

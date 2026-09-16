@@ -9,7 +9,7 @@ import {
   DollarSign, 
   CreditCard 
 } from 'lucide-react';
-import { PaymentMethod } from '../types';
+import { PaymentMethod, SUPPORTED_CURRENCIES } from '../types';
 import { 
   sanitizeAmount, 
   sanitizeDigitalWallet, 
@@ -43,6 +43,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [description, setDescription] = useState('');
   const [justification, setJustification] = useState('');
   const [amount, setAmount] = useState('');
+  const [currency, setCurrency] = useState(activeOrg?.currency || 'EGP');
   const [serviceCategoryId, setServiceCategoryId] = useState(orgServices[0]?.id || '');
   const [customServiceName, setCustomServiceName] = useState('');
   const [providerId, setProviderId] = useState(orgProviders[0]?.id || '');
@@ -65,6 +66,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       setProviderId(orgProviders[0].id);
     }
   }, [orgProviders, providerId]);
+
+  React.useEffect(() => {
+    if (activeOrg?.currency) {
+      setCurrency(activeOrg.currency);
+    }
+  }, [activeOrg]);
 
   if (!isOpen) return null;
 
@@ -118,7 +125,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         description: description.trim(),
         justification: justification.trim(),
         amount: Number(amount),
-        currency: activeOrg?.currency || 'SAR',
+        currency: currency || activeOrg?.currency || 'EGP',
         serviceCategoryId: finalServiceId || orgServices[0]?.id || 'srv-default',
         providerId: finalProviderId || orgProviders[0]?.id || 'prov-default',
         urgency,
@@ -232,26 +239,48 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
             </div>
           </div>
 
-          {/* Amount & Urgency */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
+          {/* Amount, Currency & Urgency */}
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+            <div className="sm:col-span-5">
               <label className="block font-bold text-slate-700 mb-1">
-                المبلغ المطلوب ({activeOrg?.currency || 'SAR'}) *
+                المبلغ المطلوب *
               </label>
-              <input
-                type="text"
-                inputMode="decimal"
-                required
-                value={amount}
-                onKeyDown={(e) => handleNumericKeyDown(e, true)}
-                onChange={(e) => setAmount(sanitizeAmount(e.target.value))}
-                placeholder="0.00"
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 font-bold text-slate-900"
-              />
+              <div className="relative">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  required
+                  value={amount}
+                  onKeyDown={(e) => handleNumericKeyDown(e, true)}
+                  onChange={(e) => setAmount(sanitizeAmount(e.target.value))}
+                  placeholder="0.00"
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 font-bold text-slate-900 pl-16 text-sm"
+                />
+                <span className="absolute left-2.5 top-2.5 px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-lg text-xs font-black select-none pointer-events-none">
+                  {currency}
+                </span>
+              </div>
             </div>
 
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">مستوى الأهمية والسرعة</label>
+            <div className="sm:col-span-4">
+              <label className="block font-bold text-slate-700 mb-1">
+                عملة الصرف والمطالبة *
+              </label>
+              <select
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-bold text-xs"
+              >
+                {SUPPORTED_CURRENCIES.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="sm:col-span-3">
+              <label className="block font-bold text-slate-700 mb-1">مستوى السرعة</label>
               <select
                 value={urgency}
                 onChange={(e: any) => setUrgency(e.target.value)}

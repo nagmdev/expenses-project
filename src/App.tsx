@@ -13,7 +13,7 @@ import { NewRequestModal } from './components/NewRequestModal';
 import { RequestDetailModal } from './components/RequestDetailModal';
 import { FirebaseConfigModal } from './components/FirebaseConfigModal';
 import { UserProfileModal } from './components/UserProfileModal';
-import { ExpenseRequest } from './types';
+import { ExpenseRequest, SUPPORTED_CURRENCIES } from './types';
 import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
 
@@ -43,7 +43,7 @@ const MainApp: React.FC = () => {
   const [isQuickOrgModalOpen, setIsQuickOrgModalOpen] = useState(false);
   const [newOrgName, setNewOrgName] = useState('');
   const [newOrgCode, setNewOrgCode] = useState('');
-  const [newOrgCurrency, setNewOrgCurrency] = useState('SAR');
+  const [newOrgCurrency, setNewOrgCurrency] = useState('EGP');
   const [newOrgBudget, setNewOrgBudget] = useState('500000');
 
   // 1. Mandatory Loading State
@@ -256,16 +256,17 @@ const MainApp: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">العملة</label>
+                  <label className="block font-bold text-slate-700 mb-1">العملة الأساسية</label>
                   <select
                     value={newOrgCurrency}
                     onChange={(e) => setNewOrgCurrency(e.target.value)}
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                   >
-                    <option value="SAR">SAR (ريال سعودي)</option>
-                    <option value="EGP">EGP (جنيه مصري)</option>
-                    <option value="AED">AED (درهم إماراتي)</option>
-                    <option value="USD">USD (دولار أمريكي)</option>
+                    {SUPPORTED_CURRENCIES.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>

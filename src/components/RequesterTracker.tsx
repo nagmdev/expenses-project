@@ -73,7 +73,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
     .filter(r => r.status === 'pending' || r.status === 'approved' || r.status === 'clarification_requested')
     .reduce((sum, r) => sum + r.amount, 0);
 
-  const currency = activeOrg?.currency || myRequests[0]?.currency || 'SAR';
+  const currency = activeOrg?.currency || myRequests[0]?.currency || 'EGP';
 
   const getStatusBadge = (status: ExpenseRequest['status']) => {
     switch (status) {
