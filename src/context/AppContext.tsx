@@ -296,12 +296,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
-  // Super admin emails list (loaded from env, local storage, and Firestore 'super_admins' collection)
+  // Super admin emails list (loaded from default, env, local storage, and Firestore 'super_admins' collection)
   const [superAdminEmails, setSuperAdminEmails] = useState<string[]>(() => {
+    const defaultAdmins = ['marwanagib813@gmail.com'];
     const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
     const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
     const localAdmins = safeGetLocal<string[]>(SUPER_ADMINS_STORAGE_KEY, []);
-    return Array.from(new Set([...envList, ...localAdmins]));
+    return Array.from(new Set([...defaultAdmins, ...envList, ...localAdmins]));
   });
 
   // =========================================================================
