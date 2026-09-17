@@ -13,6 +13,7 @@ import { NewRequestModal } from './components/NewRequestModal';
 import { RequestDetailModal } from './components/RequestDetailModal';
 import { FirebaseConfigModal } from './components/FirebaseConfigModal';
 import { UserProfileModal } from './components/UserProfileModal';
+import { SettingsManagement } from './components/SettingsManagement';
 import { ExpenseRequest, SUPPORTED_CURRENCIES } from './types';
 import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
@@ -184,11 +185,15 @@ const MainApp: React.FC = () => {
             </div>
           </div>
         ) : currentRole === 'employee' ? (
-          /* Employee Experience: Dedicated Banking Tracker */
-          <RequesterTracker 
-            onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
-            onSelectRequest={setSelectedRequest}
-          />
+          /* Employee Experience: Dedicated Banking Tracker or Settings */
+          activeTab === 'settings' ? (
+            <SettingsManagement />
+          ) : (
+            <RequesterTracker 
+              onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+              onSelectRequest={setSelectedRequest}
+            />
+          )
         ) : (
           /* Admin / Super Admin / Data Entry Multi-Tab View */
           <>
@@ -223,6 +228,10 @@ const MainApp: React.FC = () => {
 
             {activeTab === 'organizations' && (
               <OrganizationsManagement />
+            )}
+
+            {activeTab === 'settings' && (
+              <SettingsManagement />
             )}
           </>
         )}

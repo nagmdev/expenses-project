@@ -233,3 +233,42 @@ export interface Department {
   updatedAt?: string;
 }
 
+export type EmailEventType = 
+  | 'new_request' 
+  | 'request_approved' 
+  | 'request_paid' 
+  | 'clarification_requested' 
+  | 'clarification_replied' 
+  | 'request_rejected'
+  | 'test_email';
+
+export interface EmailNotificationSettings {
+  enabled: boolean;
+  notifyOnNewRequest: boolean;
+  notifyOnApproval: boolean;
+  notifyOnDisbursement: boolean;
+  notifyOnClarification: boolean;
+  notifyOnRejection: boolean;
+  senderName: string;
+  replyToEmail?: string;
+  deliveryMethod: 'firestore_mail' | 'webhook';
+  webhookUrl?: string;
+}
+
+export interface EmailLogEntry {
+  id: string;
+  eventType: EmailEventType;
+  recipientEmail: string;
+  recipientName?: string;
+  subject: string;
+  snippet: string;
+  requestId?: string;
+  requestNumber?: string;
+  amount?: number;
+  currency?: string;
+  status: 'sent' | 'pending' | 'failed';
+  errorMessage?: string;
+  timestamp: string;
+}
+
+

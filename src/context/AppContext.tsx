@@ -14,8 +14,15 @@ import {
   PaymentAccount,
   Department,
   AuditActionType,
-  AuditEntityType
+  AuditEntityType,
+  EmailNotificationSettings,
+  EmailLogEntry,
+  EmailEventType
 } from '../types';
+import { 
+  DEFAULT_EMAIL_SETTINGS, 
+  sendNotificationEmail 
+} from '../services/emailService';
 import {
   isFirebaseConfigured,
   initFirebase,
@@ -28,14 +35,14 @@ import {
   changeUserPassword,
   updateUserProfile,
   signInWithGoogle,
+  logoutUser,
   loginWithEmailPassword,
   sendPasswordReset,
   adminCreateUserAccount,
-  logoutUser,
   subscribeToAuth,
-  purgeSampleDataFromFirestore,
-  type FirebaseUser,
+  purgeSampleDataFromFirestore
 } from '../lib/firebase';
+import { User as FirebaseUser } from 'firebase/auth';
 
 export { 
   signInWithGoogle, 
@@ -45,7 +52,7 @@ export {
   adminCreateUserAccount 
 } from '../lib/firebase';
 
-export const SUPER_ADMINS_STORAGE_KEY = 'expenses_super_admins_v3';
+export const SUPER_ADMINS_STORAGE_KEY = 'expenses_super_admin_emails_v3';
 
 const STORAGE_KEYS = {
   ORGS: 'expenses_organizations_v3',
@@ -59,6 +66,8 @@ const STORAGE_KEYS = {
   AUDIT_LOGS: 'expenses_audit_logs_v3',
   PAYMENT_ACCOUNTS: 'expenses_payment_accounts_v3',
   DEPARTMENTS: 'expenses_departments_v3',
+  EMAIL_SETTINGS: 'expenses_email_settings_v3',
+  EMAIL_LOGS: 'expenses_email_logs_v3',
 };
 
 // Immediate purge of all legacy v1 and v2 localStorage keys
@@ -256,6 +265,13 @@ interface AppContextType {
     orgName?: string;
   }) => Promise<void>;
   
+  // Email Notifications & Settings
+  emailSettings: EmailNotificationSettings;
+  updateEmailSettings: (settings: Partial<EmailNotificationSettings>) => Promise<void>;
+  emailLogs: EmailLogEntry[];
+  sendTestEmail: (recipientEmail: string, templateType?: EmailEventType) => Promise<{ success: boolean; message: string }>;
+  clearEmailLogs: () => Promise<void>;
+
   refreshData: () => Promise<void>;
   resetToSampleData: () => void;
 }
@@ -307,6 +323,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [rawDepartments, setRawDepartments] = useState<Department[]>(() => {
     return safeGetLocal<Department[]>(STORAGE_KEYS.DEPARTMENTS, []);
+  });
+
+  const [emailSettings, setEmailSettings] = useState<EmailNotificationSettings>(() => {
+    return safeGetLocal<EmailNotificationSettings>(STORAGE_KEYS.EMAIL_SETTINGS, DEFAULT_EMAIL_SETTINGS);
+  });
+
+  const [emailLogs, setEmailLogs] = useState<EmailLogEntry[]>(() => {
+    return safeGetLocal<EmailLogEntry[]>(STORAGE_KEYS.EMAIL_LOGS, []);
   });
 
   const [loading, setLoading] = useState(false);
@@ -759,6 +783,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[Firebase] AuditLogs onSnapshot error:', err);
     });
 
+    // 10. Email Logs Listener
+    const unsubEmailLogs = onSnapshot(collection(db, 'email_logs'), (snapshot) => {
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as EmailLogEntry));
+      list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      setEmailLogs(list);
+      safeSetLocal(STORAGE_KEYS.EMAIL_LOGS, list);
+    }, (err) => {
+      console.warn('[Firebase] EmailLogs onSnapshot error:', err);
+    });
+
     return () => {
       unsubOrgs();
       unsubMembers();
@@ -769,6 +804,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubPaymentAccounts();
       unsubDepartments();
       unsubAuditLogs();
+      unsubEmailLogs();
     };
   }, [firebaseUser, firebaseSyncCounter]);
 
@@ -1984,6 +2020,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.REQUESTS, updated);
       return updated;
     });
+
+    // Automated Email Dispatch: Notify Company Admins and Super Admins
+    try {
+      const targetOrg = rawOrganizations.find(o => o.id === targetOrgId);
+      const adminEmails = Array.from(new Set([
+        ...rawMembers.filter(m => m.orgId === targetOrgId && m.role === 'org_admin').map(m => m.userEmail || ''),
+        ...superAdminEmails
+      ])).filter(e => e && e.includes('@'));
+
+      if (adminEmails.length > 0) {
+        sendNotificationEmail('new_request', adminEmails, {
+          request: newRequest,
+          org: targetOrg,
+          actorName: currentUser.name,
+        }, emailSettings).then(newLogs => {
+          if (newLogs.length > 0) {
+            setEmailLogs(prev => [...newLogs, ...prev].slice(0, 500));
+          }
+        }).catch(err => console.warn('[Email Dispatch Warning]', err));
+      }
+    } catch (e) {
+      console.warn('[Email Dispatch Error]', e);
+    }
   };
 
   const approveRequest = async (requestId: string, note?: string) => {
@@ -2046,6 +2105,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ note, actorName: currentUser.name }),
       });
+    }
+
+    // Automated Email Dispatch: Notify Requester
+    if (targetUpdated && (targetUpdated as ExpenseRequest).requesterEmail) {
+      try {
+        const reqObj = targetUpdated as ExpenseRequest;
+        const targetOrg = rawOrganizations.find(o => o.id === reqObj.orgId);
+        sendNotificationEmail('request_approved', [reqObj.requesterEmail!], {
+          request: reqObj,
+          org: targetOrg,
+          note,
+          actorName: currentUser.name,
+        }, emailSettings).then(newLogs => {
+          if (newLogs.length > 0) setEmailLogs(prev => [...newLogs, ...prev].slice(0, 500));
+        }).catch(err => console.warn('[Email Dispatch Warning]', err));
+      } catch (e) {
+        console.warn('[Email Dispatch Error]', e);
+      }
     }
   };
 
@@ -2111,6 +2188,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify({ reason, actorName: currentUser.name }),
       });
     }
+
+    // Automated Email Dispatch: Notify Requester
+    if (targetUpdated && (targetUpdated as ExpenseRequest).requesterEmail) {
+      try {
+        const reqObj = targetUpdated as ExpenseRequest;
+        const targetOrg = rawOrganizations.find(o => o.id === reqObj.orgId);
+        sendNotificationEmail('request_rejected', [reqObj.requesterEmail!], {
+          request: reqObj,
+          org: targetOrg,
+          rejectionReason: reason,
+          actorName: currentUser.name,
+        }, emailSettings).then(newLogs => {
+          if (newLogs.length > 0) setEmailLogs(prev => [...newLogs, ...prev].slice(0, 500));
+        }).catch(err => console.warn('[Email Dispatch Warning]', err));
+      } catch (e) {
+        console.warn('[Email Dispatch Error]', e);
+      }
+    }
   };
 
   const requestClarification = async (requestId: string, question: string) => {
@@ -2173,6 +2268,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question, actorName: currentUser.name }),
       });
+    }
+
+    // Automated Email Dispatch: Notify Requester
+    if (targetUpdated && (targetUpdated as ExpenseRequest).requesterEmail) {
+      try {
+        const reqObj = targetUpdated as ExpenseRequest;
+        const targetOrg = rawOrganizations.find(o => o.id === reqObj.orgId);
+        sendNotificationEmail('clarification_requested', [reqObj.requesterEmail!], {
+          request: reqObj,
+          org: targetOrg,
+          clarificationQuestion: question,
+          actorName: currentUser.name,
+        }, emailSettings).then(newLogs => {
+          if (newLogs.length > 0) setEmailLogs(prev => [...newLogs, ...prev].slice(0, 500));
+        }).catch(err => console.warn('[Email Dispatch Warning]', err));
+      } catch (e) {
+        console.warn('[Email Dispatch Error]', e);
+      }
     }
   };
 
@@ -2248,6 +2361,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ replyText, attachmentName, actorName: currentUser.name }),
       });
+    }
+
+    // Automated Email Dispatch: Notify Admins of clarification reply
+    if (targetUpdated) {
+      try {
+        const reqObj = targetUpdated as ExpenseRequest;
+        const targetOrg = rawOrganizations.find(o => o.id === reqObj.orgId);
+        const adminEmails = Array.from(new Set([
+          ...rawMembers.filter(m => m.orgId === reqObj.orgId && m.role === 'org_admin').map(m => m.userEmail || ''),
+          ...superAdminEmails
+        ])).filter(e => e && e.includes('@'));
+
+        if (adminEmails.length > 0) {
+          sendNotificationEmail('clarification_replied', adminEmails, {
+            request: reqObj,
+            org: targetOrg,
+            note: replyText,
+            actorName: currentUser.name,
+          }, emailSettings).then(newLogs => {
+            if (newLogs.length > 0) setEmailLogs(prev => [...newLogs, ...prev].slice(0, 500));
+          }).catch(err => console.warn('[Email Dispatch Warning]', err));
+        }
+      } catch (e) {
+        console.warn('[Email Dispatch Error]', e);
+      }
     }
   };
 
@@ -2361,6 +2499,104 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify({ ...details, actorName: currentUser.name }),
       });
     }
+
+    // Automated Email Dispatch: Notify Requester of disbursement
+    if (targetUpdated && (targetUpdated as ExpenseRequest).requesterEmail) {
+      try {
+        const reqObj = targetUpdated as ExpenseRequest;
+        const targetOrg = rawOrganizations.find(o => o.id === reqObj.orgId);
+        const vault = rawPaymentAccounts.find(p => p.id === details.paymentMethod || p.accountIdentifier === details.referenceNumber);
+        sendNotificationEmail('request_paid', [reqObj.requesterEmail!], {
+          request: reqObj,
+          org: targetOrg,
+          disbursedVaultName: vault?.name || details.bankName,
+          transactionRef: details.referenceNumber,
+          note: details.notes,
+          actorName: currentUser.name,
+        }, emailSettings).then(newLogs => {
+          if (newLogs.length > 0) setEmailLogs(prev => [...newLogs, ...prev].slice(0, 500));
+        }).catch(err => console.warn('[Email Dispatch Warning]', err));
+      } catch (e) {
+        console.warn('[Email Dispatch Error]', e);
+      }
+    }
+  };
+
+  const updateEmailSettings = async (partial: Partial<EmailNotificationSettings>) => {
+    const updated = { ...emailSettings, ...partial };
+    setEmailSettings(updated);
+    safeSetLocal(STORAGE_KEYS.EMAIL_SETTINGS, updated);
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('system_settings', 'email_notifications', updated);
+      } catch (err) {
+        console.error('[Firebase] Error updating email settings:', err);
+      }
+    }
+    await logAuditAction({
+      actionType: 'update',
+      entityType: 'organization',
+      entityId: 'email_settings',
+      entityName: 'إعدادات الإشعارات البريدية',
+      details: 'تم تحديث خيارات وقنوات إرسال البريد الإلكتروني',
+    });
+  };
+
+  const sendTestEmail = async (recipientEmail: string, templateType: EmailEventType = 'test_email') => {
+    if (!recipientEmail || !recipientEmail.includes('@')) {
+      return { success: false, message: 'يرجى إدخال عنوان بريد إلكتروني صحيح.' };
+    }
+    try {
+      const fakeReq: ExpenseRequest = {
+        id: 'req-test',
+        requestNumber: `REQ-${Math.floor(10000 + Math.random() * 90000)}`,
+        orgId: activeOrgId || rawOrganizations[0]?.id || 'org-1',
+        requesterId: currentUser.id,
+        requesterName: currentUser.name,
+        requesterEmail: recipientEmail,
+        requesterDepartment: 'العمليات والتوريد',
+        serviceCategoryId: 'serv-test',
+        serviceCategoryName: 'مهمات ومصروفات تشغيلية',
+        providerId: 'prov-test',
+        providerName: 'المورد الرئيسي',
+        title: 'طلب صرف تجريبي لمعاينة الإشعار',
+        description: 'تجربة إرسال إشعار بريدي للتأكد من وصول الرسائل وتنسيق القالب العربي.',
+        justification: 'فحص الربط السحابي مع Firebase ومزود البريد ومجموعة mail',
+        amount: 2750,
+        currency: 'EGP',
+        status: 'pending',
+        urgency: 'medium',
+        attachments: [],
+        comments: [],
+        timeline: [],
+        preferredPaymentMethod: 'instapay',
+        paymentAccountDetails: 'finance@instapay',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const logs = await sendNotificationEmail(templateType, [recipientEmail], {
+        request: fakeReq,
+        org: activeOrg || rawOrganizations[0],
+        actorName: currentUser.name,
+        customSubject: '🧪 بريد اختباري من نظام مصروفي',
+        customMessage: 'تم إرسال هذا البريد بنجاح لمعاينة قالب الإشعار البريدي والتحقق من الربط مع Firebase ومجموعة mail.',
+        note: 'هذا إشعار اختباري للتأكد من وصول الرسائل بالشكل المطلوب للموظفين والمديرين.',
+      }, { ...emailSettings, enabled: true });
+
+      if (logs.length > 0) {
+        setEmailLogs(prev => [...logs, ...prev].slice(0, 500));
+      }
+
+      return { success: true, message: `تم إرسال البريد التجريبي إلى (${recipientEmail}) بنجاح!` };
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'فشل إرسال البريد التجريبي.' };
+    }
+  };
+
+  const clearEmailLogs = async () => {
+    setEmailLogs([]);
+    safeSetLocal(STORAGE_KEYS.EMAIL_LOGS, []);
   };
 
   const handleSignInWithGoogle = async () => {
@@ -2505,6 +2741,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteDepartment,
         auditLogs: scopedAuditLogs,
         logAuditAction,
+        emailSettings,
+        updateEmailSettings,
+        emailLogs,
+        sendTestEmail,
+        clearEmailLogs,
         refreshData,
         resetToSampleData,
       }}
