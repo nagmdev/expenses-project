@@ -160,6 +160,11 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onCl
                     مدير الشركة
                   </span>
                 )}
+                {currentRole === 'finance' && (
+                  <span className="text-[11px] bg-purple-400/20 text-purple-300 border border-purple-400/30 px-2 py-0.5 rounded-full font-bold">
+                    💸 مسؤول الصرف والخزينة
+                  </span>
+                )}
                 {currentRole === 'employee' && (
                   <span className="text-[11px] bg-emerald-400/20 text-emerald-300 border border-emerald-400/30 px-2 py-0.5 rounded-full font-bold">
                     موظف

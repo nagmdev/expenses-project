@@ -494,6 +494,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (activeTab === 'dashboard' || activeTab === 'requests' || activeTab === 'settings') {
         setActiveTab('providers');
       }
+    } else if (resolvedRole === 'finance') {
+      if (activeTab === 'dashboard' || activeTab === 'services' || activeTab === 'organizations' || activeTab === 'settings') {
+        setActiveTab('requests');
+      }
     }
   }, [resolvedRole, firebaseUser, activeTab]);
 
@@ -517,7 +521,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return effectiveOrgId === 'all' ? rawMembers : rawMembers.filter(m => m.orgId === effectiveOrgId);
     }
     if (!effectiveOrgId) return [];
-    if (resolvedRole === 'org_admin') {
+    if (resolvedRole === 'org_admin' || resolvedRole === 'finance') {
       return rawMembers.filter(m => m.orgId === effectiveOrgId);
     }
     // Role is employee: strictly sees their own membership profile
@@ -547,7 +551,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // STRICT REQUEST SCOPING:
   // - super_admin: sees all requests (or filtered by activeOrgId if specific org chosen)
-  // - org_admin: strictly sees requests for their company only
+  // - org_admin / finance: strictly sees requests for their company only
   // - employee: strictly sees their OWN requests only! Absolutely zero leakage of other employees' requests!
   const scopedRequests = useMemo(() => {
     if (!firebaseUser) return [];
@@ -562,8 +566,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } else {
         list = rawRequests;
       }
-    } else if (resolvedRole === 'org_admin') {
-      // Company Admin sees all requests inside their specific company only
+    } else if (resolvedRole === 'org_admin' || resolvedRole === 'finance') {
+      // Company Admin and Finance (Disburser) see all requests inside their specific company only
       list = rawRequests.filter(r => r.orgId === effectiveOrgId);
     } else {
       // Role is employee (or non-admin): strictly sees their own submitted requests only! Zero data leakage!
@@ -1181,8 +1185,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         userName: cleanEmail.split('@')[0],
         userEmail: cleanEmail,
         role: newRole,
-        department: 'الإدارة العامة',
-        jobTitle: newRole === 'org_admin' ? 'مدير شركة' : newRole === 'data_entry' ? 'مدخل بيانات' : 'موظف',
+        department: newRole === 'finance' ? 'المالية والحسابات' : 'الإدارة العامة',
+        jobTitle: newRole === 'org_admin' ? 'مدير شركة' : newRole === 'finance' ? 'مسؤول الصرف والخزينة' : newRole === 'data_entry' ? 'مدخل بيانات' : 'موظف',
         active: true,
       });
     }
@@ -1192,7 +1196,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       entityType: 'member',
       entityId: cleanEmail,
       entityName: cleanEmail,
-      details: `تم تعديل رتبة المشرف (${cleanEmail}) إلى رتبة (${newRole === 'org_admin' ? 'مدير شركة' : newRole === 'data_entry' ? 'مدخل بيانات' : 'موظف'}) للشركة (${orgIdToUse})`,
+      details: `تم تعديل رتبة المشرف (${cleanEmail}) إلى رتبة (${newRole === 'org_admin' ? 'مدير شركة' : newRole === 'finance' ? 'مسؤول الصرف والخزينة' : newRole === 'data_entry' ? 'مدخل بيانات' : 'موظف'}) للشركة (${orgIdToUse})`,
     });
   };
 
@@ -1237,6 +1241,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const defaultJobTitle = data.role === 'org_admin' 
         ? 'مدير المؤسسة' 
+        : data.role === 'finance'
+        ? 'مسؤول الصرف والخزينة'
         : data.role === 'data_entry' 
         ? 'مدخل بيانات' 
         : 'موظف';
@@ -1249,7 +1255,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         userEmail: effectiveEmail,
         phone: data.phone?.trim() || '',
         role: data.role,
-        department: data.department?.trim() || (data.role === 'data_entry' ? 'إدخال البيانات والتسجيل' : 'العمليات والتشغيل'),
+        department: data.department?.trim() || (data.role === 'finance' ? 'المالية والحسابات' : data.role === 'data_entry' ? 'إدخال البيانات والتسجيل' : 'العمليات والتشغيل'),
         jobTitle: data.jobTitle?.trim() || defaultJobTitle,
         joinedAt: new Date().toISOString().split('T')[0],
         active: true,
@@ -2229,6 +2235,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const approveRequest = async (requestId: string, note?: string) => {
+    if (resolvedRole !== 'super_admin' && resolvedRole !== 'org_admin') {
+      console.warn('[RBAC] User does not have permission to approve requests:', resolvedRole);
+      alert('عفواً، صلاحية اعتماد الطلبات مقتصرة على مدراء المؤسسة فقط. مسؤول الصرف يقوم بالصرف المالي فقط بعد الاعتماد.');
+      return;
+    }
+
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
@@ -2310,6 +2322,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const rejectRequest = async (requestId: string, reason: string) => {
+    if (resolvedRole !== 'super_admin' && resolvedRole !== 'org_admin') {
+      console.warn('[RBAC] User does not have permission to reject requests:', resolvedRole);
+      alert('عفواً، صلاحية رفض الطلبات مقتصرة على مدراء المؤسسة فقط.');
+      return;
+    }
+
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
@@ -2392,6 +2410,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const requestClarification = async (requestId: string, question: string) => {
+    if (resolvedRole !== 'super_admin' && resolvedRole !== 'org_admin') {
+      console.warn('[RBAC] User does not have permission to request clarification:', resolvedRole);
+      alert('عفواً، صلاحية طلب توضيحات مقتصرة على مدراء المؤسسة فقط.');
+      return;
+    }
+
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
@@ -2576,6 +2600,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     requestId: string, 
     details: Omit<DisbursementDetails, 'disbursedAt' | 'disbursedBy'>
   ) => {
+    if (resolvedRole !== 'super_admin' && resolvedRole !== 'org_admin' && resolvedRole !== 'finance') {
+      console.warn('[RBAC] User does not have permission to disburse requests:', resolvedRole);
+      alert('عفواً، ليس لديك صلاحية تنفيذ عمليات الصرف والتحويل.');
+      return;
+    }
+
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 

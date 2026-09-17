@@ -1326,6 +1326,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
               >
                 <option value="all">كل الرتب والأدوار</option>
                 <option value="org_admin">مدير مؤسسة (Admin)</option>
+                <option value="finance">مسؤول الصرف والخزينة (Finance)</option>
                 <option value="employee">موظف (Employee)</option>
                 <option value="data_entry">مدخل بيانات (Data Entry)</option>
               </select>
@@ -1402,11 +1403,13 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                           <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
                             mem.role === 'org_admin'
                               ? 'bg-purple-100 text-purple-800'
+                              : mem.role === 'finance'
+                              ? 'bg-emerald-100 text-emerald-800'
                               : mem.role === 'data_entry'
                               ? 'bg-amber-100 text-amber-800'
                               : 'bg-slate-100 text-slate-700'
                           }`}>
-                            {mem.role === 'org_admin' ? 'مدير شركة' : mem.role === 'data_entry' ? 'مدخل بيانات' : 'موظف'}
+                            {mem.role === 'org_admin' ? 'مدير شركة' : mem.role === 'finance' ? 'مسؤول الصرف والخزينة' : mem.role === 'data_entry' ? 'مدخل بيانات' : 'موظف'}
                           </span>
                         </td>
 
@@ -2378,6 +2381,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
                     >
                       <option value="employee">موظف (Employee)</option>
+                      <option value="finance">مسؤول الصرف والخزينة (Finance / Disburser)</option>
                       <option value="org_admin">مدير مؤسسة (Admin)</option>
                       <option value="data_entry">مدخل بيانات (Data Entry)</option>
                     </select>
@@ -2473,6 +2477,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
                   >
                     <option value="employee">موظف (Employee)</option>
+                    <option value="finance">مسؤول الصرف والخزينة (Finance / Disburser)</option>
                     <option value="org_admin">مدير مؤسسة (Admin)</option>
                     <option value="data_entry">مدخل بيانات (Data Entry)</option>
                   </select>
@@ -3223,6 +3228,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 >
                   <option value="super_admin">🛡️ سوبر أدمن المنصة (Super Admin)</option>
                   <option value="org_admin">🏢 مدير شركة (Company Admin)</option>
+                  <option value="finance">💸 مسؤول الصرف والخزينة (Finance)</option>
                   <option value="data_entry">✍️ مدخل بيانات (Data Entry)</option>
                   <option value="employee">👤 موظف (Employee)</option>
                 </select>

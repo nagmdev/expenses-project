@@ -25,8 +25,8 @@ export default async function handler(req: any, res: any) {
       status: 'ok',
       service: 'expenses-email-dispatcher',
       supportedProviders: ['resend', 'brevo'],
-      hasEnvResendKey: Boolean(process.env.RESEND_API_KEY),
-      hasEnvBrevoKey: Boolean(process.env.BREVO_API_KEY),
+      hasEnvResendKey: Boolean(process.env.Resend_API_KEY || process.env.RESEND_API_KEY || process.env.resend_api_key || process.env.VITE_RESEND_API_KEY),
+      hasEnvBrevoKey: Boolean(process.env.BREVO_API_KEY || process.env.Brevo_API_KEY || process.env.brevo_api_key || process.env.VITE_BREVO_API_KEY),
       timestamp: new Date().toISOString(),
     });
   }
@@ -65,8 +65,17 @@ export default async function handler(req: any, res: any) {
     }
 
     // Determine API Key and Provider
-    const activeResendKey = (apiKey && apiKey.startsWith('re_') ? apiKey : null) || process.env.RESEND_API_KEY;
-    const activeBrevoKey = (apiKey && apiKey.startsWith('xkeysib-') ? apiKey : null) || process.env.BREVO_API_KEY;
+    const activeResendKey = (apiKey && apiKey.startsWith('re_') ? apiKey : null) 
+      || process.env.Resend_API_KEY 
+      || process.env.RESEND_API_KEY 
+      || process.env.resend_api_key 
+      || process.env.VITE_RESEND_API_KEY;
+
+    const activeBrevoKey = (apiKey && apiKey.startsWith('xkeysib-') ? apiKey : null) 
+      || process.env.BREVO_API_KEY 
+      || process.env.Brevo_API_KEY 
+      || process.env.brevo_api_key 
+      || process.env.VITE_BREVO_API_KEY;
 
     let targetProvider = provider;
     if (targetProvider === 'auto') {

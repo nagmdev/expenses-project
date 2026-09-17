@@ -180,6 +180,13 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
               </div>
             )}
 
+            {currentRole === 'finance' && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-50 text-purple-900 border border-purple-200 rounded-xl text-xs font-bold shadow-2xs">
+                <Wallet className="h-4 w-4 text-purple-600" />
+                <span>💸 مسؤول الصرف والخزينة</span>
+              </div>
+            )}
+
             {currentRole === 'employee' && (
               <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-900 border border-emerald-200 rounded-xl text-xs font-bold shadow-2xs">
                 <UserIcon className="h-4 w-4 text-emerald-600" />

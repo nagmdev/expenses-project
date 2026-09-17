@@ -11,7 +11,7 @@ export interface Organization {
   status?: 'active' | 'archived';
 }
 
-export type Role = 'super_admin' | 'org_admin' | 'employee' | 'data_entry';
+export type Role = 'super_admin' | 'org_admin' | 'finance' | 'employee' | 'data_entry';
 
 export interface User {
   id: string;

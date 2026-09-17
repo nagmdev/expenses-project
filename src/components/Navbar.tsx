@@ -83,6 +83,26 @@ export const Navbar: React.FC = () => {
         badge: null,
       }
     );
+  } else if (currentRole === 'finance') {
+    const approvedToDisburseCount = requests.filter(r => r.status === 'approved').length;
+    navItems.push(
+      {
+        id: 'requests',
+        label: '💸 طلبات الصرف والتحويل المالي',
+        icon: Receipt,
+        badge: approvedToDisburseCount > 0 ? (
+          <span className="bg-emerald-100 text-emerald-800 text-xs px-2 py-0.5 rounded-full font-bold animate-pulse">
+            {approvedToDisburseCount} جاهز للصرف
+          </span>
+        ) : null,
+      },
+      {
+        id: 'my-requests',
+        label: 'طلباتي الشخصية',
+        icon: Clock3,
+        badge: null,
+      }
+    );
   } else if (currentRole === 'data_entry') {
     navItems.push(
       {

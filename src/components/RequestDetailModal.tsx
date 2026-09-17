@@ -285,15 +285,15 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
           {/* ACTION FORMS ACCORDING TO ROLES */}
 
-          {/* Manager & Super Admin Action Buttons Bar */}
-          {(currentRole === 'org_admin' || currentRole === 'super_admin') && (
+          {/* Manager & Super Admin & Finance Action Buttons Bar */}
+          {(currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance') && (
             <div className="pt-4 border-t border-slate-100">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-xs font-bold text-slate-500">إجراءات الاعتماد والصرف المالي:</span>
                 
                 <div className="flex items-center gap-2 flex-wrap">
-                  {/* If pending or clarification_requested: can approve, clarify, reject */}
-                  {(request.status === 'pending' || request.status === 'clarification_requested') && (
+                  {/* For Admin only: If pending or clarification_requested: can approve, clarify, reject */}
+                  {(currentRole === 'org_admin' || currentRole === 'super_admin') && (request.status === 'pending' || request.status === 'clarification_requested') && (
                     <>
                       <button
                         type="button"
@@ -324,7 +324,14 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                     </>
                   )}
 
-                  {/* If approved: can disburse */}
+                  {/* For Finance: Note when request is not approved yet */}
+                  {currentRole === 'finance' && (request.status === 'pending' || request.status === 'clarification_requested') && (
+                    <span className="text-xs text-amber-700 bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-200 font-medium">
+                      بانتظار اعتماد مدير الشركة لتتمكن من تنفيذ الصرف المالي
+                    </span>
+                  )}
+
+                  {/* If approved: both Admin and Finance can disburse */}
                   {request.status === 'approved' && (
                     <button
                       type="button"
