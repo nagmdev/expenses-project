@@ -733,7 +733,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   const handleRemoveSuperAdmin = async (email: string) => {
     const cleanEmail = email.trim().toLowerCase();
-    if (cleanEmail === 'marwanagib813@gmail.com' || cleanEmail === 'mahmoud@tieapps.com') {
+    if (cleanEmail === 'mahmoud@tieapps.com') {
       alert('لا يمكن إزالة الحساب الرئيسي لمشرف المنصة الأساسي.');
       return;
     }
@@ -766,7 +766,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     if (!editingSuperAdminEmail) return;
 
     if (
-      (editingSuperAdminEmail === 'marwanagib813@gmail.com' || editingSuperAdminEmail === 'mahmoud@tieapps.com') && 
+      editingSuperAdminEmail === 'mahmoud@tieapps.com' && 
       targetSuperAdminRole !== 'super_admin'
     ) {
       alert('لا يمكن تغيير رتبة المشرف الأساسي للمنصة.');
@@ -1834,7 +1834,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             )}
             <div className="space-y-2">
               {superAdminEmails.map((email) => {
-                const isRootAdmin = email === 'marwanagib813@gmail.com' || email === 'mahmoud@tieapps.com';
+                const isRootAdmin = email === 'mahmoud@tieapps.com';
                 return (
                   <div key={email} className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 text-xs gap-3">
                     <div className="flex items-center gap-3">
@@ -3137,7 +3137,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <h4 className="font-bold text-slate-700 mb-2">قائمة السوبر أدمن المعتمدين حالياً:</h4>
                 <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
                   {superAdminEmails.map((email) => {
-                    const isRootAdmin = email === 'marwanagib813@gmail.com' || email === 'mahmoud@tieapps.com';
+                    const isRootAdmin = email === 'mahmoud@tieapps.com';
                     return (
                       <div 
                         key={email} 

@@ -353,11 +353,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Super admin emails list (loaded from default, env, local storage, and Firestore 'super_admins' collection)
   const [superAdminEmails, setSuperAdminEmails] = useState<string[]>(() => {
-    const defaultAdmins = ['marwanagib813@gmail.com', 'mahmoud@tieapps.com'];
+    const defaultAdmins = ['mahmoud@tieapps.com'];
     const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
     const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
     const localAdmins = safeGetLocal<string[]>(SUPER_ADMINS_STORAGE_KEY, []);
-    return Array.from(new Set([...defaultAdmins, ...envList, ...localAdmins]));
+    return Array.from(new Set([...defaultAdmins, ...envList, ...localAdmins])).filter(e => e.toLowerCase().trim() !== 'marwanagib813@gmail.com');
   });
 
   // =========================================================================
@@ -378,9 +378,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const isSuperAdmin = useMemo(() => {
     if (!userEmail) return false;
-    if (userEmail === 'marwanagib813@gmail.com' || userEmail === 'mahmoud@tieapps.com') return true;
-    if (superAdminEmails.some(e => e.trim().toLowerCase() === userEmail)) return true;
-    if (userMemberRecord?.role === 'super_admin') return true;
+    if (userEmail === 'marwanagib813@gmail.com') return false; // Explicitly ensure this email is never admin
+    if (userEmail === 'mahmoud@tieapps.com') return true;
+    if (superAdminEmails.some(e => e.trim().toLowerCase() === userEmail && e.trim().toLowerCase() !== 'marwanagib813@gmail.com')) return true;
+    if (userMemberRecord?.role === 'super_admin' && userEmail !== 'marwanagib813@gmail.com') return true;
     return false;
   }, [userEmail, superAdminEmails, userMemberRecord]);
 
@@ -429,7 +430,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    const defaultAdminName = userEmail === 'marwanagib813@gmail.com' ? 'مروه نجيب' : userEmail === 'mahmoud@tieapps.com' ? 'محمود' : userEmail.split('@')[0];
+    const defaultAdminName = userEmail === 'mahmoud@tieapps.com' ? 'محمود' : userEmail.split('@')[0];
 
     return {
       id: firebaseUser.uid,
@@ -650,7 +651,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // 2. Members Listener
     const unsubMembers = onSnapshot(collection(db, 'members'), (snapshot) => {
       const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as OrganizationMember))
+        .map(d => {
+          const m = { id: d.id, ...d.data() } as OrganizationMember;
+          if (m.userEmail?.toLowerCase().trim() === 'marwanagib813@gmail.com' && m.role === 'super_admin') {
+            m.role = 'employee';
+          }
+          return m;
+        })
         .filter(m => !DUMMY_IDS.has(m.id) && !DUMMY_IDS.has(m.orgId));
       setRawMembers(list);
       safeSetLocal(STORAGE_KEYS.MEMBERS, list);
@@ -694,11 +701,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // 6. Super Admins Listener
     const unsubSuperAdmins = onSnapshot(collection(db, 'super_admins'), (snapshot) => {
-      const dbAdmins = snapshot.docs.map(d => (d.data().email || d.id || '').toLowerCase().trim()).filter(Boolean);
-      const defaultAdmins = ['marwanagib813@gmail.com', 'mahmoud@tieapps.com'];
+      // Self-healing: if marwanagib813 is in Firestore super_admins collection, purge it immediately
+      snapshot.docs.forEach(docSnap => {
+        const email = (docSnap.data().email || docSnap.id || '').toLowerCase().trim();
+        if (email === 'marwanagib813@gmail.com' || docSnap.id.toLowerCase().includes('marwanagib813')) {
+          console.warn('[Firestore Self-Healing] Auto-removing marwanagib813 from super_admins collection in Firestore');
+          if (isFirebaseConfigured() && getDb()) {
+            deleteFirestoreDoc('super_admins', docSnap.id).catch(() => {});
+          }
+        }
+      });
+
+      const dbAdmins = snapshot.docs
+        .map(d => (d.data().email || d.id || '').toLowerCase().trim())
+        .filter(e => e && e !== 'marwanagib813@gmail.com');
+      const defaultAdmins = ['mahmoud@tieapps.com'];
       const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
       const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
-      const merged = Array.from(new Set([...defaultAdmins, ...envList, ...dbAdmins]));
+      const merged = Array.from(new Set([...defaultAdmins, ...envList, ...dbAdmins])).filter(e => e !== 'marwanagib813@gmail.com');
       setSuperAdminEmails(merged);
       safeSetLocal(SUPER_ADMINS_STORAGE_KEY, merged);
     }, (err) => {
