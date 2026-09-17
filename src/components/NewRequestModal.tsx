@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
   X, 
-  Paperclip, 
   FileText, 
   Smartphone, 
   Building, 
@@ -49,7 +48,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [providerId, setProviderId] = useState(orgProviders[0]?.id || '');
   const [customProviderName, setCustomProviderName] = useState('');
   const [urgency, setUrgency] = useState<'low' | 'medium' | 'high'>('medium');
-  const [attachmentName, setAttachmentName] = useState('');
   const [preferredPaymentMethod, setPreferredPaymentMethod] = useState<PaymentMethod>('instapay');
   const [paymentAccountDetails, setPaymentAccountDetails] = useState(currentUser.phone || '');
   const [submitting, setSubmitting] = useState(false);
@@ -129,7 +127,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         serviceCategoryId: finalServiceId || orgServices[0]?.id || 'srv-default',
         providerId: finalProviderId || orgProviders[0]?.id || 'prov-default',
         urgency,
-        attachmentNames: attachmentName.trim() ? [attachmentName.trim()] : ['فاتورة_عرض_سعر.pdf'],
+        attachmentNames: [],
         preferredPaymentMethod,
         paymentAccountDetails: paymentAccountDetails.trim(),
         orgId: currentEffectiveOrgId || undefined,
@@ -384,24 +382,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               placeholder="كيف تخدم هذه المصروفات سير العمل أو أهداف المؤسسة؟"
               className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none"
             />
-          </div>
-
-          {/* Attachment */}
-          <div>
-            <label className="block font-bold text-slate-700 mb-1">المرفقات وعروض الأسعار</label>
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <Paperclip className="h-4 w-4 text-slate-400 absolute right-3 top-2.5" />
-                <input
-                  type="text"
-                  value={attachmentName}
-                  onChange={(e) => setAttachmentName(e.target.value)}
-                  placeholder="اسم ملف الفاتورة أو العرض..."
-                  className="w-full pl-3 pr-9 py-2 bg-slate-50 border border-slate-200 rounded-xl"
-                />
-              </div>
-              <span className="text-[11px] text-slate-400">PDF, JPG, PNG</span>
-            </div>
           </div>
         </div>
 

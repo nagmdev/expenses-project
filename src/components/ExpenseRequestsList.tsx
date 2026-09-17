@@ -32,17 +32,29 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   const [statusFilter, setStatusFilter] = useState('all');
   const [categoryFilter, setCategoryFilter] = useState('all');
 
-  const filteredRequests = requests.filter(req => {
-    const matchStatus = statusFilter === 'all' || req.status === statusFilter;
-    const matchCategory = categoryFilter === 'all' || req.serviceCategoryId === categoryFilter;
-    const matchSearch = 
-      req.title.toLowerCase().includes(search.toLowerCase()) ||
-      req.requestNumber.toLowerCase().includes(search.toLowerCase()) ||
-      req.requesterName.toLowerCase().includes(search.toLowerCase()) ||
-      req.providerName.toLowerCase().includes(search.toLowerCase());
+  const filteredRequests = React.useMemo(() => {
+    const seenIds = new Set<string>();
+    const seenNumbers = new Set<string>();
 
-    return matchStatus && matchCategory && matchSearch;
-  });
+    return requests.filter(req => {
+      const numKey = (req.requestNumber || '').trim().toUpperCase();
+      if (seenIds.has(req.id) || (numKey && seenNumbers.has(numKey))) {
+        return false;
+      }
+      seenIds.add(req.id);
+      if (numKey) seenNumbers.add(numKey);
+
+      const matchStatus = statusFilter === 'all' || req.status === statusFilter;
+      const matchCategory = categoryFilter === 'all' || req.serviceCategoryId === categoryFilter;
+      const matchSearch = 
+        req.title.toLowerCase().includes(search.toLowerCase()) ||
+        req.requestNumber.toLowerCase().includes(search.toLowerCase()) ||
+        req.requesterName.toLowerCase().includes(search.toLowerCase()) ||
+        req.providerName.toLowerCase().includes(search.toLowerCase());
+
+      return matchStatus && matchCategory && matchSearch;
+    });
+  }, [requests, statusFilter, categoryFilter, search]);
 
   const getStatusBadge = (status: ExpenseRequest['status']) => {
     switch (status) {

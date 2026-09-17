@@ -203,23 +203,32 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
             </div>
           </div>
 
-          {/* Attachments */}
-          {request.attachments.length > 0 && (
-            <div>
-              <h4 className="font-bold text-slate-700 text-xs mb-2">المرفقات والفواتير ({request.attachments.length})</h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {request.attachments.map((att) => (
-                  <div key={att.id} className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs">
-                    <div className="flex items-center gap-2 truncate">
-                      <FileText className="h-4 w-4 text-emerald-600 shrink-0" />
-                      <span className="font-medium text-slate-800 truncate">{att.name}</span>
+          {/* Attachments (Only shown if authentic non-dummy attachments exist) */}
+          {(() => {
+            const realAttachments = (request.attachments || []).filter(att => 
+              att && att.name && 
+              !String(att.name).includes('فاتورة_عرض_سعر') && 
+              String(att.name).trim() !== 'fdvbgfbgfb' &&
+              String(att.name).trim().length > 0
+            );
+            if (realAttachments.length === 0) return null;
+            return (
+              <div>
+                <h4 className="font-bold text-slate-700 text-xs mb-2">المرفقات والفواتير ({realAttachments.length})</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {realAttachments.map((att) => (
+                    <div key={att.id} className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs">
+                      <div className="flex items-center gap-2 truncate">
+                        <FileText className="h-4 w-4 text-emerald-600 shrink-0" />
+                        <span className="font-medium text-slate-800 truncate">{att.name}</span>
+                      </div>
+                      <span className="text-slate-400 text-[10px] shrink-0">{att.size}</span>
                     </div>
-                    <span className="text-slate-400 text-[10px] shrink-0">{att.size}</span>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Disbursement Receipt (if disbursed) */}
           {request.status === 'disbursed' && request.disbursement && (

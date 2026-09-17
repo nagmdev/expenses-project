@@ -6,7 +6,6 @@ import {
   XCircle, 
   AlertCircle, 
   Send, 
-  Paperclip, 
   FileText, 
   CreditCard, 
   Check, 
@@ -34,19 +33,29 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
 
   const [selectedReqId, setSelectedReqId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
-  const [attachmentName, setAttachmentName] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Strictly filter to personal requests (Zero data leakage across all roles)
+  // Strictly filter to personal requests with absolute deduplication (Zero duplicates, Zero data leakage)
   const myRequests = React.useMemo(() => {
-    if (currentRole === 'employee') return requests;
-    const myUid = currentUser.id;
-    const myEmail = currentUser.email?.toLowerCase().trim();
-    return requests.filter(r => 
-      r.requesterId === myUid || 
-      (Boolean(r.requesterEmail && myEmail) && r.requesterEmail!.toLowerCase().trim() === myEmail)
-    );
+    const raw = currentRole === 'employee' 
+      ? requests 
+      : requests.filter(r => 
+          r.requesterId === currentUser.id || 
+          (Boolean(r.requesterEmail && currentUser.email) && r.requesterEmail!.toLowerCase().trim() === currentUser.email!.toLowerCase().trim())
+        );
+
+    const seenIds = new Set<string>();
+    const seenNumbers = new Set<string>();
+    return raw.filter(r => {
+      const numKey = (r.requestNumber || '').trim().toUpperCase();
+      if (seenIds.has(r.id) || (numKey && seenNumbers.has(numKey))) {
+        return false;
+      }
+      seenIds.add(r.id);
+      if (numKey) seenNumbers.add(numKey);
+      return true;
+    });
   }, [requests, currentRole, currentUser]);
 
   const filteredRequests = myRequests.filter(r => {
@@ -67,9 +76,8 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
     e.preventDefault();
     if (!activeRequest || !replyText.trim()) return;
 
-    replyClarification(activeRequest.id, replyText, attachmentName.trim() || undefined);
+    replyClarification(activeRequest.id, replyText);
     setReplyText('');
-    setAttachmentName('');
   };
 
   // Financial Metrics for Employee
@@ -508,21 +516,10 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                       className="w-full p-3 bg-white border border-rose-300 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-rose-500/20 text-slate-900"
                     />
 
-                    <div className="flex items-center gap-3">
-                      <div className="relative flex-1">
-                        <Paperclip className="h-3.5 w-3.5 text-slate-400 absolute right-3 top-2.5" />
-                        <input
-                          type="text"
-                          value={attachmentName}
-                          onChange={(e) => setAttachmentName(e.target.value)}
-                          placeholder="اسم المرفق الإضافي (مثال: مستند_بديل.pdf)..."
-                          className="w-full pl-3 pr-9 py-2 bg-white border border-slate-200 rounded-lg text-xs"
-                        />
-                      </div>
-
+                    <div className="flex justify-end">
                       <button
                         type="submit"
-                        className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer shrink-0"
+                        className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
                       >
                         <Send className="h-3.5 w-3.5" />
                         <span>إرسال التوضيح للمدير</span>
@@ -568,24 +565,33 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                 </div>
               </div>
 
-              {/* Attachments */}
-              {activeRequest.attachments.length > 0 && (
-                <div>
-                  <h4 className="text-xs font-bold text-slate-700 mb-2">المرفقات والفواتير ({activeRequest.attachments.length})</h4>
-                  <div className="flex flex-wrap gap-2">
-                    {activeRequest.attachments.map((att) => (
-                      <div
-                        key={att.id}
-                        className="flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs"
-                      >
-                        <FileText className="h-4 w-4 text-emerald-600" />
-                        <span className="font-medium text-slate-800">{att.name}</span>
-                        <span className="text-slate-400 text-[10px]">({att.size})</span>
-                      </div>
-                    ))}
+              {/* Attachments (Only shown if authentic non-dummy attachments exist) */}
+              {(() => {
+                const realAttachments = (activeRequest.attachments || []).filter(att => 
+                  att && att.name && 
+                  !String(att.name).includes('فاتورة_عرض_سعر') && 
+                  String(att.name).trim() !== 'fdvbgfbgfb' &&
+                  String(att.name).trim().length > 0
+                );
+                if (realAttachments.length === 0) return null;
+                return (
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-700 mb-2">المرفقات والفواتير ({realAttachments.length})</h4>
+                    <div className="flex flex-wrap gap-2">
+                      {realAttachments.map((att) => (
+                        <div
+                          key={att.id}
+                          className="flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+                        >
+                          <FileText className="h-4 w-4 text-emerald-600" />
+                          <span className="font-medium text-slate-800">{att.name}</span>
+                          <span className="text-slate-400 text-[10px]">({att.size})</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* Event Timeline History */}
               <div className="pt-2">

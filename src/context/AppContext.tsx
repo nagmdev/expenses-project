@@ -95,10 +95,26 @@ const safeGetLocal = <T,>(key: string, fallback: T): T => {
     if (!saved) return fallback;
     const parsed = JSON.parse(saved);
     if (Array.isArray(parsed)) {
+      const seenIds = new Set<string>();
+      const seenKeys = new Set<string>();
       const cleaned = parsed.filter((item: any) => {
         if (!item || typeof item !== 'object') return false;
         if (DUMMY_IDS.has(item.id) || DUMMY_IDS.has(item.orgId)) return false;
         if (item.name && typeof item.name === 'string' && item.name.includes('أفق التقنية')) return false;
+
+        // Strict deduplication by ID
+        if (item.id) {
+          if (seenIds.has(item.id)) return false;
+          seenIds.add(item.id);
+        }
+
+        // Strict deduplication by requestNumber for expense requests
+        if (item.requestNumber) {
+          const rNum = String(item.requestNumber).trim().toUpperCase();
+          if (seenKeys.has(rNum)) return false;
+          seenKeys.add(rNum);
+        }
+
         return true;
       });
       if (cleaned.length !== parsed.length) {
@@ -539,25 +555,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const myUid = firebaseUser.uid;
     const myEmail = userEmail.toLowerCase().trim();
 
+    let list: ExpenseRequest[] = [];
     if (resolvedRole === 'super_admin') {
       if (effectiveOrgId && effectiveOrgId !== 'all') {
-        return rawRequests.filter(r => r.orgId === effectiveOrgId || !r.orgId);
+        list = rawRequests.filter(r => r.orgId === effectiveOrgId || !r.orgId);
+      } else {
+        list = rawRequests;
       }
-      return rawRequests;
-    }
-
-    if (resolvedRole === 'org_admin') {
+    } else if (resolvedRole === 'org_admin') {
       // Company Admin sees all requests inside their specific company only
-      return rawRequests.filter(r => r.orgId === effectiveOrgId);
+      list = rawRequests.filter(r => r.orgId === effectiveOrgId);
+    } else {
+      // Role is employee (or non-admin): strictly sees their own submitted requests only! Zero data leakage!
+      list = rawRequests.filter(r => {
+        const isMyRequest = 
+          r.requesterId === myUid || 
+          r.requesterId === currentUser.id || 
+          (Boolean(r.requesterEmail && myEmail) && r.requesterEmail!.toLowerCase().trim() === myEmail);
+        return isMyRequest && (!effectiveOrgId || r.orgId === effectiveOrgId);
+      });
     }
 
-    // Role is employee (or non-admin): strictly sees their own submitted requests only! Zero data leakage!
-    return rawRequests.filter(r => {
-      const isMyRequest = 
-        r.requesterId === myUid || 
-        r.requesterId === currentUser.id || 
-        (Boolean(r.requesterEmail && myEmail) && r.requesterEmail!.toLowerCase().trim() === myEmail);
-      return isMyRequest && (!effectiveOrgId || r.orgId === effectiveOrgId);
+    // Absolute deduplication guarantee (No duplicate cards by ID or Request Number)
+    const seenIds = new Set<string>();
+    const seenNumbers = new Set<string>();
+    return list.filter(r => {
+      const numKey = (r.requestNumber || '').trim().toUpperCase();
+      if (seenIds.has(r.id) || (numKey && seenNumbers.has(numKey))) {
+        return false;
+      }
+      seenIds.add(r.id);
+      if (numKey) seenNumbers.add(numKey);
+      return true;
     });
   }, [firebaseUser, resolvedRole, rawRequests, effectiveOrgId, userEmail, currentUser]);
 
@@ -672,7 +701,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
-    // 2. Members Listener
+    // 2. Members Listener with Self-Healing Deduplication
     const unsubMembers = onSnapshot(collection(db, 'members'), (snapshot) => {
       const list = snapshot.docs
         .map(d => {
@@ -683,42 +712,138 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return m;
         })
         .filter(m => !DUMMY_IDS.has(m.id) && !DUMMY_IDS.has(m.orgId));
-      setRawMembers(list);
-      safeSetLocal(STORAGE_KEYS.MEMBERS, list);
+
+      const seenIds = new Set<string>();
+      const seenEmailOrg = new Set<string>();
+      const dedupedList: OrganizationMember[] = [];
+
+      for (const mem of list) {
+        const emailKey = `${mem.orgId}:::${(mem.userEmail || '').trim().toLowerCase()}`;
+        if (!seenIds.has(mem.id) && (!mem.userEmail || !seenEmailOrg.has(emailKey))) {
+          seenIds.add(mem.id);
+          if (mem.userEmail) seenEmailOrg.add(emailKey);
+          dedupedList.push(mem);
+        } else {
+          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate member doc: "${mem.userName}" (${mem.id})`);
+          if (isFirebaseConfigured() && getDb()) {
+            deleteFirestoreDoc('members', mem.id).catch(() => {});
+          }
+        }
+      }
+
+      setRawMembers(dedupedList);
+      safeSetLocal(STORAGE_KEYS.MEMBERS, dedupedList);
     }, (err) => {
       console.warn('[Firebase] Members onSnapshot error:', err);
     });
 
-    // 3. Services Listener
+    // 3. Services Listener with Self-Healing Deduplication
     const unsubServices = onSnapshot(collection(db, 'services'), (snapshot) => {
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as ServiceCategory))
         .filter(s => !DUMMY_IDS.has(s.id) && !DUMMY_IDS.has(s.orgId));
-      setRawServices(list);
-      safeSetLocal(STORAGE_KEYS.SERVICES, list);
+
+      const seenIds = new Set<string>();
+      const seenIdentity = new Set<string>();
+      const dedupedList: ServiceCategory[] = [];
+
+      for (const s of list) {
+        const key = `${s.orgId}:::${(s.code || s.name || '').trim().toLowerCase()}`;
+        if (!seenIds.has(s.id) && !seenIdentity.has(key)) {
+          seenIds.add(s.id);
+          seenIdentity.add(key);
+          dedupedList.push(s);
+        } else {
+          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate service doc: "${s.name}" (${s.id})`);
+          if (isFirebaseConfigured() && getDb()) {
+            deleteFirestoreDoc('services', s.id).catch(() => {});
+          }
+        }
+      }
+
+      setRawServices(dedupedList);
+      safeSetLocal(STORAGE_KEYS.SERVICES, dedupedList);
     }, (err) => {
       console.warn('[Firebase] Services onSnapshot error:', err);
     });
 
-    // 4. Providers Listener
+    // 4. Providers Listener with Self-Healing Deduplication
     const unsubProviders = onSnapshot(collection(db, 'providers'), (snapshot) => {
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as ServiceProvider))
         .filter(p => !DUMMY_IDS.has(p.id) && !DUMMY_IDS.has(p.orgId));
-      setRawProviders(list);
-      safeSetLocal(STORAGE_KEYS.PROVIDERS, list);
+
+      const seenIds = new Set<string>();
+      const seenIdentity = new Set<string>();
+      const dedupedList: ServiceProvider[] = [];
+
+      for (const p of list) {
+        const key = `${p.orgId}:::${(p.name || '').trim().toLowerCase()}`;
+        if (!seenIds.has(p.id) && !seenIdentity.has(key)) {
+          seenIds.add(p.id);
+          seenIdentity.add(key);
+          dedupedList.push(p);
+        } else {
+          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate provider doc: "${p.name}" (${p.id})`);
+          if (isFirebaseConfigured() && getDb()) {
+            deleteFirestoreDoc('providers', p.id).catch(() => {});
+          }
+        }
+      }
+
+      setRawProviders(dedupedList);
+      safeSetLocal(STORAGE_KEYS.PROVIDERS, dedupedList);
     }, (err) => {
       console.warn('[Firebase] Providers onSnapshot error:', err);
     });
 
-    // 5. Requests Listener
+    // 5. Requests Listener with Real-Time Self-Healing Deduplication & Attachment Cleanup
     const unsubRequests = onSnapshot(collection(db, 'requests'), (snapshot) => {
       const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as ExpenseRequest))
+        .map(d => {
+          const data = d.data();
+          // Filter out dummy/unwanted attachments so fake documentation never displays
+          const rawAttachments = Array.isArray(data.attachments) ? data.attachments : [];
+          const cleanedAttachments = rawAttachments.filter((att: any) => 
+            att && att.name && 
+            !String(att.name).includes('فاتورة_عرض_سعر') && 
+            String(att.name).trim() !== 'fdvbgfbgfb' &&
+            String(att.name).trim().length > 0
+          );
+          return {
+            id: d.id,
+            ...data,
+            attachments: cleanedAttachments,
+          } as ExpenseRequest;
+        })
         .filter(r => !DUMMY_IDS.has(r.id) && !DUMMY_IDS.has(r.orgId));
+
       list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setRawRequests(list);
-      safeSetLocal(STORAGE_KEYS.REQUESTS, list);
+
+      const seenIds = new Set<string>();
+      const seenReqNumbers = new Set<string>();
+      const dedupedList: ExpenseRequest[] = [];
+
+      for (const req of list) {
+        const numKey = (req.requestNumber || '').trim().toUpperCase();
+        const isDuplicateId = seenIds.has(req.id);
+        const isDuplicateNum = Boolean(numKey && seenReqNumbers.has(numKey));
+
+        if (!isDuplicateId && !isDuplicateNum) {
+          seenIds.add(req.id);
+          if (numKey) seenReqNumbers.add(numKey);
+          dedupedList.push(req);
+        } else {
+          // Automatic Self-Healing: Purge duplicate document permanently from Firestore
+          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate request doc: "${req.requestNumber}" (${req.id})`);
+          if (isFirebaseConfigured() && getDb()) {
+            deleteFirestoreDoc('requests', req.id).catch(() => {});
+          }
+        }
+      }
+
+      setRawRequests(dedupedList);
+      safeSetLocal(STORAGE_KEYS.REQUESTS, dedupedList);
     }, (err) => {
       console.warn('[Firebase] Requests onSnapshot error:', err);
     });
@@ -749,24 +874,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[Firebase] Super admins onSnapshot error:', err);
     });
 
-    // 7. Payment Accounts Listener
+    // 7. Payment Accounts Listener with Self-Healing Deduplication
     const unsubPaymentAccounts = onSnapshot(collection(db, 'paymentAccounts'), (snapshot) => {
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as PaymentAccount))
         .filter(p => !DUMMY_IDS.has(p.id) && !DUMMY_IDS.has(p.orgId));
-      setRawPaymentAccounts(list);
-      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, list);
+
+      const seenIds = new Set<string>();
+      const seenIdentity = new Set<string>();
+      const dedupedList: PaymentAccount[] = [];
+
+      for (const p of list) {
+        const key = `${p.orgId}:::${(p.accountIdentifier || p.name || '').trim().toLowerCase()}`;
+        if (!seenIds.has(p.id) && !seenIdentity.has(key)) {
+          seenIds.add(p.id);
+          seenIdentity.add(key);
+          dedupedList.push(p);
+        } else {
+          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate payment account doc: "${p.name}" (${p.id})`);
+          if (isFirebaseConfigured() && getDb()) {
+            deleteFirestoreDoc('paymentAccounts', p.id).catch(() => {});
+          }
+        }
+      }
+
+      setRawPaymentAccounts(dedupedList);
+      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, dedupedList);
     }, (err) => {
       console.warn('[Firebase] PaymentAccounts onSnapshot error:', err);
     });
 
-    // 8. Departments Listener
+    // 8. Departments Listener with Self-Healing Deduplication
     const unsubDepartments = onSnapshot(collection(db, 'departments'), (snapshot) => {
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as Department))
         .filter(d => !DUMMY_IDS.has(d.id) && !DUMMY_IDS.has(d.orgId));
-      setRawDepartments(list);
-      safeSetLocal(STORAGE_KEYS.DEPARTMENTS, list);
+
+      const seenIds = new Set<string>();
+      const seenIdentity = new Set<string>();
+      const dedupedList: Department[] = [];
+
+      for (const d of list) {
+        const key = `${d.orgId}:::${(d.name || '').trim().toLowerCase()}`;
+        if (!seenIds.has(d.id) && !seenIdentity.has(key)) {
+          seenIds.add(d.id);
+          seenIdentity.add(key);
+          dedupedList.push(d);
+        } else {
+          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate department doc: "${d.name}" (${d.id})`);
+          if (isFirebaseConfigured() && getDb()) {
+            deleteFirestoreDoc('departments', d.id).catch(() => {});
+          }
+        }
+      }
+
+      setRawDepartments(dedupedList);
+      safeSetLocal(STORAGE_KEYS.DEPARTMENTS, dedupedList);
     }, (err) => {
       console.warn('[Firebase] Departments onSnapshot error:', err);
     });
@@ -1314,6 +1477,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setRawMembers(prev => {
+      if (prev.some(m => m.id === newMember.id || (m.orgId === newMember.orgId && m.userEmail?.toLowerCase() === newMember.userEmail?.toLowerCase()))) {
+        return prev;
+      }
       const updated = [newMember, ...prev];
       safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
       return updated;
@@ -1481,6 +1647,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setRawServices(prev => {
+      if (prev.some(s => s.id === id || (s.orgId === newService.orgId && (s.code === newService.code || s.name.trim().toLowerCase() === newService.name.trim().toLowerCase())))) {
+        return prev;
+      }
       const updated = [...prev, newService];
       safeSetLocal(STORAGE_KEYS.SERVICES, updated);
       return updated;
@@ -1598,6 +1767,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setRawProviders(prev => {
+      if (prev.some(p => p.id === id || (p.orgId === newProvider.orgId && p.name.trim().toLowerCase() === newProvider.name.trim().toLowerCase()))) {
+        return prev;
+      }
       const updated = [...prev, newProvider];
       safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
       return updated;
@@ -1705,6 +1877,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setRawPaymentAccounts(prev => {
+      if (prev.some(a => a.id === id || (a.orgId === newAccount.orgId && a.accountIdentifier === newAccount.accountIdentifier))) {
+        return prev;
+      }
       const updated = [newAccount, ...prev];
       safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
       return updated;
@@ -1818,6 +1993,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setRawDepartments(prev => {
+      if (prev.some(d => d.id === id || (d.orgId === newDept.orgId && d.name.trim().toLowerCase() === newDept.name.trim().toLowerCase()))) {
+        return prev;
+      }
       const updated = [newDept, ...prev];
       safeSetLocal(STORAGE_KEYS.DEPARTMENTS, updated);
       return updated;
@@ -2016,6 +2194,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setRawRequests(prev => {
+      // Prevent duplicate creation if real-time onSnapshot already populated it
+      const exists = prev.some(r => r.id === newRequest.id || (r.requestNumber && r.requestNumber === newRequest.requestNumber));
+      if (exists) {
+        return prev.map(r => (r.id === newRequest.id || (r.requestNumber && r.requestNumber === newRequest.requestNumber)) ? newRequest : r);
+      }
       const updated = [newRequest, ...prev];
       safeSetLocal(STORAGE_KEYS.REQUESTS, updated);
       return updated;
