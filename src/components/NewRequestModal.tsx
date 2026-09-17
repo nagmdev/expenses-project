@@ -49,7 +49,7 @@ const TITLE_TEMPLATES = [
   'حملة تسويقية وإعلانات ممولة على المنصات',
   'شراء أجهزة ومعدات تقنية جديدة لفريق العمل',
   'مستحقات عهدة نقدية للمصروفات النثرية',
-  'موضوع وعنوان مخصص آخر...',
+  '✏️ كتابة موضوع وعنوان مخصص يدوي...',
 ];
 
 const JUSTIFICATION_TEMPLATES = [
@@ -59,7 +59,7 @@ const JUSTIFICATION_TEMPLATES = [
   'تغطية تكاليف سفر ومهمة عمل رسمية خارج المقر',
   'تجديد دوري سنوي/شهري متفق عليه في الميزانية التشغيلية',
   'متطلبات عاجلة للمشروع لضمان التسليم في الموعد المحدد',
-  'مبرر مالي مخصص آخر...',
+  '✏️ كتابة مبرر مالي مخصص يدوي...',
 ];
 
 const DESCRIPTION_TEMPLATES = [
@@ -67,7 +67,7 @@ const DESCRIPTION_TEMPLATES = [
   'شراء وتفعيل الخدمة فوراً لخدمة أهداف ومشاريع الشركة المعتمدة.',
   'سداد مباشر للفواتير والمستحقات المرفقة مع الطلب بعد التحقق منها.',
   'تغطية مصاريف الرحلة الرسمية والانتقالات بموجب الإيصالات والتفويض.',
-  'كتابة تفاصيل ومواصفات مخصصة...',
+  '✏️ كتابة تفاصيل ومواصفات مخصصة...',
 ];
 
 export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClose }) => {
@@ -86,7 +86,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const orgServices = activeOrgId && activeOrgId !== 'all' ? services.filter(s => s.orgId === activeOrgId) : services;
   const orgProviders = activeOrgId && activeOrgId !== 'all' ? providers.filter(p => p.orgId === activeOrgId) : providers;
 
-  // Title State (Dropdown + custom text)
+  // Title State (Dropdown or Custom)
+  const [isCustomTitle, setIsCustomTitle] = useState(false);
   const [selectedTitlePreset, setSelectedTitlePreset] = useState(TITLE_TEMPLATES[0]);
   const [customTitle, setCustomTitle] = useState('');
 
@@ -102,12 +103,14 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   );
   const [customProviderName, setCustomProviderName] = useState('');
 
-  // Description & Justification (Dropdown + custom text)
-  const [selectedDescPreset, setSelectedDescPreset] = useState(DESCRIPTION_TEMPLATES[0]);
-  const [customDescription, setCustomDescription] = useState('');
-
+  // Description & Justification (Dropdown or Custom)
+  const [isCustomJustification, setIsCustomJustification] = useState(false);
   const [selectedJustPreset, setSelectedJustPreset] = useState(JUSTIFICATION_TEMPLATES[0]);
   const [customJustification, setCustomJustification] = useState('');
+
+  const [isCustomDescription, setIsCustomDescription] = useState(false);
+  const [selectedDescPreset, setSelectedDescPreset] = useState(DESCRIPTION_TEMPLATES[0]);
+  const [customDescription, setCustomDescription] = useState('');
 
   const [amount, setAmount] = useState('');
   const [currency, setCurrency] = useState(activeOrg?.currency || 'EGP');
@@ -139,21 +142,31 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
   const currentEffectiveOrgId = activeOrgId && activeOrgId !== 'all' ? activeOrgId : (organizations[0]?.id || '');
 
-  // Computed Values
-  const effectiveTitle = selectedTitlePreset === 'موضوع وعنوان مخصص آخر...' 
+  // Computed Values - Never duplicate controls
+  const effectiveTitle = isCustomTitle 
     ? customTitle 
-    : (customTitle.trim() ? customTitle : selectedTitlePreset);
+    : (selectedTitlePreset === '✏️ كتابة موضوع وعنوان مخصص يدوي...' ? customTitle : selectedTitlePreset);
 
-  const effectiveDescription = selectedDescPreset === 'كتابة تفاصيل ومواصفات مخصصة...'
-    ? customDescription
-    : (customDescription.trim() ? customDescription : selectedDescPreset);
+  const effectiveJustification = isCustomJustification 
+    ? customJustification 
+    : (selectedJustPreset === '✏️ كتابة مبرر مالي مخصص يدوي...' ? customJustification : selectedJustPreset);
 
-  const effectiveJustification = selectedJustPreset === 'مبرر مالي مخصص آخر...'
-    ? customJustification
-    : (customJustification.trim() ? customJustification : selectedJustPreset);
+  const effectiveDescription = isCustomDescription 
+    ? customDescription 
+    : (selectedDescPreset === '✏️ كتابة تفاصيل ومواصفات مخصصة...' ? customDescription : selectedDescPreset);
 
   const isCustomService = selectedServicePreset === 'بند خدمة مخصص آخر...';
   const isCustomProvider = selectedProviderPreset === 'مورد / جهة خارجية مخصصة أخرى...';
+
+  const handleClose = () => {
+    setIsCustomTitle(false);
+    setIsCustomJustification(false);
+    setIsCustomDescription(false);
+    setCustomTitle('');
+    setCustomJustification('');
+    setCustomDescription('');
+    onClose();
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -168,19 +181,22 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       if (matchedExistingService) {
         finalServiceId = matchedExistingService.id;
         serviceName = matchedExistingService.name;
-      } else {
-        serviceName = isCustomService && customServiceName.trim() ? customServiceName.trim() : selectedServicePreset;
+      } else if (isCustomService && customServiceName.trim()) {
+        serviceName = customServiceName.trim();
         const newSrvId = `srv-${Date.now()}`;
         await addService({
           orgId: currentEffectiveOrgId,
           name: serviceName,
           code: `SRV-${Date.now().toString().slice(-4)}`,
-          description: 'بند خدمة مضاف تلقائياً مع الطلب',
+          description: 'بند خدمة مضاف مع الطلب',
           budgetLimit: 50000,
           color: 'emerald',
           iconName: 'folder',
         });
         finalServiceId = newSrvId;
+      } else {
+        finalServiceId = orgServices[0]?.id || 'srv-default';
+        serviceName = selectedServicePreset;
       }
 
       let finalProviderId = '';
@@ -190,8 +206,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       if (matchedExistingProvider) {
         finalProviderId = matchedExistingProvider.id;
         providerName = matchedExistingProvider.name;
-      } else {
-        providerName = isCustomProvider && customProviderName.trim() ? customProviderName.trim() : selectedProviderPreset;
+      } else if (isCustomProvider && customProviderName.trim()) {
+        providerName = customProviderName.trim();
         const newProvId = `prov-${Date.now()}`;
         await addProvider({
           orgId: currentEffectiveOrgId,
@@ -210,6 +226,9 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           active: true,
         });
         finalProviderId = newProvId;
+      } else {
+        finalProviderId = orgProviders[0]?.id || 'prov-default';
+        providerName = selectedProviderPreset;
       }
 
       await createRequest({
@@ -227,7 +246,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         orgId: currentEffectiveOrgId || undefined,
       });
 
-      onClose();
+      handleClose();
     } catch (err) {
       console.error('[NewRequestModal] Error creating request:', err);
     } finally {
@@ -246,12 +265,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           <div>
             <h3 className="text-base font-bold text-slate-900">إنشاء طلب صرف ومطالبة مالية</h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              كافة الحقول الأساسية تدعم الاختيار الفوري من القوائم المنسدلة (Dropdown) مع خيار التخصيص
+              اختر النماذج الجاهزة أو اكتب بياناتك المخصصة بنقرة واحدة
             </p>
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition cursor-pointer"
           >
             <X className="h-5 w-5" />
@@ -264,36 +283,52 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           {/* Scrollable Form Body */}
           <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
           
-            {/* 1. Title Dropdown */}
+            {/* 1. Title Selection (Single clean control, zero duplicate inputs) */}
             <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="font-bold text-slate-700">موضوع وعنوان الطلب (قائمة منسدلة) *</label>
-                <span className="text-[11px] text-emerald-600 font-semibold">اختر النموذج المناسب</span>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="font-bold text-slate-700">موضوع وعنوان الطلب *</label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCustomTitle(!isCustomTitle);
+                    if (!isCustomTitle && !customTitle) {
+                      setCustomTitle(selectedTitlePreset !== '✏️ كتابة موضوع وعنوان مخصص يدوي...' ? selectedTitlePreset : '');
+                    }
+                  }}
+                  className="text-[11px] text-emerald-600 hover:text-emerald-700 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
+                >
+                  {isCustomTitle ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة عنوان مخصص'}
+                </button>
               </div>
-              <select
-                value={selectedTitlePreset}
-                onChange={(e) => {
-                  setSelectedTitlePreset(e.target.value);
-                  if (e.target.value !== 'موضوع وعنوان مخصص آخر...') {
-                    setCustomTitle(e.target.value);
-                  }
-                }}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 font-bold text-slate-900"
-              >
-                {TITLE_TEMPLATES.map((tpl) => (
-                  <option key={tpl} value={tpl}>{tpl}</option>
-                ))}
-              </select>
 
-              {/* Editable or custom title text */}
-              <input
-                type="text"
-                required
-                value={customTitle || (selectedTitlePreset !== 'موضوع وعنوان مخصص آخر...' ? selectedTitlePreset : '')}
-                onChange={(e) => setCustomTitle(e.target.value)}
-                placeholder="تعديل العنوان أو كتابة عنوان مخصص هنا..."
-                className="w-full mt-2 p-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 text-slate-900 text-xs"
-              />
+              {isCustomTitle ? (
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={customTitle}
+                  onChange={(e) => setCustomTitle(e.target.value)}
+                  placeholder="اكتب موضوع وعنوان الطلب بالتفصيل هنا..."
+                  className="w-full p-2.5 bg-white border border-emerald-400 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 text-slate-900 font-medium text-xs shadow-xs animate-in fade-in"
+                />
+              ) : (
+                <select
+                  value={selectedTitlePreset}
+                  onChange={(e) => {
+                    if (e.target.value === '✏️ كتابة موضوع وعنوان مخصص يدوي...') {
+                      setIsCustomTitle(true);
+                      setCustomTitle('');
+                    } else {
+                      setSelectedTitlePreset(e.target.value);
+                    }
+                  }}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 font-bold text-slate-900"
+                >
+                  {TITLE_TEMPLATES.map((tpl) => (
+                    <option key={tpl} value={tpl}>{tpl}</option>
+                  ))}
+                </select>
+              )}
             </div>
 
             {/* 2. Service & Provider Dropdowns */}
@@ -301,7 +336,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               {/* Service Category Dropdown */}
               <div>
                 <label className="block font-bold text-slate-700 mb-1">
-                  بند الخدمة / مركز التكلفة (قائمة منسدلة) *
+                  بند الخدمة / مركز التكلفة *
                 </label>
                 <select
                   required
@@ -338,7 +373,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               {/* Provider Dropdown */}
               <div>
                 <label className="block font-bold text-slate-700 mb-1">
-                  مقدم الخدمة / المورد (قائمة منسدلة) *
+                  مقدم الخدمة / المورد *
                 </label>
                 <select
                   required
@@ -398,7 +433,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
               <div className="sm:col-span-4">
                 <label className="block font-bold text-slate-700 mb-1">
-                  عملة الصرف (قائمة منسدلة) *
+                  عملة الصرف *
                 </label>
                 <select
                   value={currency}
@@ -414,7 +449,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               </div>
 
               <div className="sm:col-span-3">
-                <label className="block font-bold text-slate-700 mb-1">مستوى السرعة (قائمة) *</label>
+                <label className="block font-bold text-slate-700 mb-1">مستوى السرعة والأولوية *</label>
                 <select
                   value={urgency}
                   onChange={(e: any) => setUrgency(e.target.value)}
@@ -436,7 +471,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">طريقة التحويل المفضلة (قائمة) *</label>
+                  <label className="block font-bold text-slate-700 mb-1">طريقة التحويل المفضلة *</label>
                   <select
                     value={preferredPaymentMethod}
                     onChange={(e: any) => {
@@ -491,66 +526,99 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               </div>
             </div>
 
-            {/* 5. Justification Dropdown */}
+            {/* 5. Justification Selection (Single clean control, zero duplicate inputs) */}
             <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="font-bold text-slate-700">المبرر المالي للطلب (قائمة منسدلة) *</label>
-                <span className="text-[11px] text-emerald-600 font-semibold">اختر مبرر الاعتماد</span>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="font-bold text-slate-700">المبرر المالي للطلب *</label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCustomJustification(!isCustomJustification);
+                    if (!isCustomJustification && !customJustification) {
+                      setCustomJustification(selectedJustPreset !== '✏️ كتابة مبرر مالي مخصص يدوي...' ? selectedJustPreset : '');
+                    }
+                  }}
+                  className="text-[11px] text-emerald-600 hover:text-emerald-700 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
+                >
+                  {isCustomJustification ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة مبرر مخصص'}
+                </button>
               </div>
-              <select
-                value={selectedJustPreset}
-                onChange={(e) => {
-                  setSelectedJustPreset(e.target.value);
-                  if (e.target.value !== 'مبرر مالي مخصص آخر...') {
-                    setCustomJustification(e.target.value);
-                  }
-                }}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-semibold text-slate-900"
-              >
-                {JUSTIFICATION_TEMPLATES.map((tpl) => (
-                  <option key={tpl} value={tpl}>{tpl}</option>
-                ))}
-              </select>
 
-              <textarea
-                rows={2}
-                required
-                value={customJustification || (selectedJustPreset !== 'مبرر مالي مخصص آخر...' ? selectedJustPreset : '')}
-                onChange={(e) => setCustomJustification(e.target.value)}
-                placeholder="تعديل المبرر المالي أو كتابة مبرر إضافي..."
-                className="w-full mt-2 p-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 text-slate-900"
-              />
+              {isCustomJustification ? (
+                <textarea
+                  rows={2}
+                  required
+                  autoFocus
+                  value={customJustification}
+                  onChange={(e) => setCustomJustification(e.target.value)}
+                  placeholder="اكتب المبرر المالي والتشغيلي للطلب بالتفصيل هنا..."
+                  className="w-full p-2.5 bg-white border border-emerald-400 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 text-slate-900 text-xs shadow-xs animate-in fade-in"
+                />
+              ) : (
+                <select
+                  value={selectedJustPreset}
+                  onChange={(e) => {
+                    if (e.target.value === '✏️ كتابة مبرر مالي مخصص يدوي...') {
+                      setIsCustomJustification(true);
+                      setCustomJustification('');
+                    } else {
+                      setSelectedJustPreset(e.target.value);
+                    }
+                  }}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-semibold text-slate-900"
+                >
+                  {JUSTIFICATION_TEMPLATES.map((tpl) => (
+                    <option key={tpl} value={tpl}>{tpl}</option>
+                  ))}
+                </select>
+              )}
             </div>
 
-            {/* 6. Description Dropdown */}
+            {/* 6. Description Selection (Single clean control, zero duplicate inputs) */}
             <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="font-bold text-slate-700">تفاصيل ومواصفات الطلب (قائمة منسدلة) *</label>
-                <span className="text-[11px] text-emerald-600 font-semibold">اختر الوصف الجاهز</span>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="font-bold text-slate-700">تفاصيل ومواصفات الطلب</label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCustomDescription(!isCustomDescription);
+                    if (!isCustomDescription && !customDescription) {
+                      setCustomDescription(selectedDescPreset !== '✏️ كتابة تفاصيل ومواصفات مخصصة...' ? selectedDescPreset : '');
+                    }
+                  }}
+                  className="text-[11px] text-emerald-600 hover:text-emerald-700 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
+                >
+                  {isCustomDescription ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة تفاصيل مخصصة'}
+                </button>
               </div>
-              <select
-                value={selectedDescPreset}
-                onChange={(e) => {
-                  setSelectedDescPreset(e.target.value);
-                  if (e.target.value !== 'كتابة تفاصيل ومواصفات مخصصة...') {
-                    setCustomDescription(e.target.value);
-                  }
-                }}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-semibold text-slate-900"
-              >
-                {DESCRIPTION_TEMPLATES.map((tpl) => (
-                  <option key={tpl} value={tpl}>{tpl}</option>
-                ))}
-              </select>
 
-              <textarea
-                rows={2}
-                required
-                value={customDescription || (selectedDescPreset !== 'كتابة تفاصيل ومواصفات مخصصة...' ? selectedDescPreset : '')}
-                onChange={(e) => setCustomDescription(e.target.value)}
-                placeholder="تعديل تفاصيل المواصفات أو كتابة شرح إضافي..."
-                className="w-full mt-2 p-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 text-slate-900"
-              />
+              {isCustomDescription ? (
+                <textarea
+                  rows={2}
+                  autoFocus
+                  value={customDescription}
+                  onChange={(e) => setCustomDescription(e.target.value)}
+                  placeholder="اكتب مواصفات وتفاصيل الخدمة أو السلعة المطلوبة هنا..."
+                  className="w-full p-2.5 bg-white border border-emerald-400 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 text-slate-900 text-xs shadow-xs animate-in fade-in"
+                />
+              ) : (
+                <select
+                  value={selectedDescPreset}
+                  onChange={(e) => {
+                    if (e.target.value === '✏️ كتابة تفاصيل ومواصفات مخصصة...') {
+                      setIsCustomDescription(true);
+                      setCustomDescription('');
+                    } else {
+                      setSelectedDescPreset(e.target.value);
+                    }
+                  }}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-semibold text-slate-900"
+                >
+                  {DESCRIPTION_TEMPLATES.map((tpl) => (
+                    <option key={tpl} value={tpl}>{tpl}</option>
+                  ))}
+                </select>
+              )}
             </div>
 
           </div>
@@ -559,7 +627,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           <div className="shrink-0 flex items-center justify-end gap-3 p-4 border-t border-slate-100 bg-slate-50/80">
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleClose}
               className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer font-medium"
             >
               إلغاء
