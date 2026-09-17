@@ -20,9 +20,6 @@ import {
   deleteFirestoreDoc,
   collection,
   onSnapshot,
-  doc,
-  setDoc,
-  type Firestore,
   changeUserPassword,
   updateUserProfile,
   signInWithGoogle,
@@ -182,10 +179,15 @@ interface AppContextType {
 
   // Organizations
   addOrganization: (org: Omit<Organization, 'id' | 'createdAt'>) => Promise<void>;
+  updateOrganization: (orgId: string, updates: Partial<Organization>) => Promise<void>;
+  deleteOrganization: (orgId: string) => Promise<{ success: boolean; message?: string }>;
   
-  // Members
+  // Members & User Management
   addMember: (member: Omit<OrganizationMember, 'id' | 'joinedAt'>) => Promise<void>;
+  updateMember: (memberId: string, updates: Partial<OrganizationMember>) => Promise<void>;
+  toggleMemberStatus: (memberId: string, active: boolean) => Promise<void>;
   removeMember: (memberId: string) => Promise<void>;
+  adminResetUserPassword: (email: string) => Promise<{ success: boolean; message?: string }>;
   
   // Services
   addService: (service: Omit<ServiceCategory, 'id' | 'spentAmount'>) => Promise<void>;
@@ -318,9 +320,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Find membership in organizations
   const userMemberRecord = useMemo(() => {
-    if (!userEmail) return null;
-    return rawMembers.find(m => m.userEmail?.toLowerCase().trim() === userEmail) || null;
-  }, [userEmail, rawMembers]);
+    if (!firebaseUser) return null;
+    const uid = firebaseUser.uid;
+    const email = userEmail.toLowerCase().trim();
+    return rawMembers.find(m => 
+      (Boolean(uid) && m.userId === uid) || 
+      (Boolean(email) && m.userEmail?.toLowerCase().trim() === email)
+    ) || null;
+  }, [firebaseUser, userEmail, rawMembers]);
 
   const isSuperAdmin = useMemo(() => {
     if (!userEmail) return false;
@@ -345,7 +352,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (userMemberRecord?.orgId) {
       return userMemberRecord.orgId;
     }
-    return activeOrgId || (rawOrganizations[0]?.id || '');
+    // Strict isolation: if not super admin and not assigned to an organization, DO NOT fallback to another company!
+    return '';
   }, [isSuperAdmin, activeOrgId, userMemberRecord, rawOrganizations]);
 
   // Keep activeOrgId in sync with effectiveOrgId and prevent empty string deadlock
@@ -406,7 +414,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // =========================================================================
   const scopedOrganizations = useMemo(() => {
     if (!firebaseUser) return [];
-    if (resolvedRole === 'super_admin' || resolvedRole === 'data_entry') return rawOrganizations;
+    if (resolvedRole === 'super_admin') return rawOrganizations;
+    if (!effectiveOrgId) return [];
     return rawOrganizations.filter(o => o.id === effectiveOrgId);
   }, [firebaseUser, resolvedRole, rawOrganizations, effectiveOrgId]);
 
@@ -416,63 +425,67 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const scopedMembers = useMemo(() => {
     if (!firebaseUser) return [];
-    if (resolvedRole === 'super_admin' || resolvedRole === 'data_entry') {
+    if (resolvedRole === 'super_admin') {
       return effectiveOrgId === 'all' ? rawMembers : rawMembers.filter(m => m.orgId === effectiveOrgId);
     }
-    return rawMembers.filter(m => m.orgId === effectiveOrgId);
-  }, [firebaseUser, resolvedRole, rawMembers, effectiveOrgId]);
+    if (!effectiveOrgId) return [];
+    if (resolvedRole === 'org_admin') {
+      return rawMembers.filter(m => m.orgId === effectiveOrgId);
+    }
+    // Role is employee: strictly sees their own membership profile
+    return rawMembers.filter(m => 
+      m.orgId === effectiveOrgId && 
+      (m.userId === firebaseUser.uid || (Boolean(m.userEmail && userEmail) && m.userEmail.toLowerCase().trim() === userEmail))
+    );
+  }, [firebaseUser, resolvedRole, rawMembers, effectiveOrgId, userEmail]);
 
   const scopedServices = useMemo(() => {
     if (!firebaseUser) return [];
-    if (resolvedRole === 'super_admin' || resolvedRole === 'data_entry') {
+    if (resolvedRole === 'super_admin') {
       return effectiveOrgId === 'all' ? rawServices : rawServices.filter(s => s.orgId === effectiveOrgId);
     }
+    if (!effectiveOrgId) return [];
     return rawServices.filter(s => s.orgId === effectiveOrgId);
   }, [firebaseUser, resolvedRole, rawServices, effectiveOrgId]);
 
   const scopedProviders = useMemo(() => {
     if (!firebaseUser) return [];
-    if (resolvedRole === 'super_admin' || resolvedRole === 'data_entry') {
+    if (resolvedRole === 'super_admin') {
       return effectiveOrgId === 'all' ? rawProviders : rawProviders.filter(p => p.orgId === effectiveOrgId);
     }
+    if (!effectiveOrgId) return [];
     return rawProviders.filter(p => p.orgId === effectiveOrgId);
   }, [firebaseUser, resolvedRole, rawProviders, effectiveOrgId]);
 
   // STRICT REQUEST SCOPING:
   // - super_admin: sees all requests (or filtered by activeOrgId if specific org chosen)
-  // - org_admin: sees requests for their company only
+  // - org_admin: strictly sees requests for their company only
   // - employee: strictly sees their OWN requests only! Absolutely zero leakage of other employees' requests!
   const scopedRequests = useMemo(() => {
     if (!firebaseUser) return [];
 
     const myUid = firebaseUser.uid;
     const myEmail = userEmail.toLowerCase().trim();
-    const myName = currentUser.name?.trim();
 
     if (resolvedRole === 'super_admin') {
       if (effectiveOrgId && effectiveOrgId !== 'all') {
-        // Super admin sees requests for the selected org, plus any legacy unassigned requests
         return rawRequests.filter(r => r.orgId === effectiveOrgId || !r.orgId);
       }
       return rawRequests;
     }
 
     if (resolvedRole === 'org_admin') {
-      return rawRequests.filter(r => 
-        r.orgId === effectiveOrgId || 
-        r.requesterId === myUid || 
-        (r.requesterEmail && myEmail && r.requesterEmail.toLowerCase() === myEmail)
-      );
+      // Company Admin sees all requests inside their specific company only
+      return rawRequests.filter(r => r.orgId === effectiveOrgId);
     }
 
-    // Role is employee: strictly sees their own submitted requests (100% permanently retained)
+    // Role is employee (or non-admin): strictly sees their own submitted requests only! Zero data leakage!
     return rawRequests.filter(r => {
       const isMyRequest = 
         r.requesterId === myUid || 
         r.requesterId === currentUser.id || 
-        (r.requesterEmail && myEmail && r.requesterEmail.toLowerCase() === myEmail) ||
-        (r.requesterName && myName && r.requesterName.trim() === myName);
-      return isMyRequest;
+        (Boolean(r.requesterEmail && myEmail) && r.requesterEmail!.toLowerCase().trim() === myEmail);
+      return isMyRequest && (!effectiveOrgId || r.orgId === effectiveOrgId);
     });
   }, [firebaseUser, resolvedRole, rawRequests, effectiveOrgId, userEmail, currentUser]);
 
@@ -605,7 +618,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubRequests();
       unsubSuperAdmins();
     };
-  }, [firebaseUser?.uid, firebaseSyncCounter]);
+  }, [firebaseUser, firebaseSyncCounter]);
 
   // Refresh data: sync with local Express API if present and Firebase is not active
   const refreshData = useCallback(async () => {
@@ -833,6 +846,67 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveOrgId(id);
   };
 
+  const updateOrganization = async (orgId: string, updates: Partial<Organization>) => {
+    const org = rawOrganizations.find(o => o.id === orgId);
+    if (!org) return;
+
+    const updatedOrg: Organization = {
+      ...org,
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await updateFirestoreDoc('organizations', orgId, updatedOrg);
+      } catch (err) {
+        console.error('[Firebase] Error updating organization:', err);
+      }
+    }
+
+    if (isBackendConnected) {
+      await safeFetchJson(`/api/organizations/${orgId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedOrg),
+      });
+    }
+
+    setRawOrganizations(prev => {
+      const updated = prev.map(o => o.id === orgId ? updatedOrg : o);
+      safeSetLocal(STORAGE_KEYS.ORGS, updated);
+      return updated;
+    });
+  };
+
+  const deleteOrganization = async (orgId: string): Promise<{ success: boolean; message?: string }> => {
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await deleteFirestoreDoc('organizations', orgId);
+      } catch (err: any) {
+        console.error('[Firebase] Error deleting organization:', err);
+        return { success: false, message: err?.message || 'تعذر حذف الشركة من قاعدة البيانات' };
+      }
+    }
+
+    if (isBackendConnected) {
+      await safeFetchJson(`/api/organizations/${orgId}`, { method: 'DELETE' });
+    }
+
+    setRawOrganizations(prev => {
+      const updated = prev.filter(o => o.id !== orgId);
+      safeSetLocal(STORAGE_KEYS.ORGS, updated);
+      return updated;
+    });
+
+    if (activeOrgId === orgId) {
+      const remaining = rawOrganizations.filter(o => o.id !== orgId);
+      setActiveOrgId(remaining[0]?.id || '');
+    }
+
+    return { success: true, message: 'تم حذف الشركة بنجاح.' };
+  };
+
   // 2. MEMBERS
   const addMember = async (memberData: Omit<OrganizationMember, 'id' | 'joinedAt'>) => {
     const newMember: OrganizationMember = {
@@ -882,6 +956,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
       return updated;
     });
+  };
+
+  const updateMember = async (memberId: string, updates: Partial<OrganizationMember>) => {
+    const mem = rawMembers.find(m => m.id === memberId);
+    if (!mem) return;
+
+    const updatedMember: OrganizationMember = {
+      ...mem,
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await updateFirestoreDoc('members', memberId, updatedMember);
+      } catch (err) {
+        console.error('[Firebase] Error updating member:', err);
+      }
+    }
+
+    if (isBackendConnected) {
+      await safeFetchJson(`/api/members/${memberId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedMember),
+      });
+    }
+
+    setRawMembers(prev => {
+      const updated = prev.map(m => m.id === memberId ? updatedMember : m);
+      safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
+      return updated;
+    });
+  };
+
+  const toggleMemberStatus = async (memberId: string, active: boolean) => {
+    await updateMember(memberId, { active });
+  };
+
+  const adminResetUserPassword = async (email: string): Promise<{ success: boolean; message?: string }> => {
+    if (!email || !email.trim()) {
+      return { success: false, message: 'البريد الإلكتروني غير متوفر.' };
+    }
+    try {
+      await sendPasswordReset(email.trim().toLowerCase());
+      return { 
+        success: true, 
+        message: `تم إرسال رابط استعادة وتعيين كلمة المرور بنجاح إلى: ${email}` 
+      };
+    } catch (err: any) {
+      console.error('[Admin Reset Password Error]', err);
+      return { 
+        success: false, 
+        message: err?.message || 'تعذر إرسال رابط استعادة كلمة المرور.' 
+      };
+    }
   };
 
   // 3. SERVICES
@@ -1646,8 +1776,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         changeCurrentUserPassword: handleChangeCurrentUserPassword,
         createCompanyUser,
         addOrganization,
+        updateOrganization,
+        deleteOrganization,
         addMember,
+        updateMember,
+        toggleMemberStatus,
         removeMember,
+        adminResetUserPassword,
         addService,
         updateService,
         deleteService,

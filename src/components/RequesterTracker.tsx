@@ -38,8 +38,16 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // The requests array from AppContext is already 100% strictly scoped to the employee
-  const myRequests = requests;
+  // Strictly filter to personal requests (Zero data leakage across all roles)
+  const myRequests = React.useMemo(() => {
+    if (currentRole === 'employee') return requests;
+    const myUid = currentUser.id;
+    const myEmail = currentUser.email?.toLowerCase().trim();
+    return requests.filter(r => 
+      r.requesterId === myUid || 
+      (Boolean(r.requesterEmail && myEmail) && r.requesterEmail!.toLowerCase().trim() === myEmail)
+    );
+  }, [requests, currentRole, currentUser]);
 
   const filteredRequests = myRequests.filter(r => {
     const matchStatus = filterStatus === 'all' || r.status === filterStatus;

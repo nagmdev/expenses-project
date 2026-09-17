@@ -81,8 +81,8 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
           {/* Org Switcher & Official Role Badge & Actions */}
           <div className="flex items-center gap-3">
             
-            {/* Organization Selector (Visible to Super Admin & Data Entry) */}
-            {(currentRole === 'super_admin' || currentRole === 'data_entry') ? (
+            {/* Organization Selector (Strictly Super Admin Only) */}
+            {currentRole === 'super_admin' ? (
               <div className="relative">
                 <button
                   type="button"

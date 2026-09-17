@@ -7,6 +7,8 @@ export interface Organization {
   description: string;
   logo?: string;
   createdAt: string;
+  updatedAt?: string;
+  status?: 'active' | 'archived';
 }
 
 export type Role = 'super_admin' | 'org_admin' | 'employee' | 'data_entry';
@@ -33,6 +35,7 @@ export interface OrganizationMember {
   joinedAt: string;
   active: boolean;
   phone?: string;
+  updatedAt?: string;
 }
 
 export interface ServiceCategory {

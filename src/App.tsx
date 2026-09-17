@@ -144,6 +144,27 @@ const MainApp: React.FC = () => {
               </button>
             </div>
           </div>
+        ) : !loading && currentRole !== 'super_admin' && organizations.length === 0 ? (
+          <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-lg mx-auto text-center shadow-md my-12 animate-in fade-in duration-200">
+            <div className="h-16 w-16 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto mb-4 border border-amber-200">
+              <Building2 className="h-8 w-8" />
+            </div>
+            <h2 className="text-lg font-bold text-slate-900">الحساب بانتظار التعيين في الشركة</h2>
+            <p className="text-xs text-slate-500 mt-2 leading-relaxed">
+              مرحباً بك <strong>{currentUser.name}</strong> ({currentUser.email}).
+              <br />
+              لم يتم ربط حسابك بأي شركة أو مؤسسة بعد، أو أن الحساب بانتظار تفعيل المسؤول. يرجى التواصل مع مدير شركتك لإضافتك وتفعيل صلاحياتك.
+            </p>
+            <div className="mt-6 flex justify-center">
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl transition cursor-pointer"
+              >
+                تحديث الحالة الآن
+              </button>
+            </div>
+          </div>
         ) : currentRole === 'employee' ? (
           /* Employee Experience: Dedicated Banking Tracker */
           <RequesterTracker 
