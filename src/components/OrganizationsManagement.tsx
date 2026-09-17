@@ -66,11 +66,17 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setActiveOrgId, 
     activeOrg,
     members, 
+    allMembers,
     services,
+    allServices,
     providers,
+    allProviders,
     paymentAccounts,
+    allPaymentAccounts,
     departments,
+    allDepartments,
     auditLogs,
+    allAuditLogs,
     addOrganization, 
     updateOrganization,
     deleteOrganization,
@@ -103,6 +109,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const isSuperAdmin = currentRole === 'super_admin';
   const canManageOrgs = isSuperAdmin;
   const displayOrgs = canManageOrgs ? allOrganizations : organizations;
+
+  // Enterprise Unification: Super Admins manage data across all organizations
+  const targetMembers = canManageOrgs ? allMembers : members;
+  const targetServices = canManageOrgs ? allServices : services;
+  const targetVendors = canManageOrgs ? allProviders : providers;
+  const targetVaults = canManageOrgs ? allPaymentAccounts : paymentAccounts;
+  const targetDepartments = canManageOrgs ? allDepartments : departments;
+  const targetAuditLogs = canManageOrgs ? allAuditLogs : auditLogs;
 
   // Active View Tab
   const [activeSection, setActiveSection] = useState<AdminSection>(
@@ -799,7 +813,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   }, [displayOrgs, orgSearch]);
 
   const filteredMembers = useMemo(() => {
-    return members.filter(m => {
+    return targetMembers.filter(m => {
       if (selectedOrgFilter !== 'all' && m.orgId !== selectedOrgFilter) return false;
       if (selectedRoleFilter !== 'all' && m.role !== selectedRoleFilter) return false;
       if (selectedStatusFilter === 'active' && m.active === false) return false;
@@ -815,10 +829,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         (m.department && m.department.toLowerCase().includes(q))
       );
     });
-  }, [members, selectedOrgFilter, selectedRoleFilter, selectedStatusFilter, userSearch]);
+  }, [targetMembers, selectedOrgFilter, selectedRoleFilter, selectedStatusFilter, userSearch]);
 
   const filteredServices = useMemo(() => {
-    const orgFiltered = services.filter(s => activeOrgId === 'all' || !activeOrgId || s.orgId === activeOrgId);
+    const orgFiltered = targetServices.filter(s => selectedOrgFilter === 'all' || s.orgId === selectedOrgFilter);
     if (!serviceSearch.trim()) return orgFiltered;
     const q = serviceSearch.toLowerCase().trim();
     return orgFiltered.filter(s => 
@@ -826,10 +840,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       s.code.toLowerCase().includes(q) ||
       (s.description && s.description.toLowerCase().includes(q))
     );
-  }, [services, activeOrgId, serviceSearch]);
+  }, [targetServices, selectedOrgFilter, serviceSearch]);
 
   const filteredVendors = useMemo(() => {
-    const orgFiltered = providers.filter(p => activeOrgId === 'all' || !activeOrgId || p.orgId === activeOrgId);
+    const orgFiltered = targetVendors.filter(p => selectedOrgFilter === 'all' || p.orgId === selectedOrgFilter);
     if (!vendorSearch.trim()) return orgFiltered;
     const q = vendorSearch.toLowerCase().trim();
     return orgFiltered.filter(p => 
@@ -839,10 +853,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       p.email.toLowerCase().includes(q) ||
       p.taxNumber.includes(q)
     );
-  }, [providers, activeOrgId, vendorSearch]);
+  }, [targetVendors, selectedOrgFilter, vendorSearch]);
 
   const filteredVaults = useMemo(() => {
-    const orgFiltered = paymentAccounts.filter(a => activeOrgId === 'all' || !activeOrgId || a.orgId === activeOrgId);
+    const orgFiltered = targetVaults.filter(a => selectedOrgFilter === 'all' || a.orgId === selectedOrgFilter);
     if (!vaultSearch.trim()) return orgFiltered;
     const q = vaultSearch.toLowerCase().trim();
     return orgFiltered.filter(a => 
@@ -850,10 +864,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       a.accountIdentifier.toLowerCase().includes(q) ||
       (a.bankName && a.bankName.toLowerCase().includes(q))
     );
-  }, [paymentAccounts, activeOrgId, vaultSearch]);
+  }, [targetVaults, selectedOrgFilter, vaultSearch]);
 
   const filteredDepartments = useMemo(() => {
-    const orgFiltered = departments.filter(d => activeOrgId === 'all' || !activeOrgId || d.orgId === activeOrgId);
+    const orgFiltered = targetDepartments.filter(d => selectedOrgFilter === 'all' || d.orgId === selectedOrgFilter);
     if (!deptSearch.trim()) return orgFiltered;
     const q = deptSearch.toLowerCase().trim();
     return orgFiltered.filter(d => 
@@ -861,10 +875,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       (d.code && d.code.toLowerCase().includes(q)) ||
       (d.managerName && d.managerName.toLowerCase().includes(q))
     );
-  }, [departments, activeOrgId, deptSearch]);
+  }, [targetDepartments, selectedOrgFilter, deptSearch]);
 
   const filteredAuditLogs = useMemo(() => {
-    return auditLogs.filter(log => {
+    const orgFiltered = targetAuditLogs.filter(log => selectedOrgFilter === 'all' || log.orgId === selectedOrgFilter);
+    return orgFiltered.filter(log => {
       if (auditActionFilter !== 'all' && log.actionType !== auditActionFilter) return false;
       if (auditEntityFilter !== 'all' && log.entityType !== auditEntityFilter) return false;
 
@@ -877,12 +892,41 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         log.details.toLowerCase().includes(q)
       );
     });
-  }, [auditLogs, auditActionFilter, auditEntityFilter, auditSearch]);
+  }, [targetAuditLogs, selectedOrgFilter, auditActionFilter, auditEntityFilter, auditSearch]);
 
-  // Global KPI numbers
-  const totalUsersCount = members.length;
-  const activeUsersCount = members.filter(m => m.active !== false).length;
-  const suspendedUsersCount = members.filter(m => m.active === false).length;
+  // Global & Scoped KPI numbers based on selected company filter
+  const displayedMembersForKPI = useMemo(() => {
+    if (selectedOrgFilter === 'all') return targetMembers;
+    return targetMembers.filter(m => m.orgId === selectedOrgFilter);
+  }, [targetMembers, selectedOrgFilter]);
+
+  const totalUsersCount = displayedMembersForKPI.length;
+  const activeUsersCount = displayedMembersForKPI.filter(m => m.active !== false).length;
+  const suspendedUsersCount = displayedMembersForKPI.filter(m => m.active === false).length;
+  const orgAdminsCount = displayedMembersForKPI.filter(m => m.role === 'org_admin').length;
+  const employeesCount = displayedMembersForKPI.filter(m => m.role === 'employee').length;
+
+  // Header and Tab Badges Counters
+  const tabUsersCount = displayedMembersForKPI.length;
+  const tabServicesCount = useMemo(() => {
+    if (selectedOrgFilter === 'all') return targetServices.length;
+    return targetServices.filter(s => s.orgId === selectedOrgFilter).length;
+  }, [targetServices, selectedOrgFilter]);
+
+  const tabVendorsCount = useMemo(() => {
+    if (selectedOrgFilter === 'all') return targetVendors.length;
+    return targetVendors.filter(p => p.orgId === selectedOrgFilter).length;
+  }, [targetVendors, selectedOrgFilter]);
+
+  const tabVaultsCount = useMemo(() => {
+    if (selectedOrgFilter === 'all') return targetVaults.length;
+    return targetVaults.filter(a => a.orgId === selectedOrgFilter).length;
+  }, [targetVaults, selectedOrgFilter]);
+
+  const tabDepartmentsCount = useMemo(() => {
+    if (selectedOrgFilter === 'all') return targetDepartments.length;
+    return targetDepartments.filter(d => d.orgId === selectedOrgFilter).length;
+  }, [targetDepartments, selectedOrgFilter]);
 
   return (
     <div className="space-y-6 pb-16 animate-in fade-in duration-200">
@@ -1022,7 +1066,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           }`}
         >
           <Users className="h-3.5 w-3.5" />
-          <span>👥 المستخدمين والموظفين ({members.length})</span>
+          <span>👥 المستخدمين والموظفين ({tabUsersCount})</span>
         </button>
 
         <button
@@ -1035,7 +1079,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           }`}
         >
           <Layers className="h-3.5 w-3.5" />
-          <span>📂 بنود ومراكز الصرف ({filteredServices.length})</span>
+          <span>📂 بنود ومراكز الصرف ({tabServicesCount})</span>
         </button>
 
         <button
@@ -1048,7 +1092,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           }`}
         >
           <Truck className="h-3.5 w-3.5" />
-          <span>🚚 الموردين ومقدمي الخدمات ({filteredVendors.length})</span>
+          <span>🚚 الموردين ومقدمي الخدمات ({tabVendorsCount})</span>
         </button>
 
         <button
@@ -1061,7 +1105,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           }`}
         >
           <Wallet className="h-3.5 w-3.5" />
-          <span>💳 الخزائن وحسابات الدفع ({filteredVaults.length})</span>
+          <span>💳 الخزائن وحسابات الدفع ({tabVaultsCount})</span>
         </button>
 
         <button
@@ -1074,7 +1118,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           }`}
         >
           <FolderTree className="h-3.5 w-3.5" />
-          <span>🏷️ الأقسام والهيكل ({filteredDepartments.length})</span>
+          <span>🏷️ الأقسام والهيكل ({tabDepartmentsCount})</span>
         </button>
 
         {isSuperAdmin && (
@@ -1276,13 +1320,13 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
               <span className="text-xs text-slate-500 block">مدراء الشركات</span>
               <span className="text-2xl font-bold font-mono text-indigo-600 mt-1 block">
-                {members.filter(m => m.role === 'org_admin').length}
+                {orgAdminsCount}
               </span>
             </div>
             <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
               <span className="text-xs text-slate-500 block">الموظفين</span>
               <span className="text-2xl font-bold font-mono text-slate-700 mt-1 block">
-                {members.filter(m => m.role === 'employee').length}
+                {employeesCount}
               </span>
             </div>
           </div>
@@ -1484,19 +1528,34 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           ========================================================================= */}
       {activeSection === 'services' && (
         <div className="space-y-5">
-          <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md">
-            <Search className="h-4 w-4 text-slate-400" />
-            <input
-              type="text"
-              value={serviceSearch}
-              onChange={(e) => setServiceSearch(e.target.value)}
-              placeholder="ابحث عن بند صرف بالاسم أو الرمز المحاسبي..."
-              className="w-full text-xs bg-transparent outline-hidden text-slate-800"
-            />
-            {serviceSearch && (
-              <button onClick={() => setServiceSearch('')} className="text-slate-400 hover:text-slate-600">
-                <X className="h-3.5 w-3.5" />
-              </button>
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md flex-1">
+              <Search className="h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                value={serviceSearch}
+                onChange={(e) => setServiceSearch(e.target.value)}
+                placeholder="ابحث عن بند صرف بالاسم أو الرمز المحاسبي..."
+                className="w-full text-xs bg-transparent outline-hidden text-slate-800"
+              />
+              {serviceSearch && (
+                <button onClick={() => setServiceSearch('')} className="text-slate-400 hover:text-slate-600">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            {canManageOrgs && (
+              <select
+                value={selectedOrgFilter}
+                onChange={(e) => setSelectedOrgFilter(e.target.value)}
+                className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 font-semibold outline-hidden shadow-xs cursor-pointer"
+              >
+                <option value="all">كل الشركات ({displayOrgs.length})</option>
+                {displayOrgs.map(o => (
+                  <option key={o.id} value={o.id}>{o.name}</option>
+                ))}
+              </select>
             )}
           </div>
 
@@ -1567,19 +1626,34 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           ========================================================================= */}
       {activeSection === 'vendors' && (
         <div className="space-y-5">
-          <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md">
-            <Search className="h-4 w-4 text-slate-400" />
-            <input
-              type="text"
-              value={vendorSearch}
-              onChange={(e) => setVendorSearch(e.target.value)}
-              placeholder="ابحث عن مورد، مسؤول الاتصال، الهاتف، أو الرقم الضريبي..."
-              className="w-full text-xs bg-transparent outline-hidden text-slate-800"
-            />
-            {vendorSearch && (
-              <button onClick={() => setVendorSearch('')} className="text-slate-400 hover:text-slate-600">
-                <X className="h-3.5 w-3.5" />
-              </button>
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md flex-1">
+              <Search className="h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                value={vendorSearch}
+                onChange={(e) => setVendorSearch(e.target.value)}
+                placeholder="ابحث عن مورد، مسؤول الاتصال، الهاتف، أو الرقم الضريبي..."
+                className="w-full text-xs bg-transparent outline-hidden text-slate-800"
+              />
+              {vendorSearch && (
+                <button onClick={() => setVendorSearch('')} className="text-slate-400 hover:text-slate-600">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            {canManageOrgs && (
+              <select
+                value={selectedOrgFilter}
+                onChange={(e) => setSelectedOrgFilter(e.target.value)}
+                className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 font-semibold outline-hidden shadow-xs cursor-pointer"
+              >
+                <option value="all">كل الشركات ({displayOrgs.length})</option>
+                {displayOrgs.map(o => (
+                  <option key={o.id} value={o.id}>{o.name}</option>
+                ))}
+              </select>
             )}
           </div>
 
@@ -1633,19 +1707,34 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           ========================================================================= */}
       {activeSection === 'vaults' && (
         <div className="space-y-5">
-          <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md">
-            <Search className="h-4 w-4 text-slate-400" />
-            <input
-              type="text"
-              value={vaultSearch}
-              onChange={(e) => setVaultSearch(e.target.value)}
-              placeholder="ابحث عن خزينة، حساب بنكي، أو إنستاباي..."
-              className="w-full text-xs bg-transparent outline-hidden text-slate-800"
-            />
-            {vaultSearch && (
-              <button onClick={() => setVaultSearch('')} className="text-slate-400 hover:text-slate-600">
-                <X className="h-3.5 w-3.5" />
-              </button>
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md flex-1">
+              <Search className="h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                value={vaultSearch}
+                onChange={(e) => setVaultSearch(e.target.value)}
+                placeholder="ابحث عن خزينة، حساب بنكي، أو إنستاباي..."
+                className="w-full text-xs bg-transparent outline-hidden text-slate-800"
+              />
+              {vaultSearch && (
+                <button onClick={() => setVaultSearch('')} className="text-slate-400 hover:text-slate-600">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            {canManageOrgs && (
+              <select
+                value={selectedOrgFilter}
+                onChange={(e) => setSelectedOrgFilter(e.target.value)}
+                className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 font-semibold outline-hidden shadow-xs cursor-pointer"
+              >
+                <option value="all">كل الشركات ({displayOrgs.length})</option>
+                {displayOrgs.map(o => (
+                  <option key={o.id} value={o.id}>{o.name}</option>
+                ))}
+              </select>
             )}
           </div>
 
@@ -1726,25 +1815,40 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           ========================================================================= */}
       {activeSection === 'departments' && (
         <div className="space-y-5">
-          <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md">
-            <Search className="h-4 w-4 text-slate-400" />
-            <input
-              type="text"
-              value={deptSearch}
-              onChange={(e) => setDeptSearch(e.target.value)}
-              placeholder="ابحث عن قسم أو مسؤول الإدارة..."
-              className="w-full text-xs bg-transparent outline-hidden text-slate-800"
-            />
-            {deptSearch && (
-              <button onClick={() => setDeptSearch('')} className="text-slate-400 hover:text-slate-600">
-                <X className="h-3.5 w-3.5" />
-              </button>
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md flex-1">
+              <Search className="h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                value={deptSearch}
+                onChange={(e) => setDeptSearch(e.target.value)}
+                placeholder="ابحث عن قسم أو مسؤول الإدارة..."
+                className="w-full text-xs bg-transparent outline-hidden text-slate-800"
+              />
+              {deptSearch && (
+                <button onClick={() => setDeptSearch('')} className="text-slate-400 hover:text-slate-600">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            {canManageOrgs && (
+              <select
+                value={selectedOrgFilter}
+                onChange={(e) => setSelectedOrgFilter(e.target.value)}
+                className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 font-semibold outline-hidden shadow-xs cursor-pointer"
+              >
+                <option value="all">كل الشركات ({displayOrgs.length})</option>
+                {displayOrgs.map(o => (
+                  <option key={o.id} value={o.id}>{o.name}</option>
+                ))}
+              </select>
             )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredDepartments.map((dept) => {
-              const assignedCount = members.filter(m => m.department === dept.name).length;
+              const assignedCount = targetMembers.filter(m => m.department === dept.name && (dept.orgId ? m.orgId === dept.orgId : true)).length;
 
               return (
                 <div key={dept.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition">

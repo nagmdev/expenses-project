@@ -170,9 +170,13 @@ interface AppContextType {
   authLoading: boolean;
   currentRole: Role;
   members: OrganizationMember[];
+  allMembers: OrganizationMember[];
   services: ServiceCategory[];
+  allServices: ServiceCategory[];
   providers: ServiceProvider[];
+  allProviders: ServiceProvider[];
   requests: ExpenseRequest[];
+  allRequests: ExpenseRequest[];
   activeTab: string;
   loading: boolean;
   isBackendConnected: boolean;
@@ -258,6 +262,7 @@ interface AppContextType {
 
   // Payment Accounts & Vaults
   paymentAccounts: PaymentAccount[];
+  allPaymentAccounts: PaymentAccount[];
   addPaymentAccount: (account: Omit<PaymentAccount, 'id' | 'createdAt'>) => Promise<void>;
   updatePaymentAccount: (accountId: string, updates: Partial<PaymentAccount>) => Promise<void>;
   deletePaymentAccount: (accountId: string) => Promise<void>;
@@ -265,12 +270,14 @@ interface AppContextType {
 
   // Departments & Structure
   departments: Department[];
+  allDepartments: Department[];
   addDepartment: (dept: Omit<Department, 'id' | 'createdAt'>) => Promise<void>;
   updateDepartment: (deptId: string, updates: Partial<Department>) => Promise<void>;
   deleteDepartment: (deptId: string) => Promise<void>;
 
   // Audit Trail & Logging
   auditLogs: AuditLogEntry[];
+  allAuditLogs: AuditLogEntry[];
   logAuditAction: (params: {
     actionType: AuditActionType;
     entityType: AuditEntityType;
@@ -974,6 +981,119 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubEmailLogs();
     };
   }, [firebaseUser, firebaseSyncCounter]);
+
+  // =========================================================================
+  // PROACTIVE MEMBER & USER SELF-HEALING SYNCHRONIZATION
+  // Guarantees that any user who submits requests, logs in via Google/Email,
+  // or exists in requests will have an official OrganizationMember record in Firestore.
+  // =========================================================================
+  useEffect(() => {
+    if (!isFirebaseConfigured() || !getDb()) return;
+
+    const missingMembersMap = new Map<string, {
+      orgId: string;
+      userId: string;
+      userName: string;
+      userEmail: string;
+      phone?: string;
+      department?: string;
+      joinedAt: string;
+    }>();
+
+    // 1. Scan requests for any requesters missing from rawMembers
+    for (const req of rawRequests) {
+      const email = (req.requesterEmail || '').trim().toLowerCase();
+      const uid = (req.requesterId || '').trim();
+      if (!email && !uid) continue;
+
+      const exists = rawMembers.some(m => 
+        (email && m.userEmail && m.userEmail.trim().toLowerCase() === email) ||
+        (uid && m.userId && m.userId === uid)
+      );
+
+      if (!exists) {
+        const key = email || uid;
+        if (!missingMembersMap.has(key)) {
+          missingMembersMap.set(key, {
+            orgId: req.orgId || (rawOrganizations[0]?.id || 'org-main'),
+            userId: uid || `user-${Date.now()}`,
+            userName: req.requesterName || (email ? email.split('@')[0] : 'موظف'),
+            userEmail: email,
+            phone: req.requesterPhone || '',
+            department: req.requesterDepartment || 'العمليات والتشغيل',
+            joinedAt: (req.createdAt || new Date().toISOString()).split('T')[0],
+          });
+        }
+      }
+    }
+
+    // 2. Scan currently logged in firebaseUser if non-super-admin
+    if (firebaseUser && userEmail && !isSuperAdmin) {
+      const exists = rawMembers.some(m => 
+        (userEmail && m.userEmail && m.userEmail.trim().toLowerCase() === userEmail) ||
+        (firebaseUser.uid && m.userId === firebaseUser.uid)
+      );
+
+      if (!exists && !missingMembersMap.has(userEmail)) {
+        const matchingReq = rawRequests.find(r => 
+          (r.requesterEmail && r.requesterEmail.trim().toLowerCase() === userEmail) || 
+          r.requesterId === firebaseUser.uid
+        );
+        const targetOrgId = matchingReq?.orgId || (rawOrganizations[0]?.id || 'org-main');
+
+        missingMembersMap.set(userEmail, {
+          orgId: targetOrgId,
+          userId: firebaseUser.uid,
+          userName: firebaseUser.displayName || userEmail.split('@')[0] || 'موظف',
+          userEmail: userEmail,
+          phone: firebaseUser.phoneNumber || '',
+          department: 'العمليات والتشغيل',
+          joinedAt: new Date().toISOString().split('T')[0],
+        });
+      }
+    }
+
+    if (missingMembersMap.size > 0) {
+      console.info(`[Self-Healing] Detected ${missingMembersMap.size} missing member records. Auto-provisioning into Firestore...`);
+      const newMembersToAppend: OrganizationMember[] = [];
+
+      missingMembersMap.forEach((data) => {
+        const memberId = `mem-${data.userId || Date.now()}`;
+        const newMemDoc: OrganizationMember = {
+          id: memberId,
+          orgId: data.orgId,
+          userId: data.userId,
+          userName: data.userName,
+          userEmail: data.userEmail,
+          phone: data.phone,
+          department: data.department || 'العمليات والتشغيل',
+          jobTitle: 'موظف',
+          role: 'employee',
+          active: true,
+          joinedAt: data.joinedAt,
+        };
+
+        setFirestoreDoc('members', memberId, newMemDoc).catch(err => {
+          console.warn('[Self-Healing] Error persisting auto-healed member doc:', err);
+        });
+
+        newMembersToAppend.push(newMemDoc);
+      });
+
+      setRawMembers(prev => {
+        const existingEmails = new Set(prev.map(m => (m.userEmail || '').trim().toLowerCase()).filter(Boolean));
+        const existingUids = new Set(prev.map(m => m.userId).filter(Boolean));
+        const uniqueToAdd = newMembersToAppend.filter(m => 
+          (!m.userEmail || !existingEmails.has(m.userEmail.trim().toLowerCase())) &&
+          (!m.userId || !existingUids.has(m.userId))
+        );
+        if (uniqueToAdd.length === 0) return prev;
+        const updated = [...prev, ...uniqueToAdd];
+        safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
+        return updated;
+      });
+    }
+  }, [rawRequests, rawMembers, firebaseUser, userEmail, isSuperAdmin, rawOrganizations]);
 
   // Refresh data: sync with local Express API if present and Firebase is not active
   const refreshData = useCallback(async () => {
@@ -2904,9 +3024,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         authLoading,
         currentRole: resolvedRole,
         members: scopedMembers,
+        allMembers: rawMembers,
         services: scopedServices,
+        allServices: rawServices,
         providers: scopedProviders,
+        allProviders: rawProviders,
         requests: scopedRequests,
+        allRequests: rawRequests,
         activeTab,
         loading,
         isBackendConnected,
@@ -2951,15 +3075,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         replyClarification,
         disburseRequest,
         paymentAccounts: scopedPaymentAccounts,
+        allPaymentAccounts: rawPaymentAccounts,
         addPaymentAccount,
         updatePaymentAccount,
         deletePaymentAccount,
         togglePaymentAccountStatus,
         departments: scopedDepartments,
+        allDepartments: rawDepartments,
         addDepartment,
         updateDepartment,
         deleteDepartment,
         auditLogs: scopedAuditLogs,
+        allAuditLogs: rawAuditLogs,
         logAuditAction,
         emailSettings,
         updateEmailSettings,
