@@ -555,27 +555,35 @@ export const SettingsManagement: React.FC = () => {
                 {(formSettings.deliveryMethod === 'direct_api' || !formSettings.deliveryMethod) && (
                   <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200/80 space-y-3 animate-in fade-in">
                     <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                      <div className="sm:col-span-4">
-                        <label className="block text-xs font-bold text-slate-700 mb-1">المزود المجاني (Email Provider):</label>
+                      <div className="sm:col-span-5">
+                        <label className="block text-xs font-bold text-slate-700 mb-1">المزود المعتمد (Email Provider):</label>
                         <select
-                          value={formSettings.directProvider || 'resend'}
+                          value={formSettings.directProvider || 'auto'}
                           onChange={(e) => setFormSettings({ ...formSettings, directProvider: e.target.value as any })}
                           className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 font-medium"
                         >
-                          <option value="resend">Resend (3,000 إيميل مجاني شهرياً)</option>
-                          <option value="brevo">Brevo / Sendinblue (300 إيميل مجاني يومياً)</option>
+                          <option value="auto">⚡ تلقائي ذكي (Auto-Detect من Vercel أو الإعدادات)</option>
+                          <option value="gmail">📨 جوجل الرسمي (Gmail App Password - 500 يومياً لأي إيميل)</option>
+                          <option value="brevo">🌐 Brevo / Sendinblue (300 يومياً لأي إيميل بدون دومين)</option>
+                          <option value="resend">✉️ Resend (3,000 إيميل شهرياً)</option>
                         </select>
                       </div>
 
-                      <div className="sm:col-span-8">
+                      <div className="sm:col-span-7">
                         <label className="block text-xs font-bold text-slate-700 mb-1">
-                          مفتاح الربط المجاني (API Key):
+                          مفتاح الربط أو كلمة مرور التطبيقات (API Key / Password):
                         </label>
                         <input 
                           type="password"
                           value={formSettings.directApiKey || ''}
                           onChange={(e) => setFormSettings({ ...formSettings, directApiKey: e.target.value })}
-                          placeholder={formSettings.directProvider === 'brevo' ? 'xkeysib-...' : 're_123456789...'}
+                          placeholder={
+                            formSettings.directProvider === 'gmail' 
+                              ? 'كلمة مرور التطبيق من Google (16 حرفاً)...' 
+                              : formSettings.directProvider === 'brevo' 
+                                ? 'xkeysib-...' 
+                                : 're_123456789...'
+                          }
                           className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 font-mono"
                         />
                       </div>
@@ -584,13 +592,17 @@ export const SettingsManagement: React.FC = () => {
                     <div className="p-3 bg-indigo-50/70 border border-indigo-200/60 rounded-xl text-[11px] text-indigo-900 leading-relaxed flex items-start gap-2">
                       <div className="shrink-0 mt-0.5">💡</div>
                       <div>
-                        <strong>كيف تحصل على المفتاح المجاني خلال 30 ثانية بدون أي كارت بنكي؟</strong>
-                        <div className="mt-1 text-indigo-800 space-y-0.5">
-                          1. افتح <a href="https://resend.com" target="_blank" rel="noreferrer" className="underline font-bold text-indigo-600">resend.com</a> وسجل دخول بحساب Google أو GitHub مجاناً.
-                          <br />
-                          2. انسخ مفتاح <strong>API Key</strong> والصقه هنا في الحقل بالأعلى واضغط <strong>حفظ</strong>.
-                          <br />
-                          3. فوراً ستصل كافة إشعارات الطلبات إلى الإنبوكس الحقيقي للموظفين والمديرين!
+                        <strong>خيارات إرسال الإيميلات لكافة الموظفين والمديرين (مثل mahmoud@tieapps.com):</strong>
+                        <div className="mt-1.5 text-indigo-800 space-y-1">
+                          <div>
+                            <strong>1. عبر Gmail مباشرة (موصى به لحسابات جوجل):</strong> أنشئ "كلمة مرور تطبيق" (App Password من 16 حرف) من إعدادات حساب جوجل لبريد <code>awadhsaudi2030@gmail.com</code> (قسم الأمان &gt; التحقق بخطوتين)، وضعها في الحقل أعلاه أو كـ <code>GMAIL_APP_PASSWORD</code> في Vercel. يرسل مباشرة حتى 500 إيميل يومياً لأي مستقبل.
+                          </div>
+                          <div>
+                            <strong>2. عبر Brevo (Sendinblue):</strong> سجل مجاناً في <a href="https://brevo.com" target="_blank" rel="noreferrer" className="underline font-bold text-indigo-600">brevo.com</a>، وانسخ مفتاح API Key (يبدأ بـ <code>xkeysib-</code>). يعطيك 300 إيميل يومياً لأي إيميل في العالم بدون الحاجة لدومين.
+                          </div>
+                          <div>
+                            <strong>3. عبر Resend:</strong> يرسل 3,000 إيميل شهرياً، ويتطلب توثيق دومين (مثل <code>tieapps.com</code>) من صفحة <a href="https://resend.com/domains" target="_blank" rel="noreferrer" className="underline font-bold text-indigo-600">resend.com/domains</a> للإرسال لغير صاحب الحساب.
+                          </div>
                         </div>
                       </div>
                     </div>

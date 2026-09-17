@@ -21,12 +21,17 @@ export default async function handler(req: any, res: any) {
 
   // Health check endpoint
   if (req.method === 'GET') {
+    const hasEnvResend = Boolean(process.env.Resend_API_KEY || process.env.RESEND_API_KEY || process.env.resend_api_key || process.env.VITE_RESEND_API_KEY);
+    const hasEnvBrevo = Boolean(process.env.BREVO_API_KEY || process.env.Brevo_API_KEY || process.env.brevo_api_key || process.env.VITE_BREVO_API_KEY);
+    const hasEnvGmail = Boolean(process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD || process.env.VITE_GMAIL_APP_PASSWORD);
+
     return res.status(200).json({
       status: 'ok',
       service: 'expenses-email-dispatcher',
-      supportedProviders: ['resend', 'brevo'],
-      hasEnvResendKey: Boolean(process.env.Resend_API_KEY || process.env.RESEND_API_KEY || process.env.resend_api_key || process.env.VITE_RESEND_API_KEY),
-      hasEnvBrevoKey: Boolean(process.env.BREVO_API_KEY || process.env.Brevo_API_KEY || process.env.brevo_api_key || process.env.VITE_BREVO_API_KEY),
+      supportedProviders: ['gmail', 'brevo', 'resend'],
+      hasEnvGmailAppPass: hasEnvGmail,
+      hasEnvBrevoKey: hasEnvBrevo,
+      hasEnvResendKey: hasEnvResend,
       timestamp: new Date().toISOString(),
     });
   }
@@ -66,11 +71,10 @@ export default async function handler(req: any, res: any) {
     }
 
     // Determine API Key and Provider
-    const activeResendKey = (apiKey && apiKey.startsWith('re_') ? apiKey : null) 
-      || process.env.Resend_API_KEY 
-      || process.env.RESEND_API_KEY 
-      || process.env.resend_api_key 
-      || process.env.VITE_RESEND_API_KEY;
+    const activeGmailAppPass = (apiKey && !apiKey.startsWith('re_') && !apiKey.startsWith('xkeysib-') && apiKey.replace(/\s+/g, '').length === 16 ? apiKey : null)
+      || process.env.GMAIL_APP_PASSWORD 
+      || process.env.GMAIL_PASSWORD
+      || process.env.VITE_GMAIL_APP_PASSWORD;
 
     const activeBrevoKey = (apiKey && apiKey.startsWith('xkeysib-') ? apiKey : null) 
       || process.env.BREVO_API_KEY 
@@ -78,11 +82,75 @@ export default async function handler(req: any, res: any) {
       || process.env.brevo_api_key 
       || process.env.VITE_BREVO_API_KEY;
 
+    const activeResendKey = (apiKey && apiKey.startsWith('re_') ? apiKey : null) 
+      || process.env.Resend_API_KEY 
+      || process.env.RESEND_API_KEY 
+      || process.env.resend_api_key 
+      || process.env.VITE_RESEND_API_KEY;
+
     let targetProvider = provider;
     if (targetProvider === 'auto') {
-      if (activeResendKey) targetProvider = 'resend';
+      if (activeGmailAppPass) targetProvider = 'gmail';
       else if (activeBrevoKey) targetProvider = 'brevo';
+      else if (activeResendKey) targetProvider = 'resend';
       else if (apiKey) targetProvider = 'resend'; // Default guess
+    }
+
+    // -------------------------------------------------------------
+    // Provider 0: Official Gmail SMTP (Direct from awadhsaudi2030@gmail.com)
+    // -------------------------------------------------------------
+    if (targetProvider === 'gmail') {
+      const passToUse = activeGmailAppPass || apiKey;
+      if (!passToUse) {
+        return res.status(200).json({
+          success: false,
+          skipped: true,
+          error: 'missing_gmail_password',
+          provider: 'gmail',
+          message: 'كلمة مرور تطبيقات جوجل (Google App Password) غير محددة. يرجى إدخالها في صفحة الإعدادات أو إضافة GMAIL_APP_PASSWORD في Vercel.',
+        });
+      }
+
+      try {
+        const nodemailer = await import('nodemailer');
+        const effectiveSender = senderEmail || 'awadhsaudi2030@gmail.com';
+        const cleanPassword = String(passToUse).replace(/\s+/g, '');
+
+        const transporter = nodemailer.createTransport({
+          host: 'smtp.gmail.com',
+          port: 465,
+          secure: true,
+          auth: {
+            user: effectiveSender,
+            pass: cleanPassword,
+          },
+        });
+
+        const info = await transporter.sendMail({
+          from: `"${senderName}" <${effectiveSender}>`,
+          to: recipients,
+          replyTo: replyTo || effectiveSender,
+          subject,
+          html,
+          text: text || undefined,
+        });
+
+        return res.status(200).json({
+          success: true,
+          provider: 'gmail',
+          id: info.messageId,
+          recipients,
+          message: 'تم إرسال الإيميل بنجاح ومباشرة عبر خوادم Google الرسمية!',
+        });
+      } catch (gmailErr: any) {
+        console.error('[Vercel Serverless Email] Gmail SMTP Error:', gmailErr);
+        return res.status(500).json({
+          success: false,
+          provider: 'gmail',
+          error: gmailErr?.message || 'فشل إرسال الإيميل عبر خادم Gmail SMTP',
+          details: gmailErr,
+        });
+      }
     }
 
     // -------------------------------------------------------------

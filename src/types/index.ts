@@ -253,7 +253,7 @@ export interface EmailNotificationSettings {
   senderEmail?: string;
   replyToEmail?: string;
   deliveryMethod: 'direct_api' | 'firestore_mail' | 'webhook';
-  directProvider?: 'resend' | 'brevo' | 'auto';
+  directProvider?: 'resend' | 'brevo' | 'gmail' | 'auto';
   directApiKey?: string;
   webhookUrl?: string;
   emailJsServiceId?: string;
