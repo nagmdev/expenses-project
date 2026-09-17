@@ -156,13 +156,15 @@ export const Navbar: React.FC = () => {
     );
   }
 
-  // Always append Settings tab
-  navItems.push({
-    id: 'settings',
-    label: '⚙️ الإعدادات والإشعارات',
-    icon: Settings,
-    badge: null,
-  });
+  // Append Settings tab for Admins only (org_admin & super_admin)
+  if (currentRole === 'org_admin' || currentRole === 'super_admin') {
+    navItems.push({
+      id: 'settings',
+      label: '⚙️ الإعدادات والإشعارات',
+      icon: Settings,
+      badge: null,
+    });
+  }
 
   return (
     <nav className="bg-white border-b border-slate-200">

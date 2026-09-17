@@ -81,8 +81,9 @@ export default async function handler(req: any, res: any) {
     if (targetProvider === 'resend') {
       const keyToUse = activeResendKey || apiKey;
       if (!keyToUse) {
-        return res.status(400).json({
+        return res.status(200).json({
           success: false,
+          skipped: true,
           error: 'missing_api_key',
           provider: 'resend',
           message: 'مفتاح Resend API Key غير محدد. يرجى إدخال المفتاح في صفحة الإعدادات أو إضافة RESEND_API_KEY في Vercel.',
@@ -135,8 +136,9 @@ export default async function handler(req: any, res: any) {
     if (targetProvider === 'brevo') {
       const keyToUse = activeBrevoKey || apiKey;
       if (!keyToUse) {
-        return res.status(400).json({
+        return res.status(200).json({
           success: false,
+          skipped: true,
           error: 'missing_api_key',
           provider: 'brevo',
           message: 'مفتاح Brevo API Key غير محدد. يرجى إدخال المفتاح في صفحة الإعدادات.',
@@ -182,8 +184,9 @@ export default async function handler(req: any, res: any) {
     }
 
     // Neither key provided
-    return res.status(400).json({
+    return res.status(200).json({
       success: false,
+      skipped: true,
       error: 'no_provider_configured',
       message: 'لم يتم العثور على مفتاح إرسال (Resend أو Brevo). يرجى إدخال المفتاح المجاني في صفحة الإعدادات.',
     });

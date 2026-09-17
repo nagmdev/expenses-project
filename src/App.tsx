@@ -185,15 +185,11 @@ const MainApp: React.FC = () => {
             </div>
           </div>
         ) : currentRole === 'employee' ? (
-          /* Employee Experience: Dedicated Banking Tracker or Settings */
-          activeTab === 'settings' ? (
-            <SettingsManagement />
-          ) : (
-            <RequesterTracker 
-              onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
-              onSelectRequest={setSelectedRequest}
-            />
-          )
+          /* Employee Experience: Strictly Dedicated Banking Tracker */
+          <RequesterTracker 
+            onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+            onSelectRequest={setSelectedRequest}
+          />
         ) : (
           /* Admin / Super Admin / Data Entry Multi-Tab View */
           <>
@@ -230,7 +226,7 @@ const MainApp: React.FC = () => {
               <OrganizationsManagement />
             )}
 
-            {activeTab === 'settings' && (
+            {activeTab === 'settings' && (currentRole === 'org_admin' || currentRole === 'super_admin') && (
               <SettingsManagement />
             )}
           </>

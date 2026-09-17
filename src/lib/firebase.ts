@@ -417,6 +417,26 @@ export function subscribeToCollection<T = DocumentData>(
 }
 
 /**
+ * Recursively remove `undefined` fields from objects and arrays to prevent Firestore errors
+ */
+export function sanitizeForFirestore<T>(data: T): T {
+  if (data === undefined) return null as any;
+  if (data === null || typeof data !== 'object') return data;
+  if (Array.isArray(data)) {
+    return data
+      .filter(item => item !== undefined)
+      .map(item => sanitizeForFirestore(item)) as any;
+  }
+  const clean: Record<string, any> = {};
+  for (const [key, value] of Object.entries(data as Record<string, any>)) {
+    if (value !== undefined) {
+      clean[key] = sanitizeForFirestore(value);
+    }
+  }
+  return clean as T;
+}
+
+/**
  * Set a document with a specific ID (create or full merge)
  */
 export async function setFirestoreDoc<T extends Record<string, any>>(
@@ -427,8 +447,9 @@ export async function setFirestoreDoc<T extends Record<string, any>>(
   const database = getDb();
   if (!database) throw new Error('Firestore not initialized');
 
+  const cleanData = sanitizeForFirestore(data);
   const docRef = doc(database, collectionName, docId);
-  await setDoc(docRef, data, { merge: true });
+  await setDoc(docRef, cleanData, { merge: true });
 }
 
 /**
@@ -441,8 +462,9 @@ export async function addFirestoreDoc<T extends Record<string, any>>(
   const database = getDb();
   if (!database) throw new Error('Firestore not initialized');
 
+  const cleanData = sanitizeForFirestore(data);
   const colRef = collection(database, collectionName);
-  const docRef = await addDoc(colRef, data);
+  const docRef = await addDoc(colRef, cleanData);
   return docRef.id;
 }
 
@@ -457,8 +479,9 @@ export async function updateFirestoreDoc(
   const database = getDb();
   if (!database) throw new Error('Firestore not initialized');
 
+  const cleanData = sanitizeForFirestore(data);
   const docRef = doc(database, collectionName, docId);
-  await updateDoc(docRef, data);
+  await updateDoc(docRef, cleanData);
 }
 
 /**

@@ -471,11 +471,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (!firebaseUser) return;
     if (resolvedRole === 'employee') {
-      if (activeTab === 'dashboard' || activeTab === 'services' || activeTab === 'providers' || activeTab === 'organizations') {
+      if (activeTab === 'dashboard' || activeTab === 'services' || activeTab === 'providers' || activeTab === 'organizations' || activeTab === 'settings') {
         setActiveTab('my-requests');
       }
     } else if (resolvedRole === 'data_entry') {
-      if (activeTab === 'dashboard' || activeTab === 'requests') {
+      if (activeTab === 'dashboard' || activeTab === 'requests' || activeTab === 'settings') {
         setActiveTab('providers');
       }
     }
@@ -2318,7 +2318,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             content: replyText,
             type: 'clarification_reply' as const,
             createdAt: now.toISOString(),
-            attachmentName,
+            ...(attachmentName ? { attachmentName } : {}),
           }
         ];
         const timeline = [

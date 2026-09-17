@@ -295,7 +295,11 @@ export async function sendNotificationEmail(
 
     try {
       // 1. Direct Serverless API Delivery (Vercel + Resend/Brevo)
-      if (settings.deliveryMethod === 'direct_api' || !settings.deliveryMethod) {
+      if (
+        (settings.deliveryMethod === 'direct_api' || !settings.deliveryMethod) &&
+        settings.directApiKey &&
+        settings.directApiKey.trim().length > 0
+      ) {
         try {
           const apiRes = await fetch('/api/send-email', {
             method: 'POST',
@@ -308,20 +312,16 @@ export async function sendNotificationEmail(
               senderName: settings.senderName || 'نظام مصروفي',
               replyTo: settings.replyToEmail,
               provider: settings.directProvider || 'auto',
-              apiKey: settings.directApiKey || undefined,
+              apiKey: settings.directApiKey,
             }),
           });
           const apiData = await apiRes.json().catch(() => null);
           if (apiRes.ok && apiData?.success) {
             console.log('[EmailService] Email sent directly via /api/send-email:', apiData);
             status = 'sent';
-          } else if (!apiRes.ok) {
-            console.warn('[EmailService] Direct API response:', apiRes.status, apiData);
-            if (apiData?.error === 'missing_api_key' || apiData?.error === 'no_provider_configured') {
-              errorMessage = apiData?.message;
-            } else if (apiData?.error) {
-              errorMessage = typeof apiData.error === 'string' ? apiData.error : JSON.stringify(apiData.error);
-            }
+          } else if (apiData && !apiData.success && !apiData.skipped) {
+            console.warn('[EmailService] Direct API notice:', apiData);
+            errorMessage = apiData.message || (typeof apiData.error === 'string' ? apiData.error : undefined);
           }
         } catch (err: any) {
           console.warn('[EmailService] Direct API fetch warning:', err);
