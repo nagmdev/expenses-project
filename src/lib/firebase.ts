@@ -285,6 +285,9 @@ export type { FirebaseUser };
  * Purge legacy dummy/mock records from Firestore (e.g. org-ofq, org-rwd, req-101, etc.)
  */
 export async function purgeSampleDataFromFirestore(): Promise<void> {
+  if (typeof window !== 'undefined' && localStorage.getItem('expenses_legacy_purged_v2')) {
+    return;
+  }
   const database = getDb();
   if (!database) return;
 
@@ -313,9 +316,11 @@ export async function purgeSampleDataFromFirestore(): Promise<void> {
     await Promise.allSettled(
       sampleTargets.map(t => deleteDoc(doc(database, t.col, t.id)))
     );
-    console.log('[Firebase] Purged any legacy sample mock data from Cloud Firestore.');
-  } catch (err) {
-    console.warn('[Firebase] Error purging sample mock data:', err);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('expenses_legacy_purged_v2', 'true');
+    }
+  } catch {
+    // Silent fail for non-critical purge
   }
 }
 
