@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { ServiceCategory } from '../types';
+import { ServiceCategory, isServiceMatchingOrg } from '../types';
 import { 
   Layers, 
   Plus, 
@@ -46,14 +46,14 @@ export const ServicesManagement: React.FC = () => {
   const [editingService, setEditingService] = useState<ServiceCategory | null>(null);
 
   // Form State
-  const [selectedOrgId, setSelectedOrgId] = useState<string>('');
+  const [selectedOrgIds, setSelectedOrgIds] = useState<string[]>([]);
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
   const [description, setDescription] = useState('');
   const [budgetLimit, setBudgetLimit] = useState('');
   const [color, setColor] = useState('#10b981');
 
-  const orgServices = targetServices.filter(s => selectedOrgFilter === 'all' || s.orgId === selectedOrgFilter);
+  const orgServices = targetServices.filter(s => selectedOrgFilter === 'all' || isServiceMatchingOrg(s, selectedOrgFilter));
 
   const handleOpenAdd = () => {
     setName('');
@@ -65,7 +65,7 @@ export const ServicesManagement: React.FC = () => {
     const defaultOrg = selectedOrgFilter !== 'all' 
       ? selectedOrgFilter 
       : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (orgList[0]?.id || ''));
-    setSelectedOrgId(defaultOrg);
+    setSelectedOrgIds(defaultOrg ? [defaultOrg] : (orgList.length > 0 ? [orgList[0].id] : []));
     setIsAddModalOpen(true);
   };
 
@@ -76,16 +76,19 @@ export const ServicesManagement: React.FC = () => {
     setDescription(srv.description);
     setBudgetLimit(srv.budgetLimit.toString());
     setColor(srv.color);
-    setSelectedOrgId(srv.orgId || orgList[0]?.id || '');
+    const initialOrgs = srv.orgIds && srv.orgIds.length > 0
+      ? srv.orgIds
+      : (srv.orgId ? [srv.orgId] : (orgList[0]?.id ? [orgList[0].id] : []));
+    setSelectedOrgIds(initialOrgs);
     setIsAddModalOpen(true);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || selectedOrgIds.length === 0) return;
 
     const finalCode = code.trim() || `SRV-${Math.floor(100 + Math.random() * 900)}`;
-    const finalOrgId = selectedOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || orgList[0]?.id || '';
+    const primaryOrgId = selectedOrgIds[0] || orgList[0]?.id || '';
 
     if (editingService) {
       await updateService({
@@ -95,11 +98,13 @@ export const ServicesManagement: React.FC = () => {
         description: description.trim(),
         budgetLimit: Number(budgetLimit) || 0,
         color,
-        orgId: finalOrgId,
+        orgId: primaryOrgId,
+        orgIds: selectedOrgIds,
       });
     } else {
       await addService({
-        orgId: finalOrgId,
+        orgId: primaryOrgId,
+        orgIds: selectedOrgIds,
         name: name.trim(),
         code: finalCode,
         description: description.trim(),
@@ -206,12 +211,34 @@ export const ServicesManagement: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Company connection badge */}
-                <div className="mt-2.5 flex items-center gap-1.5">
-                  <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200/80">
-                    <Building2 className="h-3 w-3 text-emerald-600" />
-                    <span>{parentOrg ? parentOrg.name : 'شركة غير محددة'}</span>
-                  </span>
+                {/* Company connection badge (Multi-Company Support) */}
+                <div className="mt-2.5 flex items-center gap-1.5 flex-wrap">
+                  {(() => {
+                    const linkedOrgIds = srv.orgIds && srv.orgIds.length > 0 ? srv.orgIds : (srv.orgId ? [srv.orgId] : []);
+                    const matchingOrgs = orgList.filter(o => linkedOrgIds.includes(o.id));
+                    if (orgList.length > 1 && matchingOrgs.length >= orgList.length) {
+                      return (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-lg bg-purple-50 text-purple-800 border border-purple-200/80">
+                          <Building2 className="h-3 w-3 text-purple-600" />
+                          <span>🌐 متاح لجميع الشركات ({matchingOrgs.length})</span>
+                        </span>
+                      );
+                    }
+                    if (matchingOrgs.length === 0) {
+                      return (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-lg bg-slate-50 text-slate-500 border border-slate-200/80">
+                          <Building2 className="h-3 w-3 text-slate-400" />
+                          <span>شركة غير محددة</span>
+                        </span>
+                      );
+                    }
+                    return matchingOrgs.map(o => (
+                      <span key={o.id} className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200/80">
+                        <Building2 className="h-3 w-3 text-emerald-600" />
+                        <span>{o.name}</span>
+                      </span>
+                    ));
+                  })()}
                 </div>
 
                 <p className="text-xs text-slate-500 mt-3 line-clamp-2 leading-relaxed">
@@ -280,23 +307,65 @@ export const ServicesManagement: React.FC = () => {
             </div>
 
             <form onSubmit={handleSubmit} className="mt-4 space-y-3 text-xs">
-              {/* Company Selection Dropdown */}
+              {/* Company Multi-Selection */}
               <div>
-                <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5">
-                  <Building2 className="h-3.5 w-3.5 text-emerald-600" />
-                  <span>الشركة أو المؤسسة التابع لها البند *</span>
-                </label>
-                <select
-                  required
-                  value={selectedOrgId}
-                  onChange={(e) => setSelectedOrgId(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-800 outline-hidden focus:border-emerald-500 focus:bg-white"
-                >
-                  <option value="" disabled>-- اختر الشركة التابع لها البند --</option>
-                  {orgList.map(o => (
-                    <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
-                  ))}
-                </select>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block font-bold text-slate-700 flex items-center gap-1.5">
+                    <Building2 className="h-3.5 w-3.5 text-emerald-600" />
+                    <span>الشركات والمؤسسات التابع لها البند (تحديد متعدد) *</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (selectedOrgIds.length === orgList.length) {
+                        setSelectedOrgIds([]);
+                      } else {
+                        setSelectedOrgIds(orgList.map(o => o.id));
+                      }
+                    }}
+                    className="text-[11px] text-emerald-700 hover:text-emerald-800 font-bold hover:underline cursor-pointer"
+                  >
+                    {selectedOrgIds.length === orgList.length ? 'إلغاء تحديد الكل' : 'تحديد كل الشركات'}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-44 overflow-y-auto p-2.5 bg-slate-50 border border-slate-200 rounded-xl">
+                  {orgList.map(org => {
+                    const isSelected = selectedOrgIds.includes(org.id);
+                    return (
+                      <label 
+                        key={org.id} 
+                        className={`flex items-center gap-2 p-2 rounded-lg border text-xs font-semibold cursor-pointer transition ${
+                          isSelected 
+                            ? 'bg-emerald-50 border-emerald-400 text-emerald-950 font-bold shadow-xs' 
+                            : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100/70'
+                        }`}
+                      >
+                        <input 
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedOrgIds(prev => [...prev, org.id]);
+                            } else {
+                              setSelectedOrgIds(prev => prev.filter(id => id !== org.id));
+                            }
+                          }}
+                          className="h-4 w-4 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="truncate">{org.name}</div>
+                          <span className="text-[10px] text-slate-400 font-normal">{org.code} ({org.currency})</span>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+                {selectedOrgIds.length === 0 && (
+                  <p className="mt-1 text-[11px] text-rose-600 font-bold">
+                    * يرجى تحديد شركة واحدة على الأقل لربط البند بها.
+                  </p>
+                )}
               </div>
 
               <div>

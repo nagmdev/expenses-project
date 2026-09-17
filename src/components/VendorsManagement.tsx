@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { ServiceProvider } from '../types';
+import { ServiceProvider, isServiceMatchingOrg } from '../types';
 import { 
   Building, 
   Building2,
@@ -92,7 +92,7 @@ export const VendorsManagement: React.FC = () => {
       ? selectedOrgFilter 
       : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (orgList[0]?.id || ''));
     setSelectedOrgId(defaultOrg);
-    const initialOrgServices = targetServices.filter(s => s.orgId === defaultOrg);
+    const initialOrgServices = targetServices.filter(s => isServiceMatchingOrg(s, defaultOrg));
     setSelectedServices(initialOrgServices.length > 0 ? [initialOrgServices[0].id] : []);
     setRating(5.0);
     setNotes('');
@@ -122,7 +122,7 @@ export const VendorsManagement: React.FC = () => {
     if (!name.trim()) return;
 
     const finalOrgId = selectedOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || orgList[0]?.id || '';
-    const relevantServices = targetServices.filter(s => s.orgId === finalOrgId);
+    const relevantServices = targetServices.filter(s => isServiceMatchingOrg(s, finalOrgId));
     const matchedServiceNames = relevantServices
       .filter(s => selectedServices.includes(s.id))
       .map(s => s.name);
@@ -417,7 +417,7 @@ export const VendorsManagement: React.FC = () => {
                   بنود ومراكز الصرف المرتبطة بهذا المورد في الشركة (اختياري)
                 </label>
                 {(() => {
-                  const companyServices = targetServices.filter(s => s.orgId === selectedOrgId);
+                  const companyServices = targetServices.filter(s => isServiceMatchingOrg(s, selectedOrgId));
                   if (companyServices.length === 0) {
                     return (
                       <p className="text-[11px] text-slate-400 bg-slate-50 p-2.5 rounded-xl border border-slate-200">

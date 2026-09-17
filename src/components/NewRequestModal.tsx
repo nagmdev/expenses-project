@@ -8,7 +8,7 @@ import {
   Layers,
   Building
 } from 'lucide-react';
-import { PaymentMethod, SUPPORTED_CURRENCIES } from '../types';
+import { PaymentMethod, SUPPORTED_CURRENCIES, isServiceMatchingOrg } from '../types';
 import { 
   sanitizeAmount, 
   sanitizeDigitalWallet, 
@@ -95,7 +95,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
   const availableServices = useMemo(() => {
     if (!selectedOrgId) return [];
-    return sourceServices.filter(s => s.orgId === selectedOrgId);
+    return sourceServices.filter(s => isServiceMatchingOrg(s, selectedOrgId));
   }, [sourceServices, selectedOrgId]);
 
   const availableProviders = useMemo(() => {

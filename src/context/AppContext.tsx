@@ -17,7 +17,8 @@ import {
   AuditEntityType,
   EmailNotificationSettings,
   EmailLogEntry,
-  EmailEventType
+  EmailEventType,
+  isServiceMatchingOrg
 } from '../types';
 import { 
   DEFAULT_EMAIL_SETTINGS, 
@@ -542,10 +543,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const scopedServices = useMemo(() => {
     if (!firebaseUser) return [];
     if (resolvedRole === 'super_admin') {
-      return effectiveOrgId === 'all' ? rawServices : rawServices.filter(s => s.orgId === effectiveOrgId);
+      return effectiveOrgId === 'all' ? rawServices : rawServices.filter(s => isServiceMatchingOrg(s, effectiveOrgId));
     }
     if (!effectiveOrgId) return [];
-    return rawServices.filter(s => s.orgId === effectiveOrgId);
+    return rawServices.filter(s => isServiceMatchingOrg(s, effectiveOrgId));
   }, [firebaseUser, resolvedRole, rawServices, effectiveOrgId]);
 
   const scopedProviders = useMemo(() => {

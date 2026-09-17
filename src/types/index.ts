@@ -41,6 +41,7 @@ export interface OrganizationMember {
 export interface ServiceCategory {
   id: string;
   orgId: string;
+  orgIds?: string[]; // Multi-company linkage support
   name: string;
   code: string;
   description: string;
@@ -49,6 +50,14 @@ export interface ServiceCategory {
   color: string;
   iconName: string;
 }
+
+export const isServiceMatchingOrg = (service: ServiceCategory, targetOrgId?: string): boolean => {
+  if (!targetOrgId || targetOrgId === 'all') return true;
+  if (service.orgIds && Array.isArray(service.orgIds) && service.orgIds.length > 0) {
+    return service.orgIds.includes(targetOrgId);
+  }
+  return service.orgId === targetOrgId;
+};
 
 export interface ServiceProvider {
   id: string;
