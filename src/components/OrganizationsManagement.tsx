@@ -101,7 +101,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
-  const canManageOrgs = isSuperAdmin || currentRole === 'data_entry';
+  const canManageOrgs = isSuperAdmin;
   const displayOrgs = canManageOrgs ? allOrganizations : organizations;
 
   // Active View Tab

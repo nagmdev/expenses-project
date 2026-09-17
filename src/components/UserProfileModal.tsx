@@ -165,6 +165,11 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onCl
                     موظف
                   </span>
                 )}
+                {currentRole === 'data_entry' && (
+                  <span className="text-[11px] bg-sky-400/20 text-sky-300 border border-sky-400/30 px-2 py-0.5 rounded-full font-bold">
+                    مدخل بيانات
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-300 font-mono mt-0.5 flex items-center gap-1">
                 <Mail className="h-3 w-3 text-slate-400" />

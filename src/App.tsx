@@ -256,8 +256,8 @@ const MainApp: React.FC = () => {
         onClose={() => setIsProfileModalOpen(false)}
       />
 
-      {/* Quick Add Org Modal (Super Admin & Data Entry) */}
-      {isQuickOrgModalOpen && (currentRole === 'super_admin' || currentRole === 'data_entry') && (
+      {/* Quick Add Org Modal (Super Admin Only) */}
+      {isQuickOrgModalOpen && currentRole === 'super_admin' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
