@@ -457,7 +457,33 @@ export const SettingsManagement: React.FC = () => {
 
               <div className="md:col-span-2">
                 <label className="block text-xs font-bold text-slate-700 mb-1">طريقة توجيه وتسليم البريد (Delivery Method):</label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {/* Option 1: Direct Serverless API (Recommended & Free) */}
+                  <label className={`flex items-start gap-3 p-3.5 rounded-xl border cursor-pointer transition ${
+                    formSettings.deliveryMethod === 'direct_api' || !formSettings.deliveryMethod
+                      ? 'border-emerald-500 bg-emerald-50/40 text-emerald-900 font-bold'
+                      : 'border-slate-200 hover:bg-slate-50 text-slate-700'
+                  }`}>
+                    <input 
+                      type="radio"
+                      name="deliveryMethod"
+                      value="direct_api"
+                      checked={formSettings.deliveryMethod === 'direct_api' || !formSettings.deliveryMethod}
+                      onChange={() => setFormSettings({ ...formSettings, deliveryMethod: 'direct_api' })}
+                      className="mt-1 text-emerald-600"
+                    />
+                    <div>
+                      <div className="text-xs font-bold flex items-center gap-1">
+                        <span>⚡ إرسال مباشر للإنبوكس (Vercel Serverless)</span>
+                        <span className="bg-emerald-600 text-white text-[9px] px-1.5 py-0.2 rounded-full">مجاني 100%</span>
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">
+                        يطير فوراً لصندوق البريد الحقيقي (Inbox) عبر Resend أو Brevo بدون الحاجة لترقية فايربيز أو كارت بنكي.
+                      </div>
+                    </div>
+                  </label>
+
+                  {/* Option 2: Firebase Trigger Email */}
                   <label className={`flex items-start gap-3 p-3.5 rounded-xl border cursor-pointer transition ${
                     formSettings.deliveryMethod === 'firestore_mail'
                       ? 'border-emerald-500 bg-emerald-50/40 text-emerald-900 font-bold'
@@ -472,13 +498,14 @@ export const SettingsManagement: React.FC = () => {
                       className="mt-1 text-emerald-600"
                     />
                     <div>
-                      <div className="text-xs font-bold">🔥 مجموعة `mail` في Firestore (Firebase Trigger Email)</div>
+                      <div className="text-xs font-bold">🔥 مجموعة `mail` في Firestore</div>
                       <div className="text-[11px] text-slate-500 mt-0.5">
-                        الحل الرسمي والأكثر أماناً في Firebase. يتم الحفظ بمجموعة `mail` وتتولى الإضافة الإرسال عبر أي SMTP.
+                        الحل عبر Firebase Extensions. يتطلب الترقية لخطة Blaze في فايربيز.
                       </div>
                     </div>
                   </label>
 
+                  {/* Option 3: Webhook */}
                   <label className={`flex items-start gap-3 p-3.5 rounded-xl border cursor-pointer transition ${
                     formSettings.deliveryMethod === 'webhook'
                       ? 'border-emerald-500 bg-emerald-50/40 text-emerald-900 font-bold'
@@ -493,14 +520,61 @@ export const SettingsManagement: React.FC = () => {
                       className="mt-1 text-emerald-600"
                     />
                     <div>
-                      <div className="text-xs font-bold">🌐 رابط ويب هوك مخصص (Custom Webhook / Zapier)</div>
+                      <div className="text-xs font-bold">🌐 رابط ويب هوك مخصص (Webhook)</div>
                       <div className="text-[11px] text-slate-500 mt-0.5">
-                        إرسال كائن JSON عبر POST إلى رابط خدمة بريد خارجية (Resend, SendGrid, Zapier, Webhook).
+                        إرسال كائن JSON عبر POST إلى رابط خارجي (Zapier / Make / n8n).
                       </div>
                     </div>
                   </label>
                 </div>
 
+                {/* Sub-settings for Direct Serverless API */}
+                {(formSettings.deliveryMethod === 'direct_api' || !formSettings.deliveryMethod) && (
+                  <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200/80 space-y-3 animate-in fade-in">
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                      <div className="sm:col-span-4">
+                        <label className="block text-xs font-bold text-slate-700 mb-1">المزود المجاني (Email Provider):</label>
+                        <select
+                          value={formSettings.directProvider || 'resend'}
+                          onChange={(e) => setFormSettings({ ...formSettings, directProvider: e.target.value as any })}
+                          className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 font-medium"
+                        >
+                          <option value="resend">Resend (3,000 إيميل مجاني شهرياً)</option>
+                          <option value="brevo">Brevo / Sendinblue (300 إيميل مجاني يومياً)</option>
+                        </select>
+                      </div>
+
+                      <div className="sm:col-span-8">
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          مفتاح الربط المجاني (API Key):
+                        </label>
+                        <input 
+                          type="password"
+                          value={formSettings.directApiKey || ''}
+                          onChange={(e) => setFormSettings({ ...formSettings, directApiKey: e.target.value })}
+                          placeholder={formSettings.directProvider === 'brevo' ? 'xkeysib-...' : 're_123456789...'}
+                          className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="p-3 bg-indigo-50/70 border border-indigo-200/60 rounded-xl text-[11px] text-indigo-900 leading-relaxed flex items-start gap-2">
+                      <div className="shrink-0 mt-0.5">💡</div>
+                      <div>
+                        <strong>كيف تحصل على المفتاح المجاني خلال 30 ثانية بدون أي كارت بنكي؟</strong>
+                        <div className="mt-1 text-indigo-800 space-y-0.5">
+                          1. افتح <a href="https://resend.com" target="_blank" rel="noreferrer" className="underline font-bold text-indigo-600">resend.com</a> وسجل دخول بحساب Google أو GitHub مجاناً.
+                          <br />
+                          2. انسخ مفتاح <strong>API Key</strong> والصقه هنا في الحقل بالأعلى واضغط <strong>حفظ</strong>.
+                          <br />
+                          3. فوراً ستصل كافة إشعارات الطلبات إلى الإنبوكس الحقيقي للموظفين والمديرين!
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Sub-settings for Webhook */}
                 {formSettings.deliveryMethod === 'webhook' && (
                   <div className="mt-3">
                     <label className="block text-xs font-bold text-slate-700 mb-1">رابط الـ Webhook (Endpoint URL):</label>

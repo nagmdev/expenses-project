@@ -16,7 +16,9 @@ export const DEFAULT_EMAIL_SETTINGS: EmailNotificationSettings = {
   notifyOnRejection: true,
   senderName: 'نظام مصروفي',
   replyToEmail: 'noreply@expenses-project.com',
-  deliveryMethod: 'firestore_mail',
+  deliveryMethod: 'direct_api',
+  directProvider: 'auto',
+  directApiKey: '',
   webhookUrl: '',
 };
 
@@ -292,7 +294,41 @@ export async function sendNotificationEmail(
     let errorMessage: string | undefined = undefined;
 
     try {
-      // 1. Primary Firestore Trigger Email collection
+      // 1. Direct Serverless API Delivery (Vercel + Resend/Brevo)
+      if (settings.deliveryMethod === 'direct_api' || !settings.deliveryMethod) {
+        try {
+          const apiRes = await fetch('/api/send-email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              to: recipient,
+              subject,
+              html,
+              text,
+              senderName: settings.senderName || 'نظام مصروفي',
+              replyTo: settings.replyToEmail,
+              provider: settings.directProvider || 'auto',
+              apiKey: settings.directApiKey || undefined,
+            }),
+          });
+          const apiData = await apiRes.json().catch(() => null);
+          if (apiRes.ok && apiData?.success) {
+            console.log('[EmailService] Email sent directly via /api/send-email:', apiData);
+            status = 'sent';
+          } else if (!apiRes.ok) {
+            console.warn('[EmailService] Direct API response:', apiRes.status, apiData);
+            if (apiData?.error === 'missing_api_key' || apiData?.error === 'no_provider_configured') {
+              errorMessage = apiData?.message;
+            } else if (apiData?.error) {
+              errorMessage = typeof apiData.error === 'string' ? apiData.error : JSON.stringify(apiData.error);
+            }
+          }
+        } catch (err: any) {
+          console.warn('[EmailService] Direct API fetch warning:', err);
+        }
+      }
+
+      // 2. Secondary Firestore Trigger Email collection (and archive)
       if (isFirebaseConfigured() && getDb()) {
         const mailDocId = `mail-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
         await setFirestoreDoc('mail', mailDocId, {
@@ -314,7 +350,7 @@ export async function sendNotificationEmail(
         });
       }
 
-      // 2. Custom Webhook if configured
+      // 3. Custom Webhook if configured
       if (settings.deliveryMethod === 'webhook' && settings.webhookUrl) {
         await fetch(settings.webhookUrl, {
           method: 'POST',

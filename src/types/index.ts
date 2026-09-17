@@ -251,8 +251,13 @@ export interface EmailNotificationSettings {
   notifyOnRejection: boolean;
   senderName: string;
   replyToEmail?: string;
-  deliveryMethod: 'firestore_mail' | 'webhook';
+  deliveryMethod: 'direct_api' | 'firestore_mail' | 'webhook';
+  directProvider?: 'resend' | 'brevo' | 'auto';
+  directApiKey?: string;
   webhookUrl?: string;
+  emailJsServiceId?: string;
+  emailJsTemplateId?: string;
+  emailJsPublicKey?: string;
 }
 
 export interface EmailLogEntry {

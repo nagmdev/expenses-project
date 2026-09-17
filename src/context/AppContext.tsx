@@ -2586,6 +2586,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (logs.length > 0) {
         setEmailLogs(prev => [...logs, ...prev].slice(0, 500));
+        const firstLog = logs[0];
+        if (firstLog.status === 'failed') {
+          return {
+            success: false,
+            message: firstLog.errorMessage || 'تعذر إرسال البريد التجريبي. يرجى التحقق من إعدادات ومفتاح مزود البريد.',
+          };
+        }
       }
 
       return { success: true, message: `تم إرسال البريد التجريبي إلى (${recipientEmail}) بنجاح!` };
