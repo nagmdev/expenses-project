@@ -250,6 +250,7 @@ export interface EmailNotificationSettings {
   notifyOnClarification: boolean;
   notifyOnRejection: boolean;
   senderName: string;
+  senderEmail?: string;
   replyToEmail?: string;
   deliveryMethod: 'direct_api' | 'firestore_mail' | 'webhook';
   directProvider?: 'resend' | 'brevo' | 'auto';

@@ -43,7 +43,8 @@ export default async function handler(req: any, res: any) {
       html,
       text,
       senderName = 'مصروفي',
-      replyTo,
+      senderEmail = 'awadhsaudi2030@gmail.com',
+      replyTo = 'awadhsaudi2030@gmail.com',
       provider = 'auto',
       apiKey,
     } = parsedBody;
@@ -99,8 +100,10 @@ export default async function handler(req: any, res: any) {
         });
       }
 
-      // Resend allows free testing from 'onboarding@resend.dev' to registered email or verified domain
-      const fromAddress = `${senderName} <onboarding@resend.dev>`;
+      // Resend: Show official identity awadhsaudi2030@gmail.com and route replies directly to it
+      const effectiveSender = senderEmail || 'awadhsaudi2030@gmail.com';
+      const effectiveReplyTo = replyTo || effectiveSender;
+      const fromAddress = `${senderName} (${effectiveSender}) <onboarding@resend.dev>`;
 
       const resendRes = await fetch('https://api.resend.com/emails', {
         method: 'POST',
@@ -114,7 +117,7 @@ export default async function handler(req: any, res: any) {
           subject,
           html,
           text: text || undefined,
-          reply_to: replyTo || undefined,
+          reply_to: effectiveReplyTo,
         }),
       });
 
@@ -154,6 +157,9 @@ export default async function handler(req: any, res: any) {
         });
       }
 
+      const effectiveSender = senderEmail || 'awadhsaudi2030@gmail.com';
+      const effectiveReplyTo = replyTo || effectiveSender;
+
       const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
         method: 'POST',
         headers: {
@@ -162,12 +168,12 @@ export default async function handler(req: any, res: any) {
           Accept: 'application/json',
         },
         body: JSON.stringify({
-          sender: { name: senderName, email: replyTo || 'notifications@expenses-project.com' },
+          sender: { name: senderName, email: effectiveSender },
           to: recipients.map((r: string) => ({ email: r })),
           subject,
           htmlContent: html,
           textContent: text || undefined,
-          replyTo: replyTo ? { email: replyTo } : undefined,
+          replyTo: { email: effectiveReplyTo },
         }),
       });
 

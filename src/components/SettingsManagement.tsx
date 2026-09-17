@@ -432,7 +432,7 @@ export const SettingsManagement: React.FC = () => {
             </div>
 
             {/* Delivery Methods & Sender Details */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-3 border-t border-slate-100">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-3 border-t border-slate-100">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">اسم المرسل (Sender Name):</label>
                 <input 
@@ -445,14 +445,37 @@ export const SettingsManagement: React.FC = () => {
               </div>
 
               <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">البريد المعتمد للإرسال (Sender Email):</label>
+                <input 
+                  type="email"
+                  value={formSettings.senderEmail || 'awadhsaudi2030@gmail.com'}
+                  onChange={(e) => setFormSettings({ ...formSettings, senderEmail: e.target.value })}
+                  placeholder="awadhsaudi2030@gmail.com"
+                  className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 bg-emerald-50/20 font-medium"
+                />
+              </div>
+
+              <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">بريد الرد (Reply-To Email):</label>
                 <input 
                   type="email"
-                  value={formSettings.replyToEmail || ''}
+                  value={formSettings.replyToEmail || 'awadhsaudi2030@gmail.com'}
                   onChange={(e) => setFormSettings({ ...formSettings, replyToEmail: e.target.value })}
-                  placeholder="noreply@yourcompany.com"
+                  placeholder="awadhsaudi2030@gmail.com"
                   className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
                 />
+              </div>
+
+              {/* Verified Sender Notice Badge */}
+              <div className="md:col-span-3 bg-emerald-50/80 border border-emerald-200/80 rounded-xl p-3 flex items-center gap-3">
+                <div className="h-7 w-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                  <Mail className="h-4 w-4" />
+                </div>
+                <div className="text-xs text-emerald-950">
+                  <span className="font-bold">البريد الإلكتروني المعتمد لكافة إشعارات النظام: </span>
+                  <span className="font-mono bg-white px-2 py-0.5 rounded-md border border-emerald-200 text-emerald-800 font-bold ml-1">awadhsaudi2030@gmail.com</span>
+                  <span className="text-slate-600 mr-2">- تصدر كافة رسائل الاعتماد والصرف وتستقبل الردود مباشرة عبر هذا العنوان.</span>
+                </div>
               </div>
 
               <div className="md:col-span-2">
