@@ -1,8 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
   X, 
-  CreditCard 
+  CreditCard,
+  Building2,
+  AlertCircle,
+  Layers,
+  Building
 } from 'lucide-react';
 import { PaymentMethod, SUPPORTED_CURRENCIES } from '../types';
 import { 
@@ -17,26 +21,6 @@ interface NewRequestModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
-
-const DEFAULT_SERVICE_OPTIONS = [
-  'اشتراكات وتراخيص برمجيات وسحابية (SaaS & Cloud)',
-  'أجهزة إلكترونية وتجهيزات مكتبية وتقنية',
-  'بدلات سفر وانتقالات ومهمات عمل رسمية',
-  'حملات تسويق ودعاية وإعلانات ممولة',
-  'صيانة ومرافق وضيافة ومصروفات تشغيلية',
-  'استشارات قانونية ومهنية ورسوم حكومية',
-  'بند خدمة مخصص آخر...',
-];
-
-const DEFAULT_PROVIDER_OPTIONS = [
-  'شركة اتصالات وإنترنت (فودافون / اتصالات / أورانج)',
-  'أمازون للتجارة والتوريدات (Amazon)',
-  'مكتبة سمير وعلي / جرير (مستلزمات وأدوات)',
-  'شركة مايكروسوفت (Microsoft)',
-  'شركة جوجل السحابية (Google Cloud)',
-  'خدمات تنقل ومواصلات (أوبر / كريم / تاكسي)',
-  'مورد / جهة خارجية مخصصة أخرى...',
-];
 
 const TITLE_TEMPLATES = [
   'شراء تراخيص برمجيات واشتراكات سحابية',
@@ -73,35 +57,80 @@ const DESCRIPTION_TEMPLATES = [
 export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClose }) => {
   const { 
     organizations,
+    allOrganizations,
     services, 
+    allServices,
     providers, 
+    allProviders,
     activeOrg, 
     activeOrgId, 
     createRequest, 
-    addService,
-    addProvider,
-    currentUser 
+    currentUser,
+    currentRole
   } = useApp();
 
-  const orgServices = activeOrgId && activeOrgId !== 'all' ? services.filter(s => s.orgId === activeOrgId) : services;
-  const orgProviders = activeOrgId && activeOrgId !== 'all' ? providers.filter(p => p.orgId === activeOrgId) : providers;
+  const isSuperAdmin = currentRole === 'super_admin';
+  const orgList = isSuperAdmin ? (allOrganizations?.length ? allOrganizations : organizations) : organizations;
+
+  // Selected target organization
+  const [selectedOrgId, setSelectedOrgId] = useState<string>(() => {
+    if (activeOrgId && activeOrgId !== 'all') return activeOrgId;
+    if (currentUser?.orgId) return currentUser.orgId;
+    return orgList[0]?.id || '';
+  });
+
+  useEffect(() => {
+    if (activeOrgId && activeOrgId !== 'all') {
+      setSelectedOrgId(activeOrgId);
+    } else if (!selectedOrgId && orgList.length > 0) {
+      setSelectedOrgId(currentUser?.orgId || orgList[0].id);
+    }
+  }, [activeOrgId, orgList, currentUser]);
+
+  const currentOrg = orgList.find(o => o.id === selectedOrgId) || activeOrg;
+
+  // Real, Approved Services and Providers strictly linked to this organization
+  const sourceServices = isSuperAdmin ? (allServices?.length ? allServices : services) : services;
+  const sourceProviders = isSuperAdmin ? (allProviders?.length ? allProviders : providers) : providers;
+
+  const availableServices = useMemo(() => {
+    if (!selectedOrgId) return [];
+    return sourceServices.filter(s => s.orgId === selectedOrgId);
+  }, [sourceServices, selectedOrgId]);
+
+  const availableProviders = useMemo(() => {
+    if (!selectedOrgId) return [];
+    return sourceProviders.filter(p => p.orgId === selectedOrgId);
+  }, [sourceProviders, selectedOrgId]);
+
+  // Selected Service & Provider IDs
+  const [selectedServiceId, setSelectedServiceId] = useState<string>('');
+  const [selectedProviderId, setSelectedProviderId] = useState<string>('');
+
+  useEffect(() => {
+    if (availableServices.length > 0) {
+      if (!availableServices.some(s => s.id === selectedServiceId)) {
+        setSelectedServiceId(availableServices[0].id);
+      }
+    } else {
+      setSelectedServiceId('');
+    }
+  }, [availableServices, selectedServiceId]);
+
+  useEffect(() => {
+    if (availableProviders.length > 0) {
+      if (!availableProviders.some(p => p.id === selectedProviderId)) {
+        setSelectedProviderId(availableProviders[0].id);
+      }
+    } else {
+      setSelectedProviderId('');
+    }
+  }, [availableProviders, selectedProviderId]);
 
   // Title State (Dropdown or Custom)
   const [isCustomTitle, setIsCustomTitle] = useState(false);
   const [selectedTitlePreset, setSelectedTitlePreset] = useState(TITLE_TEMPLATES[0]);
   const [customTitle, setCustomTitle] = useState('');
-
-  // Service State (Dropdown + custom text)
-  const [selectedServicePreset, setSelectedServicePreset] = useState<string>(
-    orgServices[0]?.id || DEFAULT_SERVICE_OPTIONS[0]
-  );
-  const [customServiceName, setCustomServiceName] = useState('');
-
-  // Provider State (Dropdown + custom text)
-  const [selectedProviderPreset, setSelectedProviderPreset] = useState<string>(
-    orgProviders[0]?.id || DEFAULT_PROVIDER_OPTIONS[0]
-  );
-  const [customProviderName, setCustomProviderName] = useState('');
 
   // Description & Justification (Dropdown or Custom)
   const [isCustomJustification, setIsCustomJustification] = useState(false);
@@ -113,34 +142,19 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [customDescription, setCustomDescription] = useState('');
 
   const [amount, setAmount] = useState('');
-  const [currency, setCurrency] = useState(activeOrg?.currency || 'EGP');
+  const [currency, setCurrency] = useState(currentOrg?.currency || activeOrg?.currency || 'EGP');
   const [urgency, setUrgency] = useState<'low' | 'medium' | 'high'>('medium');
   const [preferredPaymentMethod, setPreferredPaymentMethod] = useState<PaymentMethod>('instapay');
   const [paymentAccountDetails, setPaymentAccountDetails] = useState(currentUser.phone || '');
   const [submitting, setSubmitting] = useState(false);
 
-  // Sync default selection when services or providers load
-  React.useEffect(() => {
-    if (orgServices.length > 0 && !services.some(s => s.id === selectedServicePreset)) {
-      setSelectedServicePreset(orgServices[0].id);
+  useEffect(() => {
+    if (currentOrg?.currency) {
+      setCurrency(currentOrg.currency);
     }
-  }, [orgServices]);
-
-  React.useEffect(() => {
-    if (orgProviders.length > 0 && !providers.some(p => p.id === selectedProviderPreset)) {
-      setSelectedProviderPreset(orgProviders[0].id);
-    }
-  }, [orgProviders]);
-
-  React.useEffect(() => {
-    if (activeOrg?.currency) {
-      setCurrency(activeOrg.currency);
-    }
-  }, [activeOrg]);
+  }, [currentOrg]);
 
   if (!isOpen) return null;
-
-  const currentEffectiveOrgId = activeOrgId && activeOrgId !== 'all' ? activeOrgId : (organizations[0]?.id || '');
 
   // Computed Values - Never duplicate controls
   const effectiveTitle = isCustomTitle 
@@ -155,9 +169,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     ? customDescription 
     : (selectedDescPreset === '✏️ كتابة تفاصيل ومواصفات مخصصة...' ? customDescription : selectedDescPreset);
 
-  const isCustomService = selectedServicePreset === 'بند خدمة مخصص آخر...';
-  const isCustomProvider = selectedProviderPreset === 'مورد / جهة خارجية مخصصة أخرى...';
-
   const handleClose = () => {
     setIsCustomTitle(false);
     setIsCustomJustification(false);
@@ -165,6 +176,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setCustomTitle('');
     setCustomJustification('');
     setCustomDescription('');
+    setAmount('');
     onClose();
   };
 
@@ -172,78 +184,35 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     e.preventDefault();
     if (!effectiveTitle.trim() || !amount || Number(amount) <= 0 || submitting) return;
 
+    const selectedService = availableServices.find(s => s.id === selectedServiceId);
+    const selectedProvider = availableProviders.find(p => p.id === selectedProviderId);
+
+    if (!selectedService) {
+      alert('يرجى اختيار بند خدمة معتمد ومسجل لدى المؤسسة للمتابعة.');
+      return;
+    }
+    if (!selectedProvider) {
+      alert('يرجى اختيار مورد معتمد ومسجل لدى المؤسسة للمتابعة.');
+      return;
+    }
+
     setSubmitting(true);
     try {
-      let finalServiceId = '';
-      let serviceName = '';
-
-      const matchedExistingService = orgServices.find(s => s.id === selectedServicePreset || s.name === selectedServicePreset);
-      if (matchedExistingService) {
-        finalServiceId = matchedExistingService.id;
-        serviceName = matchedExistingService.name;
-      } else if (isCustomService && customServiceName.trim()) {
-        serviceName = customServiceName.trim();
-        const newSrvId = `srv-${Date.now()}`;
-        await addService({
-          orgId: currentEffectiveOrgId,
-          name: serviceName,
-          code: `SRV-${Date.now().toString().slice(-4)}`,
-          description: 'بند خدمة مضاف مع الطلب',
-          budgetLimit: 50000,
-          color: 'emerald',
-          iconName: 'folder',
-        });
-        finalServiceId = newSrvId;
-      } else {
-        finalServiceId = orgServices[0]?.id || 'srv-default';
-        serviceName = selectedServicePreset;
-      }
-
-      let finalProviderId = '';
-      let providerName = '';
-
-      const matchedExistingProvider = orgProviders.find(p => p.id === selectedProviderPreset || p.name === selectedProviderPreset);
-      if (matchedExistingProvider) {
-        finalProviderId = matchedExistingProvider.id;
-        providerName = matchedExistingProvider.name;
-      } else if (isCustomProvider && customProviderName.trim()) {
-        providerName = customProviderName.trim();
-        const newProvId = `prov-${Date.now()}`;
-        await addProvider({
-          orgId: currentEffectiveOrgId,
-          name: providerName,
-          serviceCategoryIds: finalServiceId ? [finalServiceId] : [],
-          serviceCategoryNames: serviceName ? [serviceName] : [],
-          contactPerson: 'مسؤول المبيعات',
-          phone: currentUser.phone || '+20 100 000 0000',
-          email: 'vendor@company.local',
-          taxNumber: '300000000',
-          crNumber: '101000000',
-          bankName: 'المصرف الرئيسي',
-          iban: 'EG0000000000000000000000000',
-          address: 'جمهورية مصر العربية',
-          rating: 5,
-          active: true,
-        });
-        finalProviderId = newProvId;
-      } else {
-        finalProviderId = orgProviders[0]?.id || 'prov-default';
-        providerName = selectedProviderPreset;
-      }
-
       await createRequest({
         title: effectiveTitle.trim(),
         description: effectiveDescription.trim(),
         justification: effectiveJustification.trim(),
         amount: Number(amount),
-        currency: currency || activeOrg?.currency || 'EGP',
-        serviceCategoryId: finalServiceId || 'srv-default',
-        providerId: finalProviderId || 'prov-default',
+        currency: currency || currentOrg?.currency || 'EGP',
+        serviceCategoryId: selectedService.id,
+        serviceCategoryName: selectedService.name,
+        providerId: selectedProvider.id,
+        providerName: selectedProvider.name,
         urgency,
         attachmentNames: [],
         preferredPaymentMethod,
         paymentAccountDetails: paymentAccountDetails.trim(),
-        orgId: currentEffectiveOrgId || undefined,
+        orgId: selectedOrgId,
       });
 
       handleClose();
@@ -283,6 +252,45 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           {/* Scrollable Form Body */}
           <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
           
+            {/* Organization Selector / Scope Badge */}
+            {isSuperAdmin && (!activeOrgId || activeOrgId === 'all') ? (
+              <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                    <Building2 className="h-4 w-4 text-emerald-600" />
+                    المؤسسة / الشركة المستهدفة بالطلب *
+                  </label>
+                  <span className="text-[10px] text-emerald-700 bg-emerald-100/70 font-bold px-2 py-0.5 rounded-full">
+                    تحديد بصلاحية مدير النظام
+                  </span>
+                </div>
+                <select
+                  value={selectedOrgId}
+                  onChange={(e) => setSelectedOrgId(e.target.value)}
+                  className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 font-bold text-slate-900 text-xs"
+                >
+                  {orgList.map((org) => (
+                    <option key={org.id} value={org.id}>
+                      {org.name} ({org.code}) - العملة: {org.currency}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200/80 rounded-2xl text-xs">
+                <div className="flex items-center gap-2">
+                  <Building2 className="h-4 w-4 text-emerald-600" />
+                  <span className="text-slate-600 font-semibold">المؤسسة التابع لها الطلب:</span>
+                  <span className="font-bold text-slate-900">{currentOrg?.name || 'المؤسسة المعتمدة'}</span>
+                </div>
+                {currentOrg?.code && (
+                  <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-lg font-black text-[11px]">
+                    {currentOrg.code}
+                  </span>
+                )}
+              </div>
+            )}
+
             {/* 1. Title Selection (Single clean control, zero duplicate inputs) */}
             <div>
               <div className="flex items-center justify-between mb-1.5">
@@ -331,82 +339,87 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               )}
             </div>
 
-            {/* 2. Service & Provider Dropdowns */}
+            {/* 2. Service & Provider Dropdowns (Strictly real approved company records) */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* Service Category Dropdown */}
               <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  بند الخدمة / مركز التكلفة *
-                </label>
-                <select
-                  required
-                  value={selectedServicePreset}
-                  onChange={(e) => setSelectedServicePreset(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-semibold text-slate-900"
-                >
-                  {orgServices.length > 0 && (
-                    <optgroup label="بنود المؤسسة المعتمدة">
-                      {orgServices.map((s) => (
-                        <option key={s.id} value={s.id}>{s.name}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                  <optgroup label="البنود القياسية الجاهزة">
-                    {DEFAULT_SERVICE_OPTIONS.map((opt) => (
-                      <option key={opt} value={opt}>{opt}</option>
-                    ))}
-                  </optgroup>
-                </select>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="font-bold text-slate-700 flex items-center gap-1">
+                    <Layers className="h-3.5 w-3.5 text-emerald-600" />
+                    <span>بند الخدمة / مركز التكلفة *</span>
+                  </label>
+                  <span className="text-[10px] text-slate-400 font-bold">
+                    ({availableServices.length} بند معتمد)
+                  </span>
+                </div>
 
-                {isCustomService && (
-                  <input
-                    type="text"
+                {availableServices.length > 0 ? (
+                  <select
                     required
-                    value={customServiceName}
-                    onChange={(e) => setCustomServiceName(e.target.value)}
-                    placeholder="اكتب اسم البند المخصص..."
-                    className="w-full mt-2 p-2 bg-white border border-emerald-300 rounded-xl text-slate-900"
-                  />
+                    value={selectedServiceId}
+                    onChange={(e) => setSelectedServiceId(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 font-bold text-slate-900 text-xs"
+                  >
+                    {availableServices.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} {s.code ? `(${s.code})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-[11px] font-semibold flex items-center gap-1.5">
+                    <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
+                    <span>لا توجد بنود خدمة معتمدة لهذه المؤسسة حتى الآن.</span>
+                  </div>
                 )}
               </div>
 
               {/* Provider Dropdown */}
               <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  مقدم الخدمة / المورد *
-                </label>
-                <select
-                  required
-                  value={selectedProviderPreset}
-                  onChange={(e) => setSelectedProviderPreset(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-semibold text-slate-900"
-                >
-                  {orgProviders.length > 0 && (
-                    <optgroup label="موردي ومقدمي خدمات المؤسسة">
-                      {orgProviders.map((p) => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                  <optgroup label="الموردين والجهات المعتمدة الشائعة">
-                    {DEFAULT_PROVIDER_OPTIONS.map((opt) => (
-                      <option key={opt} value={opt}>{opt}</option>
-                    ))}
-                  </optgroup>
-                </select>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="font-bold text-slate-700 flex items-center gap-1">
+                    <Building className="h-3.5 w-3.5 text-emerald-600" />
+                    <span>مقدم الخدمة / المورد *</span>
+                  </label>
+                  <span className="text-[10px] text-slate-400 font-bold">
+                    ({availableProviders.length} مورد معتمد)
+                  </span>
+                </div>
 
-                {isCustomProvider && (
-                  <input
-                    type="text"
+                {availableProviders.length > 0 ? (
+                  <select
                     required
-                    value={customProviderName}
-                    onChange={(e) => setCustomProviderName(e.target.value)}
-                    placeholder="اكتب اسم المورد المخصص..."
-                    className="w-full mt-2 p-2 bg-white border border-emerald-300 rounded-xl text-slate-900"
-                  />
+                    value={selectedProviderId}
+                    onChange={(e) => setSelectedProviderId(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 font-bold text-slate-900 text-xs"
+                  >
+                    {availableProviders.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} {p.contactPerson ? `(مسؤول: ${p.contactPerson})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-[11px] font-semibold flex items-center gap-1.5">
+                    <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
+                    <span>لا يوجد موردون معتمدون مسجلون لهذه المؤسسة.</span>
+                  </div>
                 )}
               </div>
             </div>
+
+            {/* Warning if company has no services or providers */}
+            {(availableServices.length === 0 || availableProviders.length === 0) && (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-2 text-amber-900 text-xs animate-in fade-in">
+                <AlertCircle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+                <div>
+                  <span className="font-bold">تنبيه الحوكمة المالية: </span>
+                  <span>
+                    يجب أن تحتوي الشركة على بنود صرف وموردين معتمدين مسبقاً مسجلين من قبل مدير النظام (Admin) قبل تقديم الطلب. بصفتك موظفاً، لا يمكنك إنشاء بنود أو موردين مباشرة من نموذج الطلب؛ يرجى التواصل مع مدير النظام لاعتمادها أولاً.
+                  </span>
+                </div>
+              </div>
+            )}
 
             {/* 3. Amount, Currency & Urgency */}
             <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
@@ -634,8 +647,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
             </button>
             <button
               type="submit"
-              disabled={submitting}
-              className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 flex items-center gap-2"
+              disabled={submitting || availableServices.length === 0 || availableProviders.length === 0 || !effectiveTitle.trim() || !amount || Number(amount) <= 0}
+              className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {submitting ? 'جاري الإرسال...' : 'إرسال الطلب للاعتماد'}
             </button>

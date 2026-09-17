@@ -238,7 +238,6 @@ interface AppContextType {
   updateProvider: (provider: ServiceProvider) => Promise<void>;
   deleteProvider: (providerId: string) => Promise<void>;
   
-  // Expense Requests & Workflow
   createRequest: (data: {
     title: string;
     description: string;
@@ -246,7 +245,9 @@ interface AppContextType {
     amount: number;
     currency: string;
     serviceCategoryId: string;
+    serviceCategoryName?: string;
     providerId: string;
+    providerName?: string;
     urgency: 'low' | 'medium' | 'high';
     attachmentNames?: string[];
     preferredPaymentMethod?: PaymentMethod;
@@ -2210,7 +2211,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     amount: number;
     currency: string;
     serviceCategoryId: string;
+    serviceCategoryName?: string;
     providerId: string;
+    providerName?: string;
     urgency: 'low' | 'medium' | 'high';
     attachmentNames?: string[];
     preferredPaymentMethod?: PaymentMethod;
@@ -2275,9 +2278,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       preferredPaymentMethod: data.preferredPaymentMethod || 'instapay',
       paymentAccountDetails: data.paymentAccountDetails || '',
       serviceCategoryId: data.serviceCategoryId,
-      serviceCategoryName: service?.name || 'خدمة عامة',
+      serviceCategoryName: service?.name || data.serviceCategoryName || 'خدمة عامة',
       providerId: data.providerId,
-      providerName: provider?.name || 'مورد عام',
+      providerName: provider?.name || data.providerName || 'مورد عام',
       title: data.title,
       description: data.description,
       justification: data.justification,
