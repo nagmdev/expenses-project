@@ -220,6 +220,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [vendorIban, setVendorIban] = useState('');
   const [vendorAddress, setVendorAddress] = useState('');
   const [vendorOrgId, setVendorOrgId] = useState(activeOrgId || displayOrgs[0]?.id || '');
+  const [vendorServiceIds, setVendorServiceIds] = useState<string[]>([]);
   const [deletingVendor, setDeletingVendor] = useState<ServiceProvider | null>(null);
   const [vendorSearch, setVendorSearch] = useState('');
 
@@ -475,7 +476,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setServiceDescription('');
     setServiceBudget('50000');
     setServiceColor('#10b981');
-    setServiceOrgId(activeOrgId || displayOrgs[0]?.id || '');
+    const defaultOrg = (selectedOrgFilter && selectedOrgFilter !== 'all')
+      ? selectedOrgFilter
+      : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (displayOrgs[0]?.id || ''));
+    setServiceOrgId(defaultOrg);
     setIsServiceModalOpen(true);
   };
 
@@ -486,13 +490,15 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setServiceDescription(srv.description || '');
     setServiceBudget(srv.budgetLimit.toString());
     setServiceColor(srv.color || '#10b981');
-    setServiceOrgId(srv.orgId);
+    setServiceOrgId(srv.orgId || displayOrgs[0]?.id || '');
     setIsServiceModalOpen(true);
   };
 
   const handleSaveService = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!serviceName.trim()) return;
+
+    const targetOrgId = serviceOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || displayOrgs[0]?.id || '';
 
     if (editingService) {
       await updateService({
@@ -502,7 +508,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         description: serviceDescription.trim(),
         budgetLimit: Number(serviceBudget) || 0,
         color: serviceColor,
-        orgId: serviceOrgId || editingService.orgId,
+        orgId: targetOrgId,
       });
     } else {
       await addService({
@@ -512,7 +518,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         budgetLimit: Number(serviceBudget) || 0,
         color: serviceColor,
         iconName: 'Layers',
-        orgId: serviceOrgId || activeOrgId || displayOrgs[0]?.id || '',
+        orgId: targetOrgId,
       });
     }
     setIsServiceModalOpen(false);
@@ -538,7 +544,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setVendorBankName('البنك التجاري الدولي (CIB)');
     setVendorIban('');
     setVendorAddress('');
-    setVendorOrgId(activeOrgId || displayOrgs[0]?.id || '');
+    const defaultOrg = (selectedOrgFilter && selectedOrgFilter !== 'all')
+      ? selectedOrgFilter
+      : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (displayOrgs[0]?.id || ''));
+    setVendorOrgId(defaultOrg);
+    setVendorServiceIds([]);
     setIsVendorModalOpen(true);
   };
 
@@ -553,13 +563,20 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setVendorBankName(prov.bankName || '');
     setVendorIban(prov.iban || '');
     setVendorAddress(prov.address || '');
-    setVendorOrgId(prov.orgId);
+    setVendorOrgId(prov.orgId || displayOrgs[0]?.id || '');
+    setVendorServiceIds(prov.serviceCategoryIds || []);
     setIsVendorModalOpen(true);
   };
 
   const handleSaveVendor = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!vendorName.trim()) return;
+
+    const targetOrgId = vendorOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || displayOrgs[0]?.id || '';
+    const availableCompanyServices = targetServices.filter(s => s.orgId === targetOrgId);
+    const matchedServiceNames = availableCompanyServices
+      .filter(s => vendorServiceIds.includes(s.id))
+      .map(s => s.name);
 
     if (editingVendor) {
       await updateProvider({
@@ -573,7 +590,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         bankName: vendorBankName.trim(),
         iban: vendorIban.trim().toUpperCase(),
         address: vendorAddress.trim(),
-        orgId: vendorOrgId || editingVendor.orgId,
+        orgId: targetOrgId,
+        serviceCategoryIds: vendorServiceIds,
+        serviceCategoryNames: matchedServiceNames,
       });
     } else {
       await addProvider({
@@ -586,9 +605,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         bankName: vendorBankName.trim(),
         iban: vendorIban.trim().toUpperCase(),
         address: vendorAddress.trim(),
-        orgId: vendorOrgId || activeOrgId || displayOrgs[0]?.id || '',
-        serviceCategoryIds: [],
-        serviceCategoryNames: [],
+        orgId: targetOrgId,
+        serviceCategoryIds: vendorServiceIds,
+        serviceCategoryNames: matchedServiceNames,
         rating: 5,
         active: true,
       });
@@ -1564,51 +1583,62 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
               const spent = srv.spentAmount || 0;
               const limit = srv.budgetLimit || 1;
               const percent = Math.min(100, Math.round((spent / limit) * 100));
+              const parentOrg = displayOrgs.find(o => o.id === srv.orgId);
 
               return (
-                <div key={srv.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <div 
-                        className="h-9 w-9 rounded-xl flex items-center justify-center text-white text-xs font-bold shadow-xs"
-                        style={{ backgroundColor: srv.color || '#10b981' }}
-                      >
-                        <Layers className="h-4 w-4" />
+                <div key={srv.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <div 
+                          className="h-9 w-9 rounded-xl flex items-center justify-center text-white text-xs font-bold shadow-xs"
+                          style={{ backgroundColor: srv.color || '#10b981' }}
+                        >
+                          <Layers className="h-4 w-4" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-slate-900 text-xs">{srv.name}</h4>
+                          <span className="text-[10px] text-slate-400 font-mono block">كود: {srv.code}</span>
+                        </div>
                       </div>
-                      <div>
-                        <h4 className="font-bold text-slate-900 text-xs">{srv.name}</h4>
-                        <span className="text-[10px] text-slate-400 font-mono block">كود: {srv.code}</span>
+
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleStartEditService(srv)}
+                          className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                          title="تعديل وإعادة تسمية البند"
+                        >
+                          <Edit className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeletingService(srv)}
+                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                          title="حذف البند"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => handleStartEditService(srv)}
-                        className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
-                        title="تعديل وإعادة تسمية البند"
-                      >
-                        <Edit className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setDeletingService(srv)}
-                        className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                        title="حذف البند"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                    {/* Company connection badge */}
+                    <div className="mt-2 flex items-center gap-1.5">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200/80">
+                        <Building2 className="h-3 w-3 text-teal-600" />
+                        <span>{parentOrg ? parentOrg.name : 'شركة غير محددة'}</span>
+                      </span>
                     </div>
+
+                    <p className="text-[11px] text-slate-500 mt-2 line-clamp-2">
+                      {srv.description || 'بند ومصروف معتمد للشركة.'}
+                    </p>
                   </div>
-
-                  <p className="text-[11px] text-slate-500 mt-2 line-clamp-2">
-                    {srv.description || 'بند ومصروف معتمد للشركة.'}
-                  </p>
 
                   <div className="mt-3 pt-3 border-t border-slate-100">
                     <div className="flex items-center justify-between text-[11px] mb-1">
                       <span className="text-slate-400">سقف الميزانية:</span>
-                      <span className="font-bold font-mono text-slate-800">{srv.budgetLimit.toLocaleString()} ج.م</span>
+                      <span className="font-bold font-mono text-slate-800">{srv.budgetLimit.toLocaleString()} {parentOrg?.currency || 'ج.م'}</span>
                     </div>
                     <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
                       <div className="h-full bg-teal-500 rounded-full" style={{ width: `${percent}%` }}></div>
@@ -1658,46 +1688,64 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredVendors.map((prov) => (
-              <div key={prov.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex items-center gap-2.5">
-                    <div className="h-9 w-9 rounded-xl bg-sky-50 text-sky-700 flex items-center justify-center text-xs font-bold">
-                      <Truck className="h-4 w-4" />
+            {filteredVendors.map((prov) => {
+              const parentOrg = displayOrgs.find(o => o.id === prov.orgId);
+              return (
+                <div key={prov.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-9 w-9 rounded-xl bg-sky-50 text-sky-700 flex items-center justify-center text-xs font-bold">
+                          <Truck className="h-4 w-4" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-slate-900 text-xs">{prov.name}</h4>
+                          <span className="text-[10px] text-slate-500 block">المسؤول: {prov.contactPerson || '-'}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleStartEditVendor(prov)}
+                          className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                          title="تعديل وتسمية المورد"
+                        >
+                          <Edit className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeletingVendor(prov)}
+                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                          title="حذف المورد"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     </div>
-                    <div>
-                      <h4 className="font-bold text-slate-900 text-xs">{prov.name}</h4>
-                      <span className="text-[10px] text-slate-500 block">المسؤول: {prov.contactPerson || '-'}</span>
+
+                    {/* Company connection and service categories badges */}
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-sky-50 text-sky-800 border border-sky-200/80">
+                        <Building2 className="h-3 w-3 text-sky-600" />
+                        <span>{parentOrg ? parentOrg.name : 'شركة غير محددة'}</span>
+                      </span>
+                      {prov.serviceCategoryNames && prov.serviceCategoryNames.map((cat, idx) => (
+                        <span key={idx} className="text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200">
+                          {cat}
+                        </span>
+                      ))}
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => handleStartEditVendor(prov)}
-                      className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
-                      title="تعديل وتسمية المورد"
-                    >
-                      <Edit className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setDeletingVendor(prov)}
-                      className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                      title="حذف المورد"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                  <div className="mt-3 pt-3 border-t border-slate-100 space-y-1 text-[11px] text-slate-600">
+                    {prov.phone && <div className="flex items-center gap-1.5"><Phone className="h-3 w-3 text-slate-400" /><span className="font-mono">{prov.phone}</span></div>}
+                    {prov.bankName && <div className="flex items-center gap-1.5"><Landmark className="h-3 w-3 text-slate-400" /><span>{prov.bankName}</span></div>}
+                    {prov.iban && <div className="flex items-center gap-1.5"><CreditCard className="h-3 w-3 text-slate-400" /><span className="font-mono truncate">{prov.iban}</span></div>}
                   </div>
                 </div>
-
-                <div className="mt-3 pt-3 border-t border-slate-100 space-y-1 text-[11px] text-slate-600">
-                  {prov.phone && <div className="flex items-center gap-1.5"><Phone className="h-3 w-3 text-slate-400" /><span className="font-mono">{prov.phone}</span></div>}
-                  {prov.bankName && <div className="flex items-center gap-1.5"><Landmark className="h-3 w-3 text-slate-400" /><span>{prov.bankName}</span></div>}
-                  {prov.iban && <div className="flex items-center gap-1.5"><CreditCard className="h-3 w-3 text-slate-400" /><span className="font-mono truncate">{prov.iban}</span></div>}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -2705,6 +2753,24 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
             <form onSubmit={handleSaveService} className="mt-4 space-y-3 text-xs">
               <div>
+                <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+                  <Building2 className="h-3.5 w-3.5 text-teal-600" />
+                  <span>الشركة / المؤسسة التابع لها البند *</span>
+                </label>
+                <select
+                  required
+                  value={serviceOrgId}
+                  onChange={(e) => setServiceOrgId(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 font-semibold outline-hidden focus:border-teal-500 focus:bg-white"
+                >
+                  <option value="" disabled>-- اختر الشركة التابع لها البند --</option>
+                  {displayOrgs.map(o => (
+                    <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
                 <label className="block font-bold text-slate-700 mb-1">اسم بند الصرف *</label>
                 <input
                   type="text"
@@ -2819,6 +2885,27 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
             <form onSubmit={handleSaveVendor} className="mt-4 space-y-3 text-xs">
               <div>
+                <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+                  <Building2 className="h-3.5 w-3.5 text-sky-600" />
+                  <span>الشركة / المؤسسة التابع لها المورد *</span>
+                </label>
+                <select
+                  required
+                  value={vendorOrgId}
+                  onChange={(e) => {
+                    setVendorOrgId(e.target.value);
+                    setVendorServiceIds([]);
+                  }}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 font-semibold outline-hidden focus:border-sky-500 focus:bg-white"
+                >
+                  <option value="" disabled>-- اختر الشركة التابع لها المورد --</option>
+                  {displayOrgs.map(o => (
+                    <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
                 <label className="block font-bold text-slate-700 mb-1">اسم المورد / الشركة *</label>
                 <input
                   type="text"
@@ -2828,6 +2915,47 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   placeholder="مثال: شركة أمازون ويب سيرفسز"
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden"
                 />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  بنود ومراكز الصرف المرتبطة بهذا المورد في الشركة (اختياري)
+                </label>
+                {(() => {
+                  const companyServices = targetServices.filter(s => s.orgId === vendorOrgId);
+                  if (companyServices.length === 0) {
+                    return (
+                      <p className="text-[11px] text-slate-400 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                        لا توجد بنود صرف مسجلة لهذه الشركة بعد. يمكنك تسجيل المورد الآن وربطه بالبنود لاحقاً.
+                      </p>
+                    );
+                  }
+                  return (
+                    <div className="max-h-32 overflow-y-auto space-y-1.5 p-2 bg-slate-50 border border-slate-200 rounded-xl">
+                      {companyServices.map(srv => {
+                        const isChecked = vendorServiceIds.includes(srv.id);
+                        return (
+                          <label key={srv.id} className="flex items-center gap-2 p-1.5 hover:bg-white rounded-lg cursor-pointer transition">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => {
+                                if (isChecked) {
+                                  setVendorServiceIds(vendorServiceIds.filter(id => id !== srv.id));
+                                } else {
+                                  setVendorServiceIds([...vendorServiceIds, srv.id]);
+                                }
+                              }}
+                              className="rounded text-sky-600 focus:ring-sky-500"
+                            />
+                            <span className="text-xs font-semibold text-slate-700">{srv.name}</span>
+                            <span className="text-[10px] text-slate-400 font-mono">({srv.code})</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="grid grid-cols-2 gap-2">

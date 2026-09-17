@@ -3,6 +3,7 @@ import { useApp } from '../context/AppContext';
 import { ServiceProvider } from '../types';
 import { 
   Building, 
+  Building2,
   Plus, 
   Phone, 
   Mail, 
@@ -25,13 +26,36 @@ import {
 } from '../utils/validation';
 
 export const VendorsManagement: React.FC = () => {
-  const { providers, services, activeOrgId, activeOrg, organizations, addProvider, updateProvider, deleteProvider } = useApp();
+  const { 
+    providers, 
+    allProviders,
+    services, 
+    allServices,
+    activeOrgId, 
+    activeOrg, 
+    organizations, 
+    allOrganizations,
+    currentRole,
+    addProvider, 
+    updateProvider, 
+    deleteProvider 
+  } = useApp();
+
+  const isSuperAdmin = currentRole === 'super_admin';
+  const orgList = isSuperAdmin ? allOrganizations : organizations;
+  const targetProviders = isSuperAdmin ? allProviders : providers;
+  const targetServices = isSuperAdmin ? allServices : services;
+
+  const [selectedOrgFilter, setSelectedOrgFilter] = useState<string>(
+    activeOrgId && activeOrgId !== 'all' ? activeOrgId : 'all'
+  );
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<ServiceProvider | null>(null);
   const [search, setSearch] = useState('');
 
   // Form states
+  const [selectedOrgId, setSelectedOrgId] = useState<string>('');
   const [name, setName] = useState('');
   const [contactPerson, setContactPerson] = useState('');
   const [phone, setPhone] = useState('');
@@ -45,13 +69,12 @@ export const VendorsManagement: React.FC = () => {
   const [rating, setRating] = useState(5.0);
   const [notes, setNotes] = useState('');
 
-  const orgProviders = providers.filter(p => activeOrgId === 'all' || p.orgId === activeOrgId);
-  const orgServices = services.filter(s => activeOrgId === 'all' || s.orgId === activeOrgId);
+  const orgProviders = targetProviders.filter(p => selectedOrgFilter === 'all' || p.orgId === selectedOrgFilter);
 
   const filteredProviders = orgProviders.filter(p => 
     p.name.toLowerCase().includes(search.toLowerCase()) ||
-    p.contactPerson.toLowerCase().includes(search.toLowerCase()) ||
-    p.phone.includes(search)
+    (p.contactPerson && p.contactPerson.toLowerCase().includes(search.toLowerCase())) ||
+    (p.phone && p.phone.includes(search))
   );
 
   const handleOpenAdd = () => {
@@ -65,7 +88,12 @@ export const VendorsManagement: React.FC = () => {
     setBankName('');
     setIban('');
     setAddress('');
-    setSelectedServices(orgServices.length > 0 ? [orgServices[0].id] : []);
+    const defaultOrg = selectedOrgFilter !== 'all' 
+      ? selectedOrgFilter 
+      : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (orgList[0]?.id || ''));
+    setSelectedOrgId(defaultOrg);
+    const initialOrgServices = targetServices.filter(s => s.orgId === defaultOrg);
+    setSelectedServices(initialOrgServices.length > 0 ? [initialOrgServices[0].id] : []);
     setRating(5.0);
     setNotes('');
     setIsModalOpen(true);
@@ -74,30 +102,33 @@ export const VendorsManagement: React.FC = () => {
   const handleOpenEdit = (prov: ServiceProvider) => {
     setEditingProvider(prov);
     setName(prov.name);
-    setContactPerson(prov.contactPerson);
-    setPhone(prov.phone);
-    setEmail(prov.email);
-    setTaxNumber(prov.taxNumber);
-    setCrNumber(prov.crNumber);
-    setBankName(prov.bankName);
-    setIban(prov.iban);
-    setAddress(prov.address);
-    setSelectedServices(prov.serviceCategoryIds);
-    setRating(prov.rating);
+    setContactPerson(prov.contactPerson || '');
+    setPhone(prov.phone || '');
+    setEmail(prov.email || '');
+    setTaxNumber(prov.taxNumber || '');
+    setCrNumber(prov.crNumber || '');
+    setBankName(prov.bankName || '');
+    setIban(prov.iban || '');
+    setAddress(prov.address || '');
+    setSelectedOrgId(prov.orgId || orgList[0]?.id || '');
+    setSelectedServices(prov.serviceCategoryIds || []);
+    setRating(prov.rating || 5.0);
     setNotes(prov.notes || '');
     setIsModalOpen(true);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
 
-    const matchedServiceNames = orgServices
+    const finalOrgId = selectedOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || orgList[0]?.id || '';
+    const relevantServices = targetServices.filter(s => s.orgId === finalOrgId);
+    const matchedServiceNames = relevantServices
       .filter(s => selectedServices.includes(s.id))
       .map(s => s.name);
 
     if (editingProvider) {
-      updateProvider({
+      await updateProvider({
         ...editingProvider,
         name: name.trim(),
         contactPerson: contactPerson.trim(),
@@ -112,10 +143,11 @@ export const VendorsManagement: React.FC = () => {
         serviceCategoryNames: matchedServiceNames,
         rating,
         notes: notes.trim(),
+        orgId: finalOrgId,
       });
     } else {
-      addProvider({
-        orgId: activeOrgId && activeOrgId !== 'all' ? activeOrgId : (activeOrg?.id || organizations[0]?.id || ''),
+      await addProvider({
+        orgId: finalOrgId,
         name: name.trim(),
         contactPerson: contactPerson.trim(),
         phone: phone.trim(),
@@ -149,18 +181,36 @@ export const VendorsManagement: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            إدارة بيانات الموردين، الحسابات البنكية والآيبان، والأرقام الضريبية وتاريخ التعاملات
+            إدارة بيانات الموردين، الحسابات البنكية والآيبان، والأرقام الضريبية وتاريخ التعاملات وربطهم بالشركات
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={handleOpenAdd}
-          className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto"
-        >
-          <Plus className="h-4 w-4" />
-          <span>إضافة مقدم خدمة جديد</span>
-        </button>
+        <div className="flex items-center gap-3 flex-wrap">
+          {orgList.length > 1 && (
+            <div className="flex items-center gap-2">
+              <Building2 className="h-4 w-4 text-slate-400" />
+              <select
+                value={selectedOrgFilter}
+                onChange={(e) => setSelectedOrgFilter(e.target.value)}
+                className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 font-semibold outline-hidden cursor-pointer"
+              >
+                <option value="all">كل الشركات ({orgList.length})</option>
+                {orgList.map(o => (
+                  <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handleOpenAdd}
+            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto"
+          >
+            <Plus className="h-4 w-4" />
+            <span>إضافة مقدم خدمة جديد</span>
+          </button>
+        </div>
       </div>
 
       {/* Search Bar */}
@@ -178,11 +228,12 @@ export const VendorsManagement: React.FC = () => {
       {/* Vendors Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
         {filteredProviders.map((prov) => {
-          const currency = activeOrg?.currency || 'SAR';
+          const parentOrg = orgList.find(o => o.id === prov.orgId);
+          const currency = parentOrg?.currency || activeOrg?.currency || 'EGP';
 
           return (
             <div 
-              key={prov.id}
+              key={prov.id} 
               className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between"
             >
               <div>
@@ -205,6 +256,7 @@ export const VendorsManagement: React.FC = () => {
                       type="button"
                       onClick={() => handleOpenEdit(prov)}
                       className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition"
+                      title="تعديل المورد"
                     >
                       <Edit3 className="h-3.5 w-3.5" />
                     </button>
@@ -212,10 +264,24 @@ export const VendorsManagement: React.FC = () => {
                       type="button"
                       onClick={() => deleteProvider(prov.id)}
                       className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                      title="حذف المورد"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </div>
+                </div>
+
+                {/* Company connection and service categories badges */}
+                <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                  <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-lg bg-sky-50 text-sky-800 border border-sky-200/80">
+                    <Building2 className="h-3 w-3 text-sky-600" />
+                    <span>{parentOrg ? parentOrg.name : 'شركة غير محددة'}</span>
+                  </span>
+                  {prov.serviceCategoryNames && prov.serviceCategoryNames.map((cat, idx) => (
+                    <span key={idx} className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                      {cat}
+                    </span>
+                  ))}
                 </div>
 
                 {/* Details */}
@@ -311,6 +377,28 @@ export const VendorsManagement: React.FC = () => {
             </div>
 
             <form onSubmit={handleSubmit} className="mt-4 space-y-3 text-xs">
+              {/* Company Selection Dropdown */}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+                  <Building2 className="h-3.5 w-3.5 text-emerald-600" />
+                  <span>الشركة أو المؤسسة التابع لها المورد *</span>
+                </label>
+                <select
+                  required
+                  value={selectedOrgId}
+                  onChange={(e) => {
+                    setSelectedOrgId(e.target.value);
+                    setSelectedServices([]);
+                  }}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-800 outline-hidden focus:border-emerald-500 focus:bg-white"
+                >
+                  <option value="" disabled>-- اختر الشركة التابع لها المورد --</option>
+                  {orgList.map(o => (
+                    <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label className="block font-bold text-slate-700 mb-1">اسم المؤسسة / مقدم الخدمة *</label>
                 <input
@@ -321,6 +409,48 @@ export const VendorsManagement: React.FC = () => {
                   placeholder="مثال: شركة سحابة الخليج للتقنية..."
                   className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                 />
+              </div>
+
+              {/* Connected Services Checklist */}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  بنود ومراكز الصرف المرتبطة بهذا المورد في الشركة (اختياري)
+                </label>
+                {(() => {
+                  const companyServices = targetServices.filter(s => s.orgId === selectedOrgId);
+                  if (companyServices.length === 0) {
+                    return (
+                      <p className="text-[11px] text-slate-400 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                        لا توجد بنود صرف مسجلة لهذه الشركة بعد. يمكنك حفظ المورد الآن وربطه بالبنود لاحقاً.
+                      </p>
+                    );
+                  }
+                  return (
+                    <div className="max-h-32 overflow-y-auto space-y-1.5 p-2 bg-slate-50 border border-slate-200 rounded-xl">
+                      {companyServices.map(srv => {
+                        const isChecked = selectedServices.includes(srv.id);
+                        return (
+                          <label key={srv.id} className="flex items-center gap-2 p-1.5 hover:bg-white rounded-lg cursor-pointer transition">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => {
+                                if (isChecked) {
+                                  setSelectedServices(selectedServices.filter(id => id !== srv.id));
+                                } else {
+                                  setSelectedServices([...selectedServices, srv.id]);
+                                }
+                              }}
+                              className="rounded text-emerald-600 focus:ring-emerald-500"
+                            />
+                            <span className="text-xs font-semibold text-slate-700">{srv.name}</span>
+                            <span className="text-[10px] text-slate-400 font-mono">({srv.code})</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="grid grid-cols-2 gap-3">

@@ -14,25 +14,46 @@ import {
   Wrench, 
   Package, 
   Truck, 
-  Warehouse 
+  Warehouse,
+  Building2
 } from 'lucide-react';
 
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from '../utils/validation';
 
 export const ServicesManagement: React.FC = () => {
-  const { services, activeOrgId, activeOrg, organizations, addService, updateService, deleteService } = useApp();
+  const { 
+    services, 
+    allServices,
+    activeOrgId, 
+    activeOrg, 
+    organizations, 
+    allOrganizations,
+    currentRole,
+    addService, 
+    updateService, 
+    deleteService 
+  } = useApp();
+
+  const isSuperAdmin = currentRole === 'super_admin';
+  const orgList = isSuperAdmin ? allOrganizations : organizations;
+  const targetServices = isSuperAdmin ? allServices : services;
+
+  const [selectedOrgFilter, setSelectedOrgFilter] = useState<string>(
+    activeOrgId && activeOrgId !== 'all' ? activeOrgId : 'all'
+  );
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingService, setEditingService] = useState<ServiceCategory | null>(null);
 
   // Form State
+  const [selectedOrgId, setSelectedOrgId] = useState<string>('');
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
   const [description, setDescription] = useState('');
   const [budgetLimit, setBudgetLimit] = useState('');
   const [color, setColor] = useState('#10b981');
 
-  const orgServices = services.filter(s => activeOrgId === 'all' || s.orgId === activeOrgId);
+  const orgServices = targetServices.filter(s => selectedOrgFilter === 'all' || s.orgId === selectedOrgFilter);
 
   const handleOpenAdd = () => {
     setName('');
@@ -41,6 +62,10 @@ export const ServicesManagement: React.FC = () => {
     setBudgetLimit('');
     setColor('#10b981');
     setEditingService(null);
+    const defaultOrg = selectedOrgFilter !== 'all' 
+      ? selectedOrgFilter 
+      : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (orgList[0]?.id || ''));
+    setSelectedOrgId(defaultOrg);
     setIsAddModalOpen(true);
   };
 
@@ -51,27 +76,30 @@ export const ServicesManagement: React.FC = () => {
     setDescription(srv.description);
     setBudgetLimit(srv.budgetLimit.toString());
     setColor(srv.color);
+    setSelectedOrgId(srv.orgId || orgList[0]?.id || '');
     setIsAddModalOpen(true);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
 
     const finalCode = code.trim() || `SRV-${Math.floor(100 + Math.random() * 900)}`;
+    const finalOrgId = selectedOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || orgList[0]?.id || '';
 
     if (editingService) {
-      updateService({
+      await updateService({
         ...editingService,
         name: name.trim(),
         code: finalCode,
         description: description.trim(),
         budgetLimit: Number(budgetLimit) || 0,
         color,
+        orgId: finalOrgId,
       });
     } else {
-      addService({
-        orgId: activeOrgId && activeOrgId !== 'all' ? activeOrgId : (activeOrg?.id || organizations[0]?.id || ''),
+      await addService({
+        orgId: finalOrgId,
         name: name.trim(),
         code: finalCode,
         description: description.trim(),
@@ -97,18 +125,36 @@ export const ServicesManagement: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            تعريف الخدمات والمراكز التكليفية وتحديد سقف الميزانية التقديرية لكل خدمة
+            تعريف الخدمات والمراكز التكليفية وتحديد سقف الميزانية التقديرية لكل خدمة وربطها بالشركة
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={handleOpenAdd}
-          className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto"
-        >
-          <Plus className="h-4 w-4" />
-          <span>إضافة خدمة جديدة</span>
-        </button>
+        <div className="flex items-center gap-3 flex-wrap">
+          {orgList.length > 1 && (
+            <div className="flex items-center gap-2">
+              <Building2 className="h-4 w-4 text-slate-400" />
+              <select
+                value={selectedOrgFilter}
+                onChange={(e) => setSelectedOrgFilter(e.target.value)}
+                className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 font-semibold outline-hidden cursor-pointer"
+              >
+                <option value="all">كل الشركات ({orgList.length})</option>
+                {orgList.map(o => (
+                  <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handleOpenAdd}
+            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto"
+          >
+            <Plus className="h-4 w-4" />
+            <span>إضافة خدمة جديدة</span>
+          </button>
+        </div>
       </div>
 
       {/* Services Grid */}
@@ -117,7 +163,8 @@ export const ServicesManagement: React.FC = () => {
           const percent = srv.budgetLimit > 0 
             ? Math.min(100, Math.round((srv.spentAmount / srv.budgetLimit) * 100))
             : 0;
-          const currency = activeOrg?.currency || 'SAR';
+          const parentOrg = orgList.find(o => o.id === srv.orgId);
+          const currency = parentOrg?.currency || activeOrg?.currency || 'EGP';
 
           return (
             <div 
@@ -144,6 +191,7 @@ export const ServicesManagement: React.FC = () => {
                       type="button"
                       onClick={() => handleOpenEdit(srv)}
                       className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition"
+                      title="تعديل الخدمة"
                     >
                       <Edit3 className="h-3.5 w-3.5" />
                     </button>
@@ -151,10 +199,19 @@ export const ServicesManagement: React.FC = () => {
                       type="button"
                       onClick={() => deleteService(srv.id)}
                       className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                      title="حذف الخدمة"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </div>
+                </div>
+
+                {/* Company connection badge */}
+                <div className="mt-2.5 flex items-center gap-1.5">
+                  <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200/80">
+                    <Building2 className="h-3 w-3 text-emerald-600" />
+                    <span>{parentOrg ? parentOrg.name : 'شركة غير محددة'}</span>
+                  </span>
                 </div>
 
                 <p className="text-xs text-slate-500 mt-3 line-clamp-2 leading-relaxed">
@@ -223,6 +280,25 @@ export const ServicesManagement: React.FC = () => {
             </div>
 
             <form onSubmit={handleSubmit} className="mt-4 space-y-3 text-xs">
+              {/* Company Selection Dropdown */}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+                  <Building2 className="h-3.5 w-3.5 text-emerald-600" />
+                  <span>الشركة أو المؤسسة التابع لها البند *</span>
+                </label>
+                <select
+                  required
+                  value={selectedOrgId}
+                  onChange={(e) => setSelectedOrgId(e.target.value)}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-800 outline-hidden focus:border-emerald-500 focus:bg-white"
+                >
+                  <option value="" disabled>-- اختر الشركة التابع لها البند --</option>
+                  {orgList.map(o => (
+                    <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label className="block font-bold text-slate-700 mb-1">اسم الخدمة *</label>
                 <input
