@@ -27,6 +27,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
     activeOrgId, 
     activeOrg, 
     setActiveOrgId, 
+    setActiveTab,
     currentRole, 
     currentUser,
     firebaseUser,
@@ -156,10 +157,15 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
 
             {/* Official Role Badge */}
             {currentRole === 'super_admin' && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-900 border border-amber-300 rounded-xl text-xs font-black shadow-2xs">
+              <button
+                type="button"
+                onClick={() => setActiveTab('organizations')}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-black shadow-2xs transition cursor-pointer"
+                title="الانتقال إلى مركز الإدارة والتحكم الشامل"
+              >
                 <Crown className="h-4 w-4 text-amber-600" />
                 <span>🛡️ سوبر أدمن المنصة</span>
-              </div>
+              </button>
             )}
 
             {currentRole === 'org_admin' && (

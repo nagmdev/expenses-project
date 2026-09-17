@@ -45,6 +45,8 @@ const MainApp: React.FC = () => {
   const [newOrgCode, setNewOrgCode] = useState('');
   const [newOrgCurrency, setNewOrgCurrency] = useState('EGP');
   const [newOrgBudget, setNewOrgBudget] = useState('500000');
+  const [isQuickOrgSubmitting, setIsQuickOrgSubmitting] = useState(false);
+  const [quickOrgError, setQuickOrgError] = useState<string | null>(null);
 
   // 1. Mandatory Loading State
   if (authLoading) {
@@ -66,21 +68,37 @@ const MainApp: React.FC = () => {
     return <LoginPage />;
   }
 
-  const handleQuickAddOrg = (e: React.FormEvent) => {
+  const handleQuickAddOrg = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newOrgName.trim()) return;
+    if (!newOrgName.trim() || isQuickOrgSubmitting) return;
 
-    addOrganization({
-      name: newOrgName.trim(),
-      code: newOrgCode.trim().toUpperCase() || newOrgName.trim().slice(0, 3).toUpperCase() || 'ORG',
-      currency: newOrgCurrency,
-      budget: Number(newOrgBudget) || 0,
-      description: 'مؤسسة جديدة أضيفت للنظام.',
-    });
+    setQuickOrgError(null);
+    setIsQuickOrgSubmitting(true);
 
-    setNewOrgName('');
-    setNewOrgCode('');
-    setIsQuickOrgModalOpen(false);
+    try {
+      const res = await addOrganization({
+        name: newOrgName.trim(),
+        code: newOrgCode.trim().toUpperCase() || newOrgName.trim().slice(0, 3).toUpperCase() || 'ORG',
+        currency: newOrgCurrency,
+        budget: Number(newOrgBudget) || 0,
+        description: 'مؤسسة جديدة أضيفت للنظام.',
+      });
+
+      if (!res.success) {
+        setQuickOrgError(res.message || 'تعذر إضافة الشركة.');
+        setIsQuickOrgSubmitting(false);
+        return;
+      }
+
+      setNewOrgName('');
+      setNewOrgCode('');
+      setQuickOrgError(null);
+      setIsQuickOrgModalOpen(false);
+    } catch {
+      setQuickOrgError('حدث خطأ غير متوقع أثناء إضافة الشركة.');
+    } finally {
+      setIsQuickOrgSubmitting(false);
+    }
   };
 
   return (
@@ -303,19 +321,29 @@ const MainApp: React.FC = () => {
                 />
               </div>
 
+              {quickOrgError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 font-bold rounded-xl text-xs flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-rose-600" />
+                  <span>{quickOrgError}</span>
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-3">
                 <button
                   type="button"
                   onClick={() => setIsQuickOrgModalOpen(false)}
-                  className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl"
+                  disabled={isQuickOrgSubmitting}
+                  className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl"
+                  disabled={isQuickOrgSubmitting}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                 >
-                  حفظ وإنشاء الشركة
+                  {isQuickOrgSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
+                  <span>{isQuickOrgSubmitting ? 'جاري التحقق والإنشاء...' : 'حفظ وإنشاء الشركة'}</span>
                 </button>
               </div>
             </form>

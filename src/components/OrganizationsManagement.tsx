@@ -94,6 +94,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     deleteDepartment,
     superAdminEmails,
     addSuperAdminEmail,
+    removeSuperAdminEmail,
+    updateSuperAdminRole,
     currentRole,
     requests
   } = useApp();
@@ -116,6 +118,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [orgCurrency, setOrgCurrency] = useState('EGP');
   const [orgBudget, setOrgBudget] = useState('500000');
   const [orgDescription, setOrgDescription] = useState('');
+  const [isCreatingOrg, setIsCreatingOrg] = useState(false);
+  const [orgFormError, setOrgFormError] = useState<string | null>(null);
 
   const [editingOrg, setEditingOrg] = useState<Organization | null>(null);
   const [editOrgName, setEditOrgName] = useState('');
@@ -239,6 +243,12 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [newAdminEmail, setNewAdminEmail] = useState('');
   const [adminSuccessMsg, setAdminSuccessMsg] = useState<string | null>(null);
   const [adminErrorMsg, setAdminErrorMsg] = useState<string | null>(null);
+  const [isSuperAdminModalOpen, setIsSuperAdminModalOpen] = useState(false);
+  const [editingSuperAdminEmail, setEditingSuperAdminEmail] = useState<string | null>(null);
+  const [targetSuperAdminRole, setTargetSuperAdminRole] = useState<Role>('org_admin');
+  const [targetSuperAdminOrgId, setTargetSuperAdminOrgId] = useState<string>('');
+  const [superAdminActionLoading, setSuperAdminActionLoading] = useState(false);
+  const [superAdminActionFeedback, setSuperAdminActionFeedback] = useState<{ msg: string; isError?: boolean } | null>(null);
 
   // =========================================================================
   // 8. AUDIT LOG STATE & FILTERS
@@ -259,21 +269,37 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // =========================================================================
   const handleAddOrg = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!orgName.trim()) return;
+    if (!orgName.trim() || isCreatingOrg) return;
 
-    await addOrganization({
-      name: orgName.trim(),
-      code: orgCode.trim().toUpperCase() || orgName.trim().slice(0, 3).toUpperCase() || 'ORG',
-      currency: orgCurrency,
-      budget: Number(orgBudget) || 0,
-      description: orgDescription.trim() || 'مؤسسة معتمدة في المنصة',
-      status: 'active',
-    });
+    setOrgFormError(null);
+    setIsCreatingOrg(true);
 
-    setOrgName('');
-    setOrgCode('');
-    setOrgDescription('');
-    setIsOrgModalOpen(false);
+    try {
+      const res = await addOrganization({
+        name: orgName.trim(),
+        code: orgCode.trim().toUpperCase() || orgName.trim().slice(0, 3).toUpperCase() || 'ORG',
+        currency: orgCurrency,
+        budget: Number(orgBudget) || 0,
+        description: orgDescription.trim() || 'مؤسسة معتمدة في المنصة',
+        status: 'active',
+      });
+
+      if (!res.success) {
+        setOrgFormError(res.message || 'تعذر إضافة الشركة.');
+        setIsCreatingOrg(false);
+        return;
+      }
+
+      setOrgName('');
+      setOrgCode('');
+      setOrgDescription('');
+      setOrgFormError(null);
+      setIsOrgModalOpen(false);
+    } catch {
+      setOrgFormError('حدث خطأ غير متوقع أثناء إنشاء الشركة.');
+    } finally {
+      setIsCreatingOrg(false);
+    }
   };
 
   const handleStartEditOrg = (org: Organization) => {
@@ -705,6 +731,60 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     }
   };
 
+  const handleRemoveSuperAdmin = async (email: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (cleanEmail === 'marwanagib813@gmail.com' || cleanEmail === 'mahmoud@tieapps.com') {
+      alert('لا يمكن إزالة الحساب الرئيسي لمشرف المنصة الأساسي.');
+      return;
+    }
+
+    if (!window.confirm(`هل أنت متأكد من رغبتك في سحب صلاحيات السوبر أدمن عن الحساب (${cleanEmail})؟`)) {
+      return;
+    }
+
+    try {
+      setSuperAdminActionLoading(true);
+      await removeSuperAdminEmail(cleanEmail);
+      setSuperAdminActionFeedback({ msg: `تم سحب صلاحيات السوبر أدمن عن (${cleanEmail}) بنجاح.` });
+    } catch {
+      setSuperAdminActionFeedback({ msg: 'حدث خطأ أثناء إزالة صلاحيات السوبر أدمن.', isError: true });
+    } finally {
+      setSuperAdminActionLoading(false);
+    }
+  };
+
+  const handleOpenEditSuperAdminRole = (email: string) => {
+    setEditingSuperAdminEmail(email);
+    const existingMember = members.find(m => m.userEmail?.toLowerCase().trim() === email.toLowerCase().trim());
+    setTargetSuperAdminRole(existingMember?.role === 'super_admin' ? 'org_admin' : existingMember?.role || 'org_admin');
+    setTargetSuperAdminOrgId(existingMember?.orgId || displayOrgs[0]?.id || '');
+    setSuperAdminActionFeedback(null);
+  };
+
+  const handleSaveSuperAdminRole = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingSuperAdminEmail) return;
+
+    if (
+      (editingSuperAdminEmail === 'marwanagib813@gmail.com' || editingSuperAdminEmail === 'mahmoud@tieapps.com') && 
+      targetSuperAdminRole !== 'super_admin'
+    ) {
+      alert('لا يمكن تغيير رتبة المشرف الأساسي للمنصة.');
+      return;
+    }
+
+    try {
+      setSuperAdminActionLoading(true);
+      await updateSuperAdminRole(editingSuperAdminEmail, targetSuperAdminRole, targetSuperAdminOrgId);
+      setSuperAdminActionFeedback({ msg: `تم تحديث دور الحساب (${editingSuperAdminEmail}) إلى (${targetSuperAdminRole}) بنجاح.` });
+      setEditingSuperAdminEmail(null);
+    } catch {
+      setSuperAdminActionFeedback({ msg: 'حدث خطأ أثناء تعديل الصلاحية.', isError: true });
+    } finally {
+      setSuperAdminActionLoading(false);
+    }
+  };
+
   // =========================================================================
   // FILTERED DATASETS
   // =========================================================================
@@ -831,7 +911,18 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         </div>
 
         {/* Action button based on active section */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {isSuperAdmin && (
+            <button
+              type="button"
+              onClick={() => setIsSuperAdminModalOpen(true)}
+              className="px-4 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5"
+            >
+              <Crown className="h-4 w-4" />
+              <span>إدارة السوبر أدمن (Super Admins)</span>
+            </button>
+          )}
+
           {activeSection === 'companies' && canManageOrgs && (
             <button
               type="button"
@@ -1734,18 +1825,64 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs">
             <h3 className="text-sm font-bold text-slate-900 mb-3">قائمة المشرفين العامين الحاليين</h3>
+            {superAdminActionFeedback && (
+              <div className={`p-3 rounded-xl mb-3 text-xs font-bold ${
+                superAdminActionFeedback.isError ? 'bg-rose-50 text-rose-700 border border-rose-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+              }`}>
+                {superAdminActionFeedback.msg}
+              </div>
+            )}
             <div className="space-y-2">
-              {superAdminEmails.map((email) => (
-                <div key={email} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs">
-                  <div className="flex items-center gap-2">
-                    <Crown className="h-4 w-4 text-amber-500" />
-                    <span className="font-mono font-bold text-slate-800">{email}</span>
+              {superAdminEmails.map((email) => {
+                const isRootAdmin = email === 'marwanagib813@gmail.com' || email === 'mahmoud@tieapps.com';
+                return (
+                  <div key={email} className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 text-xs gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="h-8 w-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center font-bold">
+                        <Crown className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-bold text-slate-800">{email}</span>
+                          <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">
+                            نشط
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400">سوبر أدمن المنصة • كامل الصلاحيات الإدارية</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEditSuperAdminRole(email)}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg font-bold text-xs transition cursor-pointer"
+                        title="تعديل الصلاحية أو النقل لشركة"
+                      >
+                        <Edit className="h-3.5 w-3.5" />
+                        <span>تعديل الصلاحية</span>
+                      </button>
+
+                      {!isRootAdmin ? (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveSuperAdmin(email)}
+                          disabled={superAdminActionLoading}
+                          className="flex items-center gap-1 px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-lg font-bold text-xs transition cursor-pointer disabled:opacity-50"
+                          title="إزالة من السوبر أدمن"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>إزالة</span>
+                        </button>
+                      ) : (
+                        <span className="text-[10px] text-slate-400 font-semibold px-2 py-1 bg-slate-100 rounded-lg">
+                          مشرف أساسي محمي
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">
-                    كامل الصلاحيات
-                  </span>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
@@ -1954,19 +2091,29 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 ></textarea>
               </div>
 
+              {orgFormError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 font-bold rounded-xl text-xs flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
+                  <span>{orgFormError}</span>
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setIsOrgModalOpen(false)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                  disabled={isCreatingOrg}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl cursor-pointer"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                  disabled={isCreatingOrg}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  حفظ وإنشاء الشركة
+                  {isCreatingOrg && <Loader2 className="h-4 w-4 animate-spin" />}
+                  <span>{isCreatingOrg ? 'جاري التحقق والإنشاء...' : 'حفظ وإنشاء الشركة'}</span>
                 </button>
               </div>
             </form>
@@ -2934,6 +3081,186 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 نعم، حذف
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 15. Super Admin Management Modal (Dedicated Popup) */}
+      {isSuperAdminModalOpen && isSuperAdmin && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-lg w-full shadow-2xl p-6 border border-slate-100 text-xs">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                <Crown className="h-4 w-4 text-amber-600" />
+                <span>إدارة حسابات السوبر أدمن (Super Admins) 👑</span>
+              </h3>
+              <button 
+                onClick={() => setIsSuperAdminModalOpen(false)} 
+                className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-4">
+              <form onSubmit={handleAddAdmin} className="space-y-2">
+                <label className="block font-bold text-slate-700">إضافة بريد سوبر أدمن جديد للمنصة:</label>
+                <div className="flex gap-2">
+                  <input
+                    type="email"
+                    required
+                    value={newAdminEmail}
+                    onChange={(e) => setNewAdminEmail(e.target.value)}
+                    placeholder="admin@domain.com"
+                    className="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-xs text-slate-800 outline-hidden focus:border-amber-500"
+                  />
+                  <button
+                    type="submit"
+                    className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl shadow-xs transition cursor-pointer"
+                  >
+                    إضافة
+                  </button>
+                </div>
+                {adminSuccessMsg && <p className="text-xs text-emerald-700 font-bold mt-1">{adminSuccessMsg}</p>}
+                {adminErrorMsg && <p className="text-xs text-rose-700 font-bold mt-1">{adminErrorMsg}</p>}
+              </form>
+
+              {superAdminActionFeedback && (
+                <div className={`p-3 rounded-xl text-xs font-bold ${
+                  superAdminActionFeedback.isError ? 'bg-rose-50 text-rose-700 border border-rose-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                }`}>
+                  {superAdminActionFeedback.msg}
+                </div>
+              )}
+
+              <div>
+                <h4 className="font-bold text-slate-700 mb-2">قائمة السوبر أدمن المعتمدين حالياً:</h4>
+                <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                  {superAdminEmails.map((email) => {
+                    const isRootAdmin = email === 'marwanagib813@gmail.com' || email === 'mahmoud@tieapps.com';
+                    return (
+                      <div 
+                        key={email} 
+                        className="flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-amber-50/50 rounded-xl border border-amber-200/60 text-xs gap-2"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <Crown className="h-4 w-4 text-amber-600 shrink-0" />
+                          <span className="font-mono font-bold text-slate-900 truncate max-w-[200px]">{email}</span>
+                          <span className="bg-amber-100 text-amber-900 font-bold text-[10px] px-2 py-0.5 rounded-full shrink-0">
+                            نشط
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0 justify-end">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditSuperAdminRole(email)}
+                            className="flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg font-bold text-[11px] transition cursor-pointer"
+                            title="تعديل الصلاحية والدور"
+                          >
+                            <Edit className="h-3 w-3" />
+                            <span>تعديل الدور</span>
+                          </button>
+
+                          {!isRootAdmin ? (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveSuperAdmin(email)}
+                              disabled={superAdminActionLoading}
+                              className="flex items-center gap-1 px-2 py-1.5 bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 rounded-lg font-bold text-[11px] transition cursor-pointer disabled:opacity-50"
+                              title="إزالة من السوبر أدمن"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                              <span>إزالة</span>
+                            </button>
+                          ) : (
+                            <span className="text-[10px] text-slate-400 font-semibold px-2 py-1 bg-slate-100/70 rounded-lg">
+                              أساسي
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 16. Super Admin Edit Role Modal */}
+      {editingSuperAdminEmail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 text-xs">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-indigo-600" />
+                <span>تعديل رتبة وصلاحيات المشرف</span>
+              </h3>
+              <button 
+                onClick={() => setEditingSuperAdminEmail(null)} 
+                className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveSuperAdminRole} className="mt-4 space-y-4">
+              <div>
+                <label className="block font-bold text-slate-500 mb-1">البريد الإلكتروني:</label>
+                <div className="p-2.5 bg-slate-100 rounded-xl font-mono text-slate-800 font-bold">
+                  {editingSuperAdminEmail}
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">الدور والصلاحية الجديدة:</label>
+                <select
+                  value={targetSuperAdminRole}
+                  onChange={(e) => setTargetSuperAdminRole(e.target.value as Role)}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs"
+                >
+                  <option value="super_admin">🛡️ سوبر أدمن المنصة (Super Admin)</option>
+                  <option value="org_admin">🏢 مدير شركة (Company Admin)</option>
+                  <option value="data_entry">✍️ مدخل بيانات (Data Entry)</option>
+                  <option value="employee">👤 موظف (Employee)</option>
+                </select>
+              </div>
+
+              {targetSuperAdminRole !== 'super_admin' && (
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">تعيين في شركة:</label>
+                  <select
+                    value={targetSuperAdminOrgId}
+                    onChange={(e) => setTargetSuperAdminOrgId(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs"
+                  >
+                    {displayOrgs.map(o => (
+                      <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setEditingSuperAdminEmail(null)}
+                  className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl font-bold cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={superAdminActionLoading}
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                >
+                  {superAdminActionLoading && <Loader2 className="h-4 w-4 animate-spin" />}
+                  <span>حفظ وتطبيق الدور</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

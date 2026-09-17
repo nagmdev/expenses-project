@@ -166,6 +166,8 @@ interface AppContextType {
   // Auth & Roles
   superAdminEmails: string[];
   addSuperAdminEmail: (email: string) => Promise<void>;
+  removeSuperAdminEmail: (email: string) => Promise<void>;
+  updateSuperAdminRole: (email: string, newRole: Role, targetOrgId?: string) => Promise<void>;
   signInWithGoogle: () => Promise<any>;
   loginWithEmail: (email: string, password: string) => Promise<any>;
   resetPassword: (email: string) => Promise<any>;
@@ -186,7 +188,7 @@ interface AppContextType {
   }) => Promise<{ success: boolean; message?: string; credentials?: { email: string; password: string } }>;
 
   // Organizations
-  addOrganization: (org: Omit<Organization, 'id' | 'createdAt'>) => Promise<void>;
+  addOrganization: (org: Omit<Organization, 'id' | 'createdAt'>) => Promise<{ success: boolean; message?: string; org?: Organization }>;
   updateOrganization: (orgId: string, updates: Partial<Organization>) => Promise<void>;
   deleteOrganization: (orgId: string) => Promise<{ success: boolean; message?: string }>;
   
@@ -606,7 +608,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setFirebaseError(null);
     purgeSampleDataFromFirestore().catch(() => {});
 
-    // 1. Organizations Listener
+    // 1. Organizations Listener with Real-Time Self-Healing Deduplication
     const unsubOrgs = onSnapshot(collection(db, 'organizations'), (snapshot) => {
       setIsFirebaseConnected(true);
       setFirebaseError(null);
@@ -614,8 +616,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         .map(d => ({ id: d.id, ...d.data() } as Organization))
         .filter(o => !DUMMY_IDS.has(o.id));
       
-      setRawOrganizations(list);
-      safeSetLocal(STORAGE_KEYS.ORGS, list);
+      const seenIds = new Set<string>();
+      const seenIdentity = new Set<string>();
+      const dedupedList: Organization[] = [];
+
+      for (const org of list) {
+        const normKey = `${(org.name || '').trim().toLowerCase()}:::${(org.code || '').trim().toUpperCase()}`;
+        if (!seenIds.has(org.id) && !seenIdentity.has(normKey)) {
+          seenIds.add(org.id);
+          seenIdentity.add(normKey);
+          dedupedList.push(org);
+        } else {
+          // Automatic Self-Healing: Purge duplicate document permanently from Firestore
+          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate company doc: "${org.name}" (${org.id})`);
+          if (isFirebaseConfigured() && getDb()) {
+            deleteFirestoreDoc('organizations', org.id).catch(() => {});
+          }
+        }
+      }
+
+      setRawOrganizations(dedupedList);
+      safeSetLocal(STORAGE_KEYS.ORGS, dedupedList);
     }, (err: any) => {
       console.warn('[Firebase] Organizations onSnapshot error:', err);
       setIsFirebaseConnected(false);
@@ -674,13 +695,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // 6. Super Admins Listener
     const unsubSuperAdmins = onSnapshot(collection(db, 'super_admins'), (snapshot) => {
       const dbAdmins = snapshot.docs.map(d => (d.data().email || d.id || '').toLowerCase().trim()).filter(Boolean);
-      if (dbAdmins.length > 0) {
-        setSuperAdminEmails(prev => {
-          const merged = Array.from(new Set([...prev, ...dbAdmins]));
-          safeSetLocal(SUPER_ADMINS_STORAGE_KEY, merged);
-          return merged;
-        });
-      }
+      const defaultAdmins = ['marwanagib813@gmail.com', 'mahmoud@tieapps.com'];
+      const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
+      const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
+      const merged = Array.from(new Set([...defaultAdmins, ...envList, ...dbAdmins]));
+      setSuperAdminEmails(merged);
+      safeSetLocal(SUPER_ADMINS_STORAGE_KEY, merged);
     }, (err) => {
       console.warn('[Firebase] Super admins onSnapshot error:', err);
     });
@@ -886,6 +906,77 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const removeSuperAdminEmail = async (email: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail) return;
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        const docId = cleanEmail.replace(/[^a-zA-Z0-9]/g, '_');
+        await deleteFirestoreDoc('super_admins', docId);
+      } catch (err) {
+        console.error('[Firebase] Error removing super admin email:', err);
+      }
+    }
+
+    setSuperAdminEmails(prev => {
+      const updated = prev.filter(e => e.trim().toLowerCase() !== cleanEmail);
+      safeSetLocal(SUPER_ADMINS_STORAGE_KEY, updated);
+      return updated;
+    });
+
+    await logAuditAction({
+      actionType: 'role_change',
+      entityType: 'member',
+      entityId: cleanEmail,
+      entityName: cleanEmail,
+      details: `تمت إزالة صلاحية السوبر أدمن عن الحساب (${cleanEmail})`,
+    });
+  };
+
+  const updateSuperAdminRole = async (email: string, newRole: Role, targetOrgId?: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail) return;
+
+    if (newRole === 'super_admin') {
+      await addSuperAdminEmail(cleanEmail);
+      return;
+    }
+
+    // Demote from super admin
+    await removeSuperAdminEmail(cleanEmail);
+
+    // If targetOrgId is provided or user has a member record in an org, update or create their member role
+    const existingMember = rawMembers.find(m => m.userEmail?.toLowerCase().trim() === cleanEmail);
+    const orgIdToUse = targetOrgId || existingMember?.orgId || rawOrganizations[0]?.id || '';
+
+    if (existingMember) {
+      await updateMember(existingMember.id, {
+        role: newRole,
+        orgId: orgIdToUse,
+      });
+    } else if (orgIdToUse) {
+      await addMember({
+        orgId: orgIdToUse,
+        userId: `user-${Date.now()}`,
+        userName: cleanEmail.split('@')[0],
+        userEmail: cleanEmail,
+        role: newRole,
+        department: 'الإدارة العامة',
+        jobTitle: newRole === 'org_admin' ? 'مدير شركة' : newRole === 'data_entry' ? 'مدخل بيانات' : 'موظف',
+        active: true,
+      });
+    }
+
+    await logAuditAction({
+      actionType: 'role_change',
+      entityType: 'member',
+      entityId: cleanEmail,
+      entityName: cleanEmail,
+      details: `تم تعديل رتبة المشرف (${cleanEmail}) إلى رتبة (${newRole === 'org_admin' ? 'مدير شركة' : newRole === 'data_entry' ? 'مدخل بيانات' : 'موظف'}) للشركة (${orgIdToUse})`,
+    });
+  };
+
   // =========================================================================
   // USER PROVISIONING BY ORG ADMIN / SUPER ADMIN
   // =========================================================================
@@ -983,13 +1074,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // =========================================================================
 
   // 1. ORGANIZATIONS
-  const addOrganization = async (orgData: Omit<Organization, 'id' | 'createdAt'>) => {
-    const id = `org-${Date.now()}`;
+  const addOrganization = async (orgData: Omit<Organization, 'id' | 'createdAt'>): Promise<{ success: boolean; message?: string; org?: Organization }> => {
+    const cleanName = orgData.name.trim();
+    const cleanCode = (orgData.code?.trim() || cleanName.slice(0, 3)).toUpperCase();
+
+    // Prevent duplicates by name or code
+    const duplicate = rawOrganizations.find(o => 
+      o.name.trim().toLowerCase() === cleanName.toLowerCase() ||
+      o.code.trim().toUpperCase() === cleanCode
+    );
+
+    if (duplicate) {
+      return { 
+        success: false, 
+        message: `توجد مؤسسة مسجلة بالفعل بنفس الاسم "${duplicate.name}" أو الكود (${duplicate.code}). تم منع التكرار.` 
+      };
+    }
+
+    const cleanSlug = cleanCode.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const id = cleanSlug ? `org-${cleanSlug}` : `org-${Date.now()}`;
     const createdAt = new Date().toISOString();
     const newOrg: Organization = {
       id,
       ...orgData,
-      code: orgData.code?.trim().toUpperCase() || orgData.name.trim().slice(0, 3).toUpperCase() || 'ORG',
+      name: cleanName,
+      code: cleanCode,
       createdAt,
     };
 
@@ -1005,11 +1114,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await safeFetchJson<Organization>('/api/organizations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(orgData),
+        body: JSON.stringify(newOrg),
       });
     }
 
     setRawOrganizations(prev => {
+      if (prev.some(o => o.id === id || o.code.toUpperCase() === cleanCode || o.name.trim().toLowerCase() === cleanName.toLowerCase())) {
+        return prev;
+      }
       const updated = [newOrg, ...prev];
       safeSetLocal(STORAGE_KEYS.ORGS, updated);
       return updated;
@@ -1026,6 +1138,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       orgName: newOrg.name,
       details: `تم إنشاء شركة ومؤسسة جديدة: "${newOrg.name}" بكود (${newOrg.code}) وميزانية معتمدة ${newOrg.budget.toLocaleString()} ${newOrg.currency}`,
     });
+
+    return { success: true, org: newOrg };
   };
 
   const updateOrganization = async (orgId: string, updates: Partial<Organization>) => {
@@ -2331,6 +2445,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         closeFirebaseModal,
         superAdminEmails,
         addSuperAdminEmail,
+        removeSuperAdminEmail,
+        updateSuperAdminRole,
         signInWithGoogle: handleSignInWithGoogle,
         loginWithEmail: handleLoginWithEmail,
         resetPassword: handleResetPassword,
