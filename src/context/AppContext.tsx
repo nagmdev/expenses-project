@@ -9,7 +9,12 @@ import {
   DisbursementDetails,
   RequestAttachment,
   Role,
-  PaymentMethod
+  PaymentMethod,
+  AuditLogEntry,
+  PaymentAccount,
+  Department,
+  AuditActionType,
+  AuditEntityType
 } from '../types';
 import {
   isFirebaseConfigured,
@@ -51,6 +56,9 @@ const STORAGE_KEYS = {
   ACTIVE_ORG: 'expenses_active_org_id_v3',
   ROLE: 'expenses_current_role_v3',
   ACTIVE_TAB: 'expenses_active_tab_v3',
+  AUDIT_LOGS: 'expenses_audit_logs_v3',
+  PAYMENT_ACCOUNTS: 'expenses_payment_accounts_v3',
+  DEPARTMENTS: 'expenses_departments_v3',
 };
 
 // Immediate purge of all legacy v1 and v2 localStorage keys
@@ -220,6 +228,31 @@ interface AppContextType {
   requestClarification: (requestId: string, question: string) => Promise<void>;
   replyClarification: (requestId: string, replyText: string, attachmentName?: string) => Promise<void>;
   disburseRequest: (requestId: string, details: Omit<DisbursementDetails, 'disbursedAt' | 'disbursedBy'>) => Promise<void>;
+
+  // Payment Accounts & Vaults
+  paymentAccounts: PaymentAccount[];
+  addPaymentAccount: (account: Omit<PaymentAccount, 'id' | 'createdAt'>) => Promise<void>;
+  updatePaymentAccount: (accountId: string, updates: Partial<PaymentAccount>) => Promise<void>;
+  deletePaymentAccount: (accountId: string) => Promise<void>;
+  togglePaymentAccountStatus: (accountId: string, active: boolean) => Promise<void>;
+
+  // Departments & Structure
+  departments: Department[];
+  addDepartment: (dept: Omit<Department, 'id' | 'createdAt'>) => Promise<void>;
+  updateDepartment: (deptId: string, updates: Partial<Department>) => Promise<void>;
+  deleteDepartment: (deptId: string) => Promise<void>;
+
+  // Audit Trail & Logging
+  auditLogs: AuditLogEntry[];
+  logAuditAction: (params: {
+    actionType: AuditActionType;
+    entityType: AuditEntityType;
+    entityId: string;
+    entityName: string;
+    details: string;
+    orgId?: string;
+    orgName?: string;
+  }) => Promise<void>;
   
   refreshData: () => Promise<void>;
   resetToSampleData: () => void;
@@ -260,6 +293,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [rawRequests, setRawRequests] = useState<ExpenseRequest[]>(() => {
     return safeGetLocal<ExpenseRequest[]>(STORAGE_KEYS.REQUESTS, []);
+  });
+
+  const [rawAuditLogs, setRawAuditLogs] = useState<AuditLogEntry[]>(() => {
+    return safeGetLocal<AuditLogEntry[]>(STORAGE_KEYS.AUDIT_LOGS, []);
+  });
+
+  const [rawPaymentAccounts, setRawPaymentAccounts] = useState<PaymentAccount[]>(() => {
+    return safeGetLocal<PaymentAccount[]>(STORAGE_KEYS.PAYMENT_ACCOUNTS, []);
+  });
+
+  const [rawDepartments, setRawDepartments] = useState<Department[]>(() => {
+    return safeGetLocal<Department[]>(STORAGE_KEYS.DEPARTMENTS, []);
   });
 
   const [loading, setLoading] = useState(false);
@@ -489,6 +534,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   }, [firebaseUser, resolvedRole, rawRequests, effectiveOrgId, userEmail, currentUser]);
 
+  const scopedPaymentAccounts = useMemo(() => {
+    if (!firebaseUser) return [];
+    if (resolvedRole === 'super_admin') {
+      return effectiveOrgId === 'all' ? rawPaymentAccounts : rawPaymentAccounts.filter(a => a.orgId === effectiveOrgId);
+    }
+    if (!effectiveOrgId) return [];
+    return rawPaymentAccounts.filter(a => a.orgId === effectiveOrgId);
+  }, [firebaseUser, resolvedRole, rawPaymentAccounts, effectiveOrgId]);
+
+  const scopedDepartments = useMemo(() => {
+    if (!firebaseUser) return [];
+    if (resolvedRole === 'super_admin') {
+      return effectiveOrgId === 'all' ? rawDepartments : rawDepartments.filter(d => d.orgId === effectiveOrgId);
+    }
+    if (!effectiveOrgId) return [];
+    return rawDepartments.filter(d => d.orgId === effectiveOrgId);
+  }, [firebaseUser, resolvedRole, rawDepartments, effectiveOrgId]);
+
+  const scopedAuditLogs = useMemo(() => {
+    if (!firebaseUser) return [];
+    if (resolvedRole === 'super_admin') {
+      if (effectiveOrgId && effectiveOrgId !== 'all') {
+        return rawAuditLogs.filter(l => l.orgId === effectiveOrgId || !l.orgId);
+      }
+      return rawAuditLogs;
+    }
+    if (!effectiveOrgId) return [];
+    return rawAuditLogs.filter(l => l.orgId === effectiveOrgId);
+  }, [firebaseUser, resolvedRole, rawAuditLogs, effectiveOrgId]);
+
   const users: User[] = useMemo(() => {
     if (!firebaseUser) return [];
     const list: User[] = [currentUser];
@@ -610,6 +685,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[Firebase] Super admins onSnapshot error:', err);
     });
 
+    // 7. Payment Accounts Listener
+    const unsubPaymentAccounts = onSnapshot(collection(db, 'paymentAccounts'), (snapshot) => {
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as PaymentAccount))
+        .filter(p => !DUMMY_IDS.has(p.id) && !DUMMY_IDS.has(p.orgId));
+      setRawPaymentAccounts(list);
+      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, list);
+    }, (err) => {
+      console.warn('[Firebase] PaymentAccounts onSnapshot error:', err);
+    });
+
+    // 8. Departments Listener
+    const unsubDepartments = onSnapshot(collection(db, 'departments'), (snapshot) => {
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as Department))
+        .filter(d => !DUMMY_IDS.has(d.id) && !DUMMY_IDS.has(d.orgId));
+      setRawDepartments(list);
+      safeSetLocal(STORAGE_KEYS.DEPARTMENTS, list);
+    }, (err) => {
+      console.warn('[Firebase] Departments onSnapshot error:', err);
+    });
+
+    // 9. Audit Logs Listener
+    const unsubAuditLogs = onSnapshot(collection(db, 'auditLogs'), (snapshot) => {
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as AuditLogEntry))
+        .filter(a => !DUMMY_IDS.has(a.id));
+      list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      setRawAuditLogs(list);
+      safeSetLocal(STORAGE_KEYS.AUDIT_LOGS, list);
+    }, (err) => {
+      console.warn('[Firebase] AuditLogs onSnapshot error:', err);
+    });
+
     return () => {
       unsubOrgs();
       unsubMembers();
@@ -617,6 +726,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubProviders();
       unsubRequests();
       unsubSuperAdmins();
+      unsubPaymentAccounts();
+      unsubDepartments();
+      unsubAuditLogs();
     };
   }, [firebaseUser, firebaseSyncCounter]);
 
@@ -724,6 +836,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // =========================================================================
+  // AUDIT LOGGING HELPER
+  // =========================================================================
+  const logAuditAction = async (params: {
+    actionType: AuditActionType;
+    entityType: AuditEntityType;
+    entityId: string;
+    entityName: string;
+    details: string;
+    orgId?: string;
+    orgName?: string;
+  }) => {
+    try {
+      const id = `audit-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const timestamp = new Date().toISOString();
+      const actorId = firebaseUser?.uid || currentUser.id || 'admin';
+      const actorName = currentUser.name || firebaseUser?.displayName || 'المسؤول';
+      const actorEmail = firebaseUser?.email || currentUser.email || '';
+      const targetOrg = params.orgId ? rawOrganizations.find(o => o.id === params.orgId) : activeOrg;
+
+      const newEntry: AuditLogEntry = {
+        id,
+        actionType: params.actionType,
+        entityType: params.entityType,
+        entityId: params.entityId,
+        entityName: params.entityName,
+        orgId: params.orgId || targetOrg?.id || '',
+        orgName: params.orgName || targetOrg?.name || '',
+        actorId,
+        actorName,
+        actorEmail,
+        details: params.details,
+        timestamp,
+      };
+
+      if (isFirebaseConfigured() && getDb()) {
+        await setFirestoreDoc('auditLogs', id, newEntry).catch(err => {
+          console.warn('[Firebase] Error saving audit log:', err);
+        });
+      }
+
+      setRawAuditLogs(prev => {
+        const updated = [newEntry, ...prev.slice(0, 499)];
+        safeSetLocal(STORAGE_KEYS.AUDIT_LOGS, updated);
+        return updated;
+      });
+    } catch (err) {
+      console.warn('[Audit Logger Warning]', err);
+    }
+  };
+
+  // =========================================================================
   // USER PROVISIONING BY ORG ADMIN / SUPER ADMIN
   // =========================================================================
   const createCompanyUser = async (data: {
@@ -776,7 +939,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         userEmail: effectiveEmail,
         phone: data.phone?.trim() || '',
         role: data.role,
-        department: data.department?.trim() || (data.role === 'data_entry' ? 'إدخال البيانات والتسجيل' : 'العمليات والتوريد'),
+        department: data.department?.trim() || (data.role === 'data_entry' ? 'إدخال البيانات والتسجيل' : 'العمليات والتشغيل'),
         jobTitle: data.jobTitle?.trim() || defaultJobTitle,
         joinedAt: new Date().toISOString().split('T')[0],
         active: true,
@@ -790,6 +953,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const updated = [newMember, ...prev.filter(m => m.userEmail !== newMember.userEmail)];
         safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
         return updated;
+      });
+
+      await logAuditAction({
+        actionType: 'create',
+        entityType: 'member',
+        entityId: newMember.id,
+        entityName: newMember.userName,
+        orgId: targetOrgId,
+        details: `تم إنشاء حساب وتعيين موظف جديد: "${newMember.userName}" (${newMember.userEmail}) برتبة ${newMember.role} وقسم ${newMember.department}`,
       });
 
       return { 
@@ -844,6 +1016,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     setActiveOrgId(id);
+
+    await logAuditAction({
+      actionType: 'create',
+      entityType: 'organization',
+      entityId: id,
+      entityName: newOrg.name,
+      orgId: id,
+      orgName: newOrg.name,
+      details: `تم إنشاء شركة ومؤسسة جديدة: "${newOrg.name}" بكود (${newOrg.code}) وميزانية معتمدة ${newOrg.budget.toLocaleString()} ${newOrg.currency}`,
+    });
   };
 
   const updateOrganization = async (orgId: string, updates: Partial<Organization>) => {
@@ -877,9 +1059,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.ORGS, updated);
       return updated;
     });
+
+    const nameChanged = Boolean(updates.name && updates.name.trim() !== org.name.trim());
+    const budgetChanged = updates.budget !== undefined && updates.budget !== org.budget;
+    const actionType: AuditActionType = nameChanged ? 'rename' : (budgetChanged ? 'budget_change' : 'update');
+    let details = `تم تعديل بيانات الشركة: "${updatedOrg.name}"`;
+    if (nameChanged) details += ` (إعادة التسمية من "${org.name}" إلى "${updatedOrg.name}")`;
+    if (budgetChanged) details += ` (تعديل الميزانية من ${org.budget.toLocaleString()} إلى ${updatedOrg.budget.toLocaleString()} ${updatedOrg.currency})`;
+
+    await logAuditAction({
+      actionType,
+      entityType: 'organization',
+      entityId: orgId,
+      entityName: updatedOrg.name,
+      orgId,
+      orgName: updatedOrg.name,
+      details,
+    });
   };
 
   const deleteOrganization = async (orgId: string): Promise<{ success: boolean; message?: string }> => {
+    const orgToDelete = rawOrganizations.find(o => o.id === orgId);
     if (isFirebaseConfigured() && getDb()) {
       try {
         await deleteFirestoreDoc('organizations', orgId);
@@ -902,6 +1102,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (activeOrgId === orgId) {
       const remaining = rawOrganizations.filter(o => o.id !== orgId);
       setActiveOrgId(remaining[0]?.id || '');
+    }
+
+    if (orgToDelete) {
+      await logAuditAction({
+        actionType: 'delete',
+        entityType: 'organization',
+        entityId: orgId,
+        entityName: orgToDelete.name,
+        orgId,
+        orgName: orgToDelete.name,
+        details: `تم حذف الشركة "${orgToDelete.name}" (${orgToDelete.code}) من النظام`,
+      });
     }
 
     return { success: true, message: 'تم حذف الشركة بنجاح.' };
@@ -936,9 +1148,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
       return updated;
     });
+
+    await logAuditAction({
+      actionType: 'create',
+      entityType: 'member',
+      entityId: newMember.id,
+      entityName: newMember.userName,
+      orgId: newMember.orgId,
+      details: `تم إضافة وتعيين موظف جديد: "${newMember.userName}" (${newMember.jobTitle} - ${newMember.department}) برتبة ${newMember.role}`,
+    });
   };
 
   const removeMember = async (memberId: string) => {
+    const mem = rawMembers.find(m => m.id === memberId);
     if (isFirebaseConfigured() && getDb()) {
       try {
         await deleteFirestoreDoc('members', memberId);
@@ -956,6 +1178,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
       return updated;
     });
+
+    if (mem) {
+      await logAuditAction({
+        actionType: 'delete',
+        entityType: 'member',
+        entityId: memberId,
+        entityName: mem.userName,
+        orgId: mem.orgId,
+        details: `تم حذف حساب وسجل الموظف "${mem.userName}" (${mem.userEmail}) من النظام`,
+      });
+    }
   };
 
   const updateMember = async (memberId: string, updates: Partial<OrganizationMember>) => {
@@ -989,10 +1222,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
       return updated;
     });
+
+    const nameChanged = Boolean(
+      (updates.userName && updates.userName.trim() !== mem.userName.trim()) ||
+      (updates.jobTitle && updates.jobTitle.trim() !== mem.jobTitle.trim())
+    );
+    const roleChanged = Boolean(updates.role && updates.role !== mem.role);
+    const actionType: AuditActionType = roleChanged ? 'role_change' : (nameChanged ? 'rename' : 'update');
+    let details = `تم تعديل بيانات الموظف: "${updatedMember.userName}"`;
+    if (nameChanged) details += ` (تعديل الاسم أو المسمى إلى "${updatedMember.userName} - ${updatedMember.jobTitle}")`;
+    if (roleChanged) details += ` (ترقية أو تعديل الرتبة إلى ${updatedMember.role})`;
+
+    await logAuditAction({
+      actionType,
+      entityType: 'member',
+      entityId: memberId,
+      entityName: updatedMember.userName,
+      orgId: updatedMember.orgId,
+      details,
+    });
   };
 
   const toggleMemberStatus = async (memberId: string, active: boolean) => {
+    const mem = rawMembers.find(m => m.id === memberId);
     await updateMember(memberId, { active });
+
+    await logAuditAction({
+      actionType: 'status_toggle',
+      entityType: 'member',
+      entityId: memberId,
+      entityName: mem?.userName || memberId,
+      orgId: mem?.orgId,
+      details: `تم ${active ? 'تنشيط وتفعيل' : 'تعليق وإيقاف'} حساب الموظف "${mem?.userName || memberId}"`,
+    });
   };
 
   const adminResetUserPassword = async (email: string): Promise<{ success: boolean; message?: string }> => {
@@ -1001,6 +1263,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     try {
       await sendPasswordReset(email.trim().toLowerCase());
+      
+      await logAuditAction({
+        actionType: 'password_reset',
+        entityType: 'member',
+        entityId: email,
+        entityName: email,
+        details: `تم إرسال رابط رسمي لاستعادة وإعادة تعيين كلمة المرور إلى البريد: "${email}"`,
+      });
+
       return { 
         success: true, 
         message: `تم إرسال رابط استعادة وتعيين كلمة المرور بنجاح إلى: ${email}` 
@@ -1016,9 +1287,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // 3. SERVICES
   const addService = async (serviceData: Omit<ServiceCategory, 'id' | 'spentAmount'>) => {
+    const id = `srv-${Date.now()}`;
     const newService: ServiceCategory = {
       ...serviceData,
-      id: `srv-${Date.now()}`,
+      id,
       spentAmount: 0,
     };
 
@@ -1043,9 +1315,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.SERVICES, updated);
       return updated;
     });
+
+    await logAuditAction({
+      actionType: 'create',
+      entityType: 'service',
+      entityId: id,
+      entityName: newService.name,
+      orgId: newService.orgId,
+      details: `تم إنشاء بند صرف وتكلفة جديد: "${newService.name}" بكود (${newService.code}) وسقف ميزانية ${newService.budgetLimit.toLocaleString()}`,
+    });
   };
 
   const updateService = async (updatedService: ServiceCategory) => {
+    const oldService = rawServices.find(s => s.id === updatedService.id);
+
     if (isFirebaseConfigured() && getDb()) {
       try {
         await setFirestoreDoc('services', updatedService.id, updatedService);
@@ -1067,9 +1350,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.SERVICES, updated);
       return updated;
     });
+
+    const nameChanged = Boolean(oldService && oldService.name.trim() !== updatedService.name.trim());
+    const budgetChanged = Boolean(oldService && oldService.budgetLimit !== updatedService.budgetLimit);
+    const actionType: AuditActionType = nameChanged ? 'rename' : (budgetChanged ? 'budget_change' : 'update');
+    let details = `تم تعديل بند الصرف: "${updatedService.name}"`;
+    if (nameChanged && oldService) details += ` (إعادة التسمية من "${oldService.name}" إلى "${updatedService.name}")`;
+    if (budgetChanged && oldService) details += ` (تعديل سقف الميزانية من ${oldService.budgetLimit.toLocaleString()} إلى ${updatedService.budgetLimit.toLocaleString()})`;
+
+    await logAuditAction({
+      actionType,
+      entityType: 'service',
+      entityId: updatedService.id,
+      entityName: updatedService.name,
+      orgId: updatedService.orgId,
+      details,
+    });
   };
 
   const deleteService = async (serviceId: string) => {
+    const srv = rawServices.find(s => s.id === serviceId);
+
     if (isFirebaseConfigured() && getDb()) {
       try {
         await deleteFirestoreDoc('services', serviceId);
@@ -1087,13 +1388,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.SERVICES, updated);
       return updated;
     });
+
+    if (srv) {
+      await logAuditAction({
+        actionType: 'delete',
+        entityType: 'service',
+        entityId: serviceId,
+        entityName: srv.name,
+        orgId: srv.orgId,
+        details: `تم حذف بند الصرف "${srv.name}" (${srv.code}) من النظام`,
+      });
+    }
   };
 
   // 4. PROVIDERS
   const addProvider = async (providerData: Omit<ServiceProvider, 'id' | 'totalPaid'>) => {
+    const id = `prov-${Date.now()}`;
     const newProvider: ServiceProvider = {
       ...providerData,
-      id: `prov-${Date.now()}`,
+      id,
       totalPaid: 0,
       active: true,
     };
@@ -1119,9 +1432,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
       return updated;
     });
+
+    await logAuditAction({
+      actionType: 'create',
+      entityType: 'provider',
+      entityId: id,
+      entityName: newProvider.name,
+      orgId: newProvider.orgId,
+      details: `تم إضافة مورد ومقدم خدمة جديد: "${newProvider.name}" (هاتف: ${newProvider.phone || '-'})`,
+    });
   };
 
   const updateProvider = async (updatedProvider: ServiceProvider) => {
+    const oldProvider = rawProviders.find(p => p.id === updatedProvider.id);
+
     if (isFirebaseConfigured() && getDb()) {
       try {
         await setFirestoreDoc('providers', updatedProvider.id, updatedProvider);
@@ -1143,9 +1467,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
       return updated;
     });
+
+    const nameChanged = Boolean(oldProvider && oldProvider.name.trim() !== updatedProvider.name.trim());
+    const actionType: AuditActionType = nameChanged ? 'rename' : 'update';
+    let details = `تم تعديل بيانات المورد: "${updatedProvider.name}"`;
+    if (nameChanged && oldProvider) details += ` (إعادة التسمية من "${oldProvider.name}" إلى "${updatedProvider.name}")`;
+
+    await logAuditAction({
+      actionType,
+      entityType: 'provider',
+      entityId: updatedProvider.id,
+      entityName: updatedProvider.name,
+      orgId: updatedProvider.orgId,
+      details,
+    });
   };
 
   const deleteProvider = async (providerId: string) => {
+    const prov = rawProviders.find(p => p.id === providerId);
+
     if (isFirebaseConfigured() && getDb()) {
       try {
         await deleteFirestoreDoc('providers', providerId);
@@ -1163,6 +1503,229 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
       return updated;
     });
+
+    if (prov) {
+      await logAuditAction({
+        actionType: 'delete',
+        entityType: 'provider',
+        entityId: providerId,
+        entityName: prov.name,
+        orgId: prov.orgId,
+        details: `تم حذف المورد "${prov.name}" من النظام`,
+      });
+    }
+  };
+
+  // 5. PAYMENT ACCOUNTS / VAULTS
+  const addPaymentAccount = async (accountData: Omit<PaymentAccount, 'id' | 'createdAt'>) => {
+    const id = `vault-${Date.now()}`;
+    const createdAt = new Date().toISOString();
+    const newAccount: PaymentAccount = {
+      id,
+      ...accountData,
+      createdAt,
+    };
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('paymentAccounts', id, newAccount);
+      } catch (err) {
+        console.error('[Firebase] Error saving payment account:', err);
+      }
+    }
+
+    setRawPaymentAccounts(prev => {
+      const updated = [newAccount, ...prev];
+      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
+      return updated;
+    });
+
+    await logAuditAction({
+      actionType: 'create',
+      entityType: 'vault',
+      entityId: id,
+      entityName: newAccount.name,
+      orgId: newAccount.orgId,
+      details: `تم إنشاء وسيلة وخزينة دفع جديدة: "${newAccount.name}" (${newAccount.type}) برقم حساب/معرف (${newAccount.accountIdentifier})`,
+    });
+  };
+
+  const updatePaymentAccount = async (accountId: string, updates: Partial<PaymentAccount>) => {
+    const account = rawPaymentAccounts.find(a => a.id === accountId);
+    if (!account) return;
+
+    const updatedAccount: PaymentAccount = {
+      ...account,
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await updateFirestoreDoc('paymentAccounts', accountId, updatedAccount);
+      } catch (err) {
+        console.error('[Firebase] Error updating payment account:', err);
+      }
+    }
+
+    setRawPaymentAccounts(prev => {
+      const updated = prev.map(a => a.id === accountId ? updatedAccount : a);
+      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
+      return updated;
+    });
+
+    const nameChanged = Boolean(updates.name && updates.name.trim() !== account.name.trim());
+    await logAuditAction({
+      actionType: nameChanged ? 'rename' : 'update',
+      entityType: 'vault',
+      entityId: accountId,
+      entityName: updatedAccount.name,
+      orgId: updatedAccount.orgId,
+      details: nameChanged 
+        ? `تم إعادة تسمية وسيلة الدفع من "${account.name}" إلى "${updatedAccount.name}"`
+        : `تم تعديل بيانات وسيلة وخزينة الدفع "${updatedAccount.name}"`,
+    });
+  };
+
+  const deletePaymentAccount = async (accountId: string) => {
+    const account = rawPaymentAccounts.find(a => a.id === accountId);
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await deleteFirestoreDoc('paymentAccounts', accountId);
+      } catch (err) {
+        console.error('[Firebase] Error deleting payment account:', err);
+      }
+    }
+
+    setRawPaymentAccounts(prev => {
+      const updated = prev.filter(a => a.id !== accountId);
+      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
+      return updated;
+    });
+
+    if (account) {
+      await logAuditAction({
+        actionType: 'delete',
+        entityType: 'vault',
+        entityId: accountId,
+        entityName: account.name,
+        orgId: account.orgId,
+        details: `تم حذف وسيلة وخزينة الدفع "${account.name}" من النظام`,
+      });
+    }
+  };
+
+  const togglePaymentAccountStatus = async (accountId: string, active: boolean) => {
+    const account = rawPaymentAccounts.find(a => a.id === accountId);
+    await updatePaymentAccount(accountId, { active });
+
+    await logAuditAction({
+      actionType: 'status_toggle',
+      entityType: 'vault',
+      entityId: accountId,
+      entityName: account?.name || accountId,
+      orgId: account?.orgId,
+      details: `تم ${active ? 'تفعيل' : 'تعطيل'} حساب/خزينة الدفع "${account?.name || accountId}"`,
+    });
+  };
+
+  // 6. DEPARTMENTS & STRUCTURE
+  const addDepartment = async (deptData: Omit<Department, 'id' | 'createdAt'>) => {
+    const id = `dept-${Date.now()}`;
+    const createdAt = new Date().toISOString();
+    const newDept: Department = {
+      id,
+      ...deptData,
+      createdAt,
+    };
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('departments', id, newDept);
+      } catch (err) {
+        console.error('[Firebase] Error saving department:', err);
+      }
+    }
+
+    setRawDepartments(prev => {
+      const updated = [newDept, ...prev];
+      safeSetLocal(STORAGE_KEYS.DEPARTMENTS, updated);
+      return updated;
+    });
+
+    await logAuditAction({
+      actionType: 'create',
+      entityType: 'department',
+      entityId: id,
+      entityName: newDept.name,
+      orgId: newDept.orgId,
+      details: `تم إنشاء قسم إداري جديد: "${newDept.name}"${newDept.managerName ? ` برئاسة (${newDept.managerName})` : ''}`,
+    });
+  };
+
+  const updateDepartment = async (deptId: string, updates: Partial<Department>) => {
+    const dept = rawDepartments.find(d => d.id === deptId);
+    if (!dept) return;
+
+    const updatedDept: Department = {
+      ...dept,
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await updateFirestoreDoc('departments', deptId, updatedDept);
+      } catch (err) {
+        console.error('[Firebase] Error updating department:', err);
+      }
+    }
+
+    setRawDepartments(prev => {
+      const updated = prev.map(d => d.id === deptId ? updatedDept : d);
+      safeSetLocal(STORAGE_KEYS.DEPARTMENTS, updated);
+      return updated;
+    });
+
+    const nameChanged = Boolean(updates.name && updates.name.trim() !== dept.name.trim());
+    await logAuditAction({
+      actionType: nameChanged ? 'rename' : 'update',
+      entityType: 'department',
+      entityId: deptId,
+      entityName: updatedDept.name,
+      orgId: updatedDept.orgId,
+      details: nameChanged 
+        ? `تم إعادة تسمية القسم الإداري من "${dept.name}" إلى "${updatedDept.name}"`
+        : `تم تعديل بيانات القسم الإداري "${updatedDept.name}"`,
+    });
+  };
+
+  const deleteDepartment = async (deptId: string) => {
+    const dept = rawDepartments.find(d => d.id === deptId);
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await deleteFirestoreDoc('departments', deptId);
+      } catch (err) {
+        console.error('[Firebase] Error deleting department:', err);
+      }
+    }
+
+    setRawDepartments(prev => {
+      const updated = prev.filter(d => d.id !== deptId);
+      safeSetLocal(STORAGE_KEYS.DEPARTMENTS, updated);
+      return updated;
+    });
+
+    if (dept) {
+      await logAuditAction({
+        actionType: 'delete',
+        entityType: 'department',
+        entityId: deptId,
+        entityName: dept.name,
+        orgId: dept.orgId,
+        details: `تم حذف القسم الإداري "${dept.name}" من النظام`,
+      });
+    }
   };
 
   // 5. EXPENSE REQUESTS
@@ -1795,6 +2358,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         requestClarification,
         replyClarification,
         disburseRequest,
+        paymentAccounts: scopedPaymentAccounts,
+        addPaymentAccount,
+        updatePaymentAccount,
+        deletePaymentAccount,
+        togglePaymentAccountStatus,
+        departments: scopedDepartments,
+        addDepartment,
+        updateDepartment,
+        deleteDepartment,
+        auditLogs: scopedAuditLogs,
+        logAuditAction,
         refreshData,
         resetToSampleData,
       }}

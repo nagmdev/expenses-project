@@ -169,3 +169,67 @@ export const SUPPORTED_CURRENCIES: CurrencyOption[] = [
   { code: 'OMR', nameAr: 'ريال عماني', symbol: 'ر.ع', label: 'OMR - ريال عماني (Omani Rial)' },
   { code: 'JOD', nameAr: 'دينار أردني', symbol: 'د.أ', label: 'JOD - دينار أردني (Jordanian Dinar)' },
 ];
+
+export type AuditActionType = 
+  | 'create' 
+  | 'update' 
+  | 'rename' 
+  | 'delete' 
+  | 'status_toggle' 
+  | 'budget_change'
+  | 'password_reset'
+  | 'role_change';
+
+export type AuditEntityType = 
+  | 'organization' 
+  | 'member' 
+  | 'service' 
+  | 'provider' 
+  | 'vault' 
+  | 'department' 
+  | 'role'
+  | 'request';
+
+export interface AuditLogEntry {
+  id: string;
+  actionType: AuditActionType;
+  entityType: AuditEntityType;
+  entityId: string;
+  entityName: string;
+  orgId?: string;
+  orgName?: string;
+  actorId: string;
+  actorName: string;
+  actorEmail: string;
+  details: string;
+  timestamp: string;
+}
+
+export type PaymentAccountType = 'bank' | 'instapay' | 'wallet' | 'cash' | 'other';
+
+export interface PaymentAccount {
+  id: string;
+  orgId: string;
+  name: string; // e.g. "حساب بنك CIB الرئيسي" أو "خزينة كاش المقر" أو "إنستاباي الإدارة"
+  type: PaymentAccountType;
+  accountIdentifier: string; // IBAN, IPA (name@instapay), Mobile #, or Account #
+  bankName?: string;
+  balance?: number;
+  currency: string;
+  active: boolean;
+  description?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface Department {
+  id: string;
+  orgId: string;
+  name: string;
+  code?: string;
+  description?: string;
+  managerName?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+

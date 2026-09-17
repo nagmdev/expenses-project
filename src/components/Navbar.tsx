@@ -59,7 +59,7 @@ export const Navbar: React.FC = () => {
       },
       {
         id: 'organizations',
-        label: '👥 موظفو الشركة وحساباتهم',
+        label: '🏛️ إدارة الشركة والموظفين والعمليات',
         icon: Users2,
         badge: null,
       },
@@ -98,7 +98,7 @@ export const Navbar: React.FC = () => {
       },
       {
         id: 'organizations',
-        label: '🏛️ إدارة الشركات والمستخدمين',
+        label: '🏛️ مركز الإدارة والتحكم',
         icon: Building2,
         badge: null,
       },
@@ -130,7 +130,7 @@ export const Navbar: React.FC = () => {
       },
       {
         id: 'organizations',
-        label: '🏛️ إدارة الشركات والمستخدمين',
+        label: '🏛️ مركز الإدارة والتحكم الشامل',
         icon: Building2,
         badge: null,
       },
