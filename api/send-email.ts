@@ -36,6 +36,7 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
+    const parsedBody = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
     const {
       to,
       subject,
@@ -45,7 +46,7 @@ export default async function handler(req: any, res: any) {
       replyTo,
       provider = 'auto',
       apiKey,
-    } = req.body || {};
+    } = parsedBody;
 
     if (!to || (Array.isArray(to) && to.length === 0)) {
       return res.status(400).json({ error: 'Missing required recipient: to' });
