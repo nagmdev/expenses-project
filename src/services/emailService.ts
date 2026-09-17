@@ -296,11 +296,7 @@ export async function sendNotificationEmail(
 
     try {
       // 1. Direct Serverless API Delivery (Vercel + Resend/Brevo)
-      if (
-        (settings.deliveryMethod === 'direct_api' || !settings.deliveryMethod) &&
-        settings.directApiKey &&
-        settings.directApiKey.trim().length > 0
-      ) {
+      if (settings.deliveryMethod === 'direct_api' || !settings.deliveryMethod) {
         try {
           const apiRes = await fetch('/api/send-email', {
             method: 'POST',
@@ -314,7 +310,7 @@ export async function sendNotificationEmail(
               senderEmail: settings.senderEmail || 'awadhsaudi2030@gmail.com',
               replyTo: settings.replyToEmail || settings.senderEmail || 'awadhsaudi2030@gmail.com',
               provider: settings.directProvider || 'auto',
-              apiKey: settings.directApiKey,
+              apiKey: settings.directApiKey || undefined,
             }),
           });
           const apiData = await apiRes.json().catch(() => null);
@@ -323,7 +319,7 @@ export async function sendNotificationEmail(
             status = 'sent';
           } else if (apiData && !apiData.success && !apiData.skipped) {
             console.warn('[EmailService] Direct API notice:', apiData);
-            errorMessage = apiData.message || (typeof apiData.error === 'string' ? apiData.error : undefined);
+            errorMessage = apiData.error || apiData.message || undefined;
           }
         } catch (err: any) {
           console.warn('[EmailService] Direct API fetch warning:', err);

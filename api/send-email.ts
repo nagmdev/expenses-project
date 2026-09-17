@@ -125,10 +125,15 @@ export default async function handler(req: any, res: any) {
 
       if (!resendRes.ok) {
         console.error('[Vercel Serverless Email] Resend API Error:', resendData);
+        let errorMsg = resendData?.message || resendData?.name || 'فشل إرسال الإيميل عبر Resend';
+        if (typeof errorMsg === 'string' && errorMsg.includes('You can only send testing emails to your own email address')) {
+          errorMsg = `تنبيه: حساب Resend الحالي في الوضع التجريبي المجاني (Sandbox) ويسمح فقط بالإرسال إلى حسابك (${effectiveSender}). للتمكن من إرسال الإيميلات لأي بريد موظف آخر، يرجى تفعيل Brevo (300 إيميل يومياً مجاناً لأي عنوان) أو توثيق دومين في Resend.`;
+        }
         return res.status(resendRes.status).json({
           success: false,
           provider: 'resend',
-          error: resendData?.message || resendData?.name || 'فشل إرسال الإيميل عبر Resend',
+          error: errorMsg,
+          rawError: resendData?.message,
           details: resendData,
         });
       }

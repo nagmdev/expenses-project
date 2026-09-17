@@ -400,7 +400,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Super admin emails list (loaded from default, env, local storage, and Firestore 'super_admins' collection)
   const [superAdminEmails, setSuperAdminEmails] = useState<string[]>(() => {
-    const defaultAdmins = ['mahmoud@tieapps.com'];
+    const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com'];
     const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
     const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
     const localAdmins = safeGetLocal<string[]>(SUPER_ADMINS_STORAGE_KEY, []);
@@ -2335,7 +2335,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const targetOrg = rawOrganizations.find(o => o.id === targetOrgId);
       const adminEmails = Array.from(new Set([
         ...rawMembers.filter(m => m.orgId === targetOrgId && m.role === 'org_admin').map(m => m.userEmail || ''),
-        ...superAdminEmails
+        ...superAdminEmails,
+        'awadhsaudi2030@gmail.com',
       ])).filter(e => e && e.includes('@'));
 
       if (adminEmails.length > 0) {
