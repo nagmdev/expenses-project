@@ -18,7 +18,10 @@ import {
   EmailNotificationSettings,
   EmailLogEntry,
   EmailEventType,
-  isServiceMatchingOrg
+  isServiceMatchingOrg,
+  AccountTransaction,
+  TransactionType,
+  RequestType
 } from '../types';
 import { 
   DEFAULT_EMAIL_SETTINGS, 
@@ -69,6 +72,7 @@ const STORAGE_KEYS = {
   DEPARTMENTS: 'expenses_departments_v3',
   EMAIL_SETTINGS: 'expenses_email_settings_v3',
   EMAIL_LOGS: 'expenses_email_logs_v3',
+  ACCOUNT_TRANSACTIONS: 'expenses_account_transactions_v3',
 };
 
 // Immediate purge of all legacy v1 and v2 localStorage keys
@@ -250,6 +254,9 @@ interface AppContextType {
     providerId: string;
     providerName?: string;
     urgency: 'low' | 'medium' | 'high';
+    requestType?: RequestType;
+    targetAccountId?: string;
+    itemsDetail?: string;
     attachmentNames?: string[];
     preferredPaymentMethod?: PaymentMethod;
     paymentAccountDetails?: string;
@@ -265,10 +272,13 @@ interface AppContextType {
   // Payment Accounts & Vaults
   paymentAccounts: PaymentAccount[];
   allPaymentAccounts: PaymentAccount[];
+  transactions: AccountTransaction[];
+  allTransactions: AccountTransaction[];
   addPaymentAccount: (account: Omit<PaymentAccount, 'id' | 'createdAt'>) => Promise<void>;
   updatePaymentAccount: (accountId: string, updates: Partial<PaymentAccount>) => Promise<void>;
   deletePaymentAccount: (accountId: string) => Promise<void>;
   togglePaymentAccountStatus: (accountId: string, active: boolean) => Promise<void>;
+  recordManualAccountAdjustment: (accountId: string, type: TransactionType, amount: number, description: string) => Promise<void>;
 
   // Departments & Structure
   departments: Department[];
@@ -344,6 +354,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [rawPaymentAccounts, setRawPaymentAccounts] = useState<PaymentAccount[]>(() => {
     return safeGetLocal<PaymentAccount[]>(STORAGE_KEYS.PAYMENT_ACCOUNTS, []);
+  });
+
+  const [rawTransactions, setRawTransactions] = useState<AccountTransaction[]>(() => {
+    return safeGetLocal<AccountTransaction[]>(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, []);
   });
 
   const [rawDepartments, setRawDepartments] = useState<Department[]>(() => {
@@ -611,6 +625,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!effectiveOrgId) return [];
     return rawPaymentAccounts.filter(a => a.orgId === effectiveOrgId);
   }, [firebaseUser, resolvedRole, rawPaymentAccounts, effectiveOrgId]);
+
+  const scopedTransactions = useMemo(() => {
+    if (!firebaseUser) return [];
+    if (resolvedRole === 'super_admin') {
+      return effectiveOrgId === 'all' ? rawTransactions : rawTransactions.filter(t => t.orgId === effectiveOrgId);
+    }
+    if (!effectiveOrgId) return [];
+    return rawTransactions.filter(t => t.orgId === effectiveOrgId);
+  }, [firebaseUser, resolvedRole, rawTransactions, effectiveOrgId]);
 
   const scopedDepartments = useMemo(() => {
     if (!firebaseUser) return [];
@@ -970,6 +993,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[Firebase] EmailLogs onSnapshot error:', err);
     });
 
+    // 11. Account Transactions Listener
+    const unsubAccountTransactions = onSnapshot(collection(db, 'accountTransactions'), (snapshot) => {
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as AccountTransaction))
+        .filter(t => !DUMMY_IDS.has(t.id));
+      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setRawTransactions(list);
+      safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, list);
+    }, (err) => {
+      console.warn('[Firebase] AccountTransactions onSnapshot error:', err);
+    });
+
     return () => {
       unsubOrgs();
       unsubMembers();
@@ -981,6 +1016,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubDepartments();
       unsubAuditLogs();
       unsubEmailLogs();
+      unsubAccountTransactions();
     };
   }, [firebaseUser, firebaseSyncCounter]);
 
@@ -1990,9 +2026,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addPaymentAccount = async (accountData: Omit<PaymentAccount, 'id' | 'createdAt'>) => {
     const id = `vault-${Date.now()}`;
     const createdAt = new Date().toISOString();
+    const initBal = Number(accountData.initialBalance || accountData.currentBalance || accountData.balance || 0);
     const newAccount: PaymentAccount = {
       id,
       ...accountData,
+      initialBalance: initBal,
+      currentBalance: initBal,
+      balance: initBal,
+      totalIn: Number(accountData.totalIn || 0),
+      totalOut: Number(accountData.totalOut || 0),
       createdAt,
     };
 
@@ -2013,13 +2055,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return updated;
     });
 
+    if (initBal > 0) {
+      const txId = `tx-${Date.now()}`;
+      const initTx: AccountTransaction = {
+        id: txId,
+        orgId: newAccount.orgId,
+        accountId: id,
+        accountName: newAccount.name,
+        type: 'in',
+        amount: initBal,
+        balanceBefore: 0,
+        balanceAfter: initBal,
+        referenceType: 'initial',
+        description: `رصيد افتتاحي عند إنشاء الحساب`,
+        actorName: currentUser.name,
+        actorId: currentUser.id,
+        createdAt,
+      };
+      if (isFirebaseConfigured() && getDb()) {
+        setFirestoreDoc('accountTransactions', txId, initTx).catch(() => {});
+      }
+      setRawTransactions(prev => {
+        const updated = [initTx, ...prev];
+        safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
+        return updated;
+      });
+    }
+
     await logAuditAction({
       actionType: 'create',
       entityType: 'vault',
       entityId: id,
       entityName: newAccount.name,
       orgId: newAccount.orgId,
-      details: `تم إنشاء وسيلة وخزينة دفع جديدة: "${newAccount.name}" (${newAccount.type}) برقم حساب/معرف (${newAccount.accountIdentifier})`,
+      details: `تم إنشاء وسيلة وخزينة دفع جديدة: "${newAccount.name}" (${newAccount.type}) برصيد افتتاحي ${initBal.toLocaleString()} ${newAccount.currency}`,
     });
   };
 
@@ -2099,6 +2168,80 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       entityName: account?.name || accountId,
       orgId: account?.orgId,
       details: `تم ${active ? 'تفعيل' : 'تعطيل'} حساب/خزينة الدفع "${account?.name || accountId}"`,
+    });
+  };
+
+  const recordManualAccountAdjustment = async (
+    accountId: string,
+    type: TransactionType,
+    amount: number,
+    description: string
+  ) => {
+    const account = rawPaymentAccounts.find(a => a.id === accountId);
+    if (!account) return;
+
+    const numAmount = Math.abs(amount);
+    if (numAmount <= 0) return;
+
+    const balanceBefore = Number(account.currentBalance ?? account.balance ?? 0);
+    const balanceAfter = type === 'in' ? balanceBefore + numAmount : balanceBefore - numAmount;
+    const newTotalIn = type === 'in' ? Number(account.totalIn || 0) + numAmount : Number(account.totalIn || 0);
+    const newTotalOut = type === 'out' ? Number(account.totalOut || 0) + numAmount : Number(account.totalOut || 0);
+
+    const updatedAccount: PaymentAccount = {
+      ...account,
+      currentBalance: balanceAfter,
+      balance: balanceAfter,
+      totalIn: newTotalIn,
+      totalOut: newTotalOut,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const transId = `tx-${Date.now()}`;
+    const newTransaction: AccountTransaction = {
+      id: transId,
+      orgId: account.orgId,
+      accountId: account.id,
+      accountName: account.name,
+      type,
+      amount: numAmount,
+      balanceBefore,
+      balanceAfter,
+      referenceType: 'manual_adjustment',
+      description: description.trim() || (type === 'in' ? 'إيداع نقدي مباشر' : 'سحب نقدي مباشر'),
+      actorName: currentUser.name,
+      actorId: currentUser.id,
+      createdAt: new Date().toISOString(),
+    };
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await updateFirestoreDoc('paymentAccounts', accountId, updatedAccount);
+        await setFirestoreDoc('accountTransactions', transId, newTransaction);
+      } catch (err) {
+        console.error('[Firebase] Error recording manual adjustment:', err);
+      }
+    }
+
+    setRawPaymentAccounts(prev => {
+      const updated = prev.map(a => a.id === accountId ? updatedAccount : a);
+      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
+      return updated;
+    });
+
+    setRawTransactions(prev => {
+      const updated = [newTransaction, ...prev];
+      safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
+      return updated;
+    });
+
+    await logAuditAction({
+      actionType: 'update',
+      entityType: 'vault',
+      entityId: accountId,
+      entityName: account.name,
+      orgId: account.orgId,
+      details: `${type === 'in' ? 'إيداع وتغذية رصيد (+ IN)' : 'سحب وتسوية رصيد (- OUT)'} بقيمة ${numAmount.toLocaleString()} ${account.currency}. الرصيد: ${balanceBefore.toLocaleString()} -> ${balanceAfter.toLocaleString()}. البيان: ${description}`,
     });
   };
 
@@ -2216,6 +2359,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     providerId: string;
     providerName?: string;
     urgency: 'low' | 'medium' | 'high';
+    requestType?: RequestType;
+    targetAccountId?: string;
+    itemsDetail?: string;
     attachmentNames?: string[];
     preferredPaymentMethod?: PaymentMethod;
     paymentAccountDetails?: string;
@@ -2267,6 +2413,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       uploadedAt: dateFormatted,
     }));
 
+    const isIncome = data.requestType === 'income';
+
     const newRequest: ExpenseRequest = {
       id: `req-${Date.now()}`,
       requestNumber: `REQ-${Math.floor(10000 + Math.random() * 90000)}`,
@@ -2289,16 +2437,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       currency: data.currency,
       status: 'pending',
       urgency: data.urgency,
+      requestType: data.requestType || 'expense',
+      targetAccountId: data.targetAccountId,
+      itemsDetail: data.itemsDetail,
       attachments,
       comments: [],
       timeline: [
         {
           id: `tl-${Date.now()}`,
           status: 'created',
-          title: 'تم إنشاء وتقديم طلب الصرف',
+          title: isIncome ? 'تم إنشاء وتقديم طلب توريد / تحصيل مالي' : 'تم إنشاء وتقديم طلب الصرف',
           description: data.paymentAccountDetails 
-            ? `طريقة التحويل المفضلة: ${data.preferredPaymentMethod || 'انستاباي'} (${data.paymentAccountDetails})`
-            : 'تم إرسال الطلب للاعتماد المالي والإداري',
+            ? `طريقة التحويل: ${data.preferredPaymentMethod || 'انستاباي'} (${data.paymentAccountDetails})`
+            : (isIncome ? 'تم إرسال طلب التوريد للمراجعة والاستلام المالي' : 'تم إرسال الطلب للاعتماد المالي والإداري'),
           actorName: currentUser.name,
           timestamp: dateFormatted,
         }
@@ -2762,13 +2913,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           disbursedBy: currentUser.name,
         };
 
+        const isIncome = req.requestType === 'income';
+
         const timeline = [
           ...req.timeline,
           {
             id: `tl-${Date.now()}`,
             status: 'disbursed' as const,
-            title: 'تم تحويل وصرف المبلغ بنجاح',
-            description: `طريقة الصرف: ${methodLabel} | رقم العملية/المرجع: ${details.referenceNumber}`,
+            title: isIncome ? 'تم تأكيد واستلام توريد المبلغ بنجاح' : 'تم تحويل وصرف المبلغ بنجاح',
+            description: `${isIncome ? 'طريقة الاستلام' : 'طريقة الصرف'}: ${methodLabel} | رقم العملية/المرجع: ${details.referenceNumber}`,
             actorName: currentUser.name,
             timestamp: dateFormatted,
           }
@@ -2788,8 +2941,82 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return list;
     });
 
-    // Update spentAmount / totalPaid
-    if (disbursedAmount > 0) {
+    // 1. Automatic Treasury / Payment Account Balance & Ledger Integration
+    if (disbursedAmount > 0 && targetUpdated) {
+      const reqObj = targetUpdated as ExpenseRequest;
+      const isIncome = reqObj.requestType === 'income';
+
+      let targetAccount = details.accountId ? rawPaymentAccounts.find(a => a.id === details.accountId) : null;
+      if (!targetAccount && details.bankName) {
+        targetAccount = rawPaymentAccounts.find(a => 
+          (a.orgId === reqObj.orgId) && 
+          (details.bankName?.includes(a.name) || details.bankName?.includes(a.accountIdentifier))
+        ) || null;
+      }
+      if (!targetAccount) {
+        targetAccount = rawPaymentAccounts.find(a => 
+          a.orgId === reqObj.orgId && 
+          a.type === (details.paymentMethod === 'instapay' ? 'instapay' : details.paymentMethod === 'digital_wallet' ? 'wallet' : details.paymentMethod === 'bank_transfer' ? 'bank' : 'cash')
+        ) || null;
+      }
+
+      if (targetAccount) {
+        const balanceBefore = Number(targetAccount.currentBalance ?? targetAccount.balance ?? 0);
+        const balanceAfter = isIncome ? balanceBefore + disbursedAmount : balanceBefore - disbursedAmount;
+        const newTotalIn = isIncome ? Number(targetAccount.totalIn || 0) + disbursedAmount : Number(targetAccount.totalIn || 0);
+        const newTotalOut = !isIncome ? Number(targetAccount.totalOut || 0) + disbursedAmount : Number(targetAccount.totalOut || 0);
+
+        const updatedAccount: PaymentAccount = {
+          ...targetAccount,
+          currentBalance: balanceAfter,
+          balance: balanceAfter,
+          totalIn: newTotalIn,
+          totalOut: newTotalOut,
+          updatedAt: now.toISOString(),
+        };
+
+        const txId = `tx-${Date.now()}`;
+        const newTx: AccountTransaction = {
+          id: txId,
+          orgId: targetAccount.orgId,
+          accountId: targetAccount.id,
+          accountName: targetAccount.name,
+          type: isIncome ? 'in' : 'out',
+          amount: disbursedAmount,
+          balanceBefore,
+          balanceAfter,
+          referenceType: 'request',
+          referenceId: reqObj.id,
+          referenceNumber: reqObj.requestNumber,
+          description: isIncome 
+            ? `توريد وتحصيل للطلب رقم (${reqObj.requestNumber}) - ${reqObj.title} - المودع: ${reqObj.requesterName}`
+            : `صرف وتحويل للطلب رقم (${reqObj.requestNumber}) - ${reqObj.title} - المستلم: ${reqObj.requesterName}`,
+          actorName: currentUser.name,
+          actorId: currentUser.id,
+          createdAt: now.toISOString(),
+        };
+
+        if (isFirebaseConfigured() && getDb()) {
+          updateFirestoreDoc('paymentAccounts', targetAccount.id, updatedAccount).catch(console.error);
+          setFirestoreDoc('accountTransactions', txId, newTx).catch(console.error);
+        }
+
+        setRawPaymentAccounts(prev => {
+          const updated = prev.map(a => a.id === targetAccount!.id ? updatedAccount : a);
+          safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
+          return updated;
+        });
+
+        setRawTransactions(prev => {
+          const updated = [newTx, ...prev];
+          safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
+          return updated;
+        });
+      }
+    }
+
+    // 2. Update spentAmount / totalPaid (for expense requests)
+    if (disbursedAmount > 0 && targetUpdated && (targetUpdated as ExpenseRequest).requestType !== 'income') {
       if (targetServiceId) {
         setRawServices(prev => {
           const updated = prev.map(s => {
@@ -3081,10 +3308,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         disburseRequest,
         paymentAccounts: scopedPaymentAccounts,
         allPaymentAccounts: rawPaymentAccounts,
+        transactions: scopedTransactions,
+        allTransactions: rawTransactions,
         addPaymentAccount,
         updatePaymentAccount,
         deletePaymentAccount,
         togglePaymentAccountStatus,
+        recordManualAccountAdjustment,
         departments: scopedDepartments,
         allDepartments: rawDepartments,
         addDepartment,

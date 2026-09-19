@@ -9,6 +9,7 @@ import { RequesterTracker } from './components/RequesterTracker';
 import { ServicesManagement } from './components/ServicesManagement';
 import { VendorsManagement } from './components/VendorsManagement';
 import { OrganizationsManagement } from './components/OrganizationsManagement';
+import { TreasuryManagement } from './components/TreasuryManagement';
 import { NewRequestModal } from './components/NewRequestModal';
 import { RequestDetailModal } from './components/RequestDetailModal';
 import { FirebaseConfigModal } from './components/FirebaseConfigModal';
@@ -212,6 +213,10 @@ const MainApp: React.FC = () => {
                 onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
                 onSelectRequest={setSelectedRequest}
               />
+            )}
+
+            {activeTab === 'treasury' && (
+              <TreasuryManagement />
             )}
 
             {activeTab === 'services' && (

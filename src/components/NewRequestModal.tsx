@@ -6,9 +6,12 @@ import {
   Building2,
   AlertCircle,
   Layers,
-  Building
+  Building,
+  Landmark,
+  ArrowDownLeft,
+  ArrowUpRight
 } from 'lucide-react';
-import { PaymentMethod, SUPPORTED_CURRENCIES, isServiceMatchingOrg } from '../types';
+import { PaymentMethod, SUPPORTED_CURRENCIES, isServiceMatchingOrg, RequestType } from '../types';
 import { 
   sanitizeAmount, 
   sanitizeDigitalWallet, 
@@ -62,6 +65,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     allServices,
     providers, 
     allProviders,
+    paymentAccounts,
+    allPaymentAccounts,
     activeOrg, 
     activeOrgId, 
     createRequest, 
@@ -92,6 +97,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   // Real, Approved Services and Providers strictly linked to this organization
   const sourceServices = isSuperAdmin ? (allServices?.length ? allServices : services) : services;
   const sourceProviders = isSuperAdmin ? (allProviders?.length ? allProviders : providers) : providers;
+  const sourcePaymentAccounts = isSuperAdmin ? (allPaymentAccounts?.length ? allPaymentAccounts : paymentAccounts) : paymentAccounts;
 
   const availableServices = useMemo(() => {
     if (!selectedOrgId) return [];
@@ -102,6 +108,16 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     if (!selectedOrgId) return [];
     return sourceProviders.filter(p => p.orgId === selectedOrgId);
   }, [sourceProviders, selectedOrgId]);
+
+  const availableAccounts = useMemo(() => {
+    if (!selectedOrgId) return [];
+    return sourcePaymentAccounts.filter(a => a.orgId === selectedOrgId && a.active);
+  }, [sourcePaymentAccounts, selectedOrgId]);
+
+  // Request Type & Target Account & Goods details
+  const [requestType, setRequestType] = useState<RequestType>('expense');
+  const [targetAccountId, setTargetAccountId] = useState<string>('');
+  const [itemsDetail, setItemsDetail] = useState('');
 
   // Selected Service & Provider IDs
   const [selectedServiceId, setSelectedServiceId] = useState<string>('');
@@ -209,6 +225,9 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         providerId: selectedProvider.id,
         providerName: selectedProvider.name,
         urgency,
+        requestType,
+        targetAccountId: targetAccountId || undefined,
+        itemsDetail: itemsDetail.trim() || undefined,
         attachmentNames: [],
         preferredPaymentMethod,
         paymentAccountDetails: paymentAccountDetails.trim(),
@@ -251,6 +270,34 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           
           {/* Scrollable Form Body */}
           <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
+          
+            {/* Operation / Request Type Selector (Inflow vs Outflow) */}
+            <div className="bg-slate-100/90 p-1.5 rounded-2xl flex gap-2">
+              <button
+                type="button"
+                onClick={() => setRequestType('expense')}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl font-bold transition cursor-pointer text-xs ${
+                  requestType === 'expense'
+                    ? 'bg-white text-rose-800 shadow-xs border border-rose-200'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <ArrowUpRight className="h-4 w-4 text-rose-600" />
+                <span>💸 طلب صرف مالي (Outflow)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setRequestType('income')}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl font-bold transition cursor-pointer text-xs ${
+                  requestType === 'income'
+                    ? 'bg-white text-emerald-800 shadow-xs border border-emerald-200'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <ArrowDownLeft className="h-4 w-4 text-emerald-600" />
+                <span>📥 توريد / تحصيل مالي (Inflow)</span>
+              </button>
+            </div>
           
             {/* Organization Selector / Scope Badge */}
             {isSuperAdmin && (!activeOrgId || activeOrgId === 'all') ? (
@@ -537,6 +584,46 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   />
                 </div>
               </div>
+            </div>
+
+            {/* Target Treasury Account / Wallet */}
+            {availableAccounts.length > 0 && (
+              <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80">
+                <label className="block font-bold text-slate-800 mb-1 flex items-center gap-1.5">
+                  <Landmark className="h-3.5 w-3.5 text-emerald-600" />
+                  <span>
+                    {requestType === 'income' 
+                      ? 'حساب / خزينة الشركة المستلمة للتوريد (اختياري)' 
+                      : 'حساب / خزينة الصرف المحول منها (اختياري)'}
+                  </span>
+                </label>
+                <select
+                  value={targetAccountId}
+                  onChange={(e) => setTargetAccountId(e.target.value)}
+                  className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-800 text-xs outline-hidden"
+                >
+                  <option value="">-- اختياري: سيقوم مسؤول الصرف بتحديده وتأكيده عند التنفيذ --</option>
+                  {availableAccounts.map(acc => (
+                    <option key={acc.id} value={acc.id}>
+                      {acc.name} ({acc.accountIdentifier}) - الرصيد المتاح: {Number(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Goods / Items Detail (بيانات البضاعة أو الأصناف) */}
+            <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80">
+              <label className="block font-bold text-slate-800 mb-1">
+                📦 بيانات البضاعة أو الأصناف (اختياري - اسم الصنف، الكمية، سعر الوحدة)
+              </label>
+              <input
+                type="text"
+                value={itemsDetail}
+                onChange={(e) => setItemsDetail(e.target.value)}
+                placeholder="مثال: 10 كراتين بضاعة x 150 ج.م، كود الصنف #205..."
+                className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-medium text-slate-800 text-xs outline-hidden"
+              />
             </div>
 
             {/* 5. Justification Selection (Single clean control, zero duplicate inputs) */}

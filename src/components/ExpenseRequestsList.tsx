@@ -72,6 +72,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   const [clarificationQuestion, setClarificationQuestion] = useState('');
 
   // Disbursement States
+  const [disburseAccountId, setDisburseAccountId] = useState<string>('');
   const [disburseMethod, setDisburseMethod] = useState<PaymentMethod>('instapay');
   const [disburseRefNumber, setDisburseRefNumber] = useState(`TXN-${Math.floor(10000000 + Math.random() * 90000000)}`);
   const [disburseBankName, setDisburseBankName] = useState('انستاباي / المصرف الرئيسي');
@@ -169,8 +170,16 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     if (activeRequest?.preferredPaymentMethod) {
       setDisburseMethod(activeRequest.preferredPaymentMethod);
     }
+    if (activeRequest?.targetAccountId) {
+      setDisburseAccountId(activeRequest.targetAccountId);
+      const acc = paymentAccounts.find(a => a.id === activeRequest.targetAccountId);
+      if (acc) setDisburseBankName(`${acc.name} (${acc.accountIdentifier})`);
+    } else if (paymentAccounts.length > 0) {
+      setDisburseAccountId(paymentAccounts[0].id);
+      setDisburseBankName(`${paymentAccounts[0].name} (${paymentAccounts[0].accountIdentifier})`);
+    }
     setActiveAction('none');
-  }, [activeRequest?.id]);
+  }, [activeRequest?.id, paymentAccounts]);
 
   // Copy Bank Account Details to Clipboard
   const handleCopyAccountDetails = (text: string) => {
@@ -207,10 +216,13 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
     setDisbursing(true);
     try {
+      const selectedAccount = paymentAccounts.find(a => a.id === disburseAccountId);
       await disburseRequest(activeRequest.id, {
         paymentMethod: disburseMethod,
         referenceNumber: disburseRefNumber.trim(),
-        bankName: disburseBankName.trim() || 'المصرف الرئيسي',
+        bankName: selectedAccount ? `${selectedAccount.name} (${selectedAccount.accountIdentifier})` : (disburseBankName.trim() || 'المصرف الرئيسي'),
+        accountId: disburseAccountId || undefined,
+        accountName: selectedAccount?.name,
         notes: disburseNotes.trim() || undefined,
       });
       setActiveAction('none');
@@ -1057,17 +1069,27 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                           <span>الطلب معتمد ومصرح بصرفه بمبلغ ({activeRequest.amount.toLocaleString()} {activeRequest.currency})</span>
                         </span>
                         <p className="text-xs text-blue-700 mt-0.5">
-                          جاهز الآن للتحويل المصرفي إلى حساب المستفيد الموضح أعلاه.
+                          {activeRequest.requestType === 'income' 
+                            ? 'طلب التوريد معتمد وجاهز لتأكيد إيداع واستلام المبلغ في حساب وخزينة الشركة.' 
+                            : 'جاهز الآن للتحويل المصرفي إلى حساب المستفيد الموضح أعلاه.'}
                         </p>
                       </div>
 
                       <button
                         type="button"
                         onClick={() => setActiveAction(activeAction === 'disburse' ? 'none' : 'disburse')}
-                        className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-2 transition cursor-pointer"
+                        className={`px-5 py-2.5 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-2 transition cursor-pointer ${
+                          activeRequest.requestType === 'income'
+                            ? 'bg-emerald-600 hover:bg-emerald-700'
+                            : 'bg-blue-600 hover:bg-blue-700'
+                        }`}
                       >
                         <CreditCard className="h-4 w-4" />
-                        <span>💸 تنفيذ الصرف والتحويل المالي الآن</span>
+                        <span>
+                          {activeRequest.requestType === 'income' 
+                            ? '📥 استلام وتأكيد التوريد في الخزينة الآن' 
+                            : '💸 تنفيذ الصرف والتحويل المالي الآن'}
+                        </span>
                       </button>
                     </div>
 
@@ -1075,7 +1097,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                     {activeAction === 'disburse' && (
                       <form onSubmit={handleDisburse} className="mt-4 p-4 bg-white rounded-2xl border border-blue-200 space-y-4 animate-in fade-in duration-150">
                         <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-                          <span className="font-bold text-slate-800 text-xs">بيانات تنفيذ العملية والتحويل المصرفي:</span>
+                          <span className="font-bold text-slate-800 text-xs">
+                            {activeRequest.requestType === 'income' 
+                              ? '📥 بيانات استلام وتوريد المبلغ في الخزينة/الحساب:' 
+                              : '💸 بيانات تنفيذ العملية والتحويل المصرفي:'}
+                          </span>
                           <button
                             type="button"
                             onClick={() => setActiveAction('none')}
@@ -1088,24 +1114,38 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                           {/* Payment Account / Vault */}
                           <div>
-                            <label className="block font-bold text-slate-700 mb-1">خزينة / حساب الصرف المحول منه *</label>
+                            <label className="block font-bold text-slate-700 mb-1">
+                              {activeRequest.requestType === 'income' 
+                                ? 'خزينة / حساب الاستلام المودع فيه (+ IN) *' 
+                                : 'خزينة / حساب الصرف المحول منه (- OUT) *'}
+                            </label>
                             <select
-                              value={disburseBankName}
-                              onChange={(e) => setDisburseBankName(e.target.value)}
+                              value={disburseAccountId}
+                              onChange={(e) => {
+                                setDisburseAccountId(e.target.value);
+                                const acc = paymentAccounts.find(a => a.id === e.target.value);
+                                if (acc) {
+                                  setDisburseBankName(`${acc.name} (${acc.accountIdentifier})`);
+                                  if (acc.type === 'instapay') setDisburseMethod('instapay');
+                                  else if (acc.type === 'wallet') setDisburseMethod('digital_wallet');
+                                  else if (acc.type === 'bank') setDisburseMethod('bank_transfer');
+                                  else if (acc.type === 'cash') setDisburseMethod('cash');
+                                }
+                              }}
                               className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold"
                             >
                               {paymentAccounts.length > 0 ? (
                                 paymentAccounts.map(acc => (
-                                  <option key={acc.id} value={`${acc.name} (${acc.accountIdentifier})`}>
-                                    {acc.name} — {acc.type === 'bank' ? 'حساب بنكي' : acc.type === 'instapay' ? 'انستاباي' : 'خزينة'} ({acc.accountIdentifier})
+                                  <option key={acc.id} value={acc.id}>
+                                    {acc.name} — {acc.type === 'bank' ? 'حساب بنكي' : acc.type === 'instapay' ? 'انستاباي' : 'خزينة'} ({acc.accountIdentifier}) — الرصيد: {Number(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency}
                                   </option>
                                 ))
                               ) : (
                                 <>
-                                  <option value="انستاباي / الحساب المصرفي الرئيسي">انستاباي / الحساب المصرفي الرئيسي</option>
-                                  <option value="بنك مصر — الحساب الجاري">بنك مصر — الحساب الجاري</option>
-                                  <option value="البنك الأهلي المصري — حساب المصروفات">البنك الأهلي المصري — حساب المصروفات</option>
-                                  <option value="الخزينة النقدية الرئيسية (Cash Desk)">الخزينة النقدية الرئيسية (Cash Desk)</option>
+                                  <option value="">انستاباي / الحساب المصرفي الرئيسي</option>
+                                  <option value="">بنك مصر — الحساب الجاري</option>
+                                  <option value="">البنك الأهلي المصري — حساب المصروفات</option>
+                                  <option value="">الخزينة النقدية الرئيسية (Cash Desk)</option>
                                 </>
                               )}
                             </select>
@@ -1128,7 +1168,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
                           {/* Reference Number */}
                           <div>
-                            <label className="block font-bold text-slate-700 mb-1">رقم مرجع / كود العملية البنكية *</label>
+                            <label className="block font-bold text-slate-700 mb-1">رقم مرجع / كود العملية *</label>
                             <div className="flex gap-2">
                               <input
                                 type="text"
@@ -1151,12 +1191,12 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
                           {/* Notes */}
                           <div>
-                            <label className="block font-bold text-slate-700 mb-1">ملاحظات التحويل</label>
+                            <label className="block font-bold text-slate-700 mb-1">ملاحظات وبيان العملية</label>
                             <input
                               type="text"
                               value={disburseNotes}
                               onChange={(e) => setDisburseNotes(e.target.value)}
-                              placeholder="مثال: تم إرسال الإشعار للموظف عبر رسالة بنكية"
+                              placeholder="مثال: تم التأكد من الإيداع ووصول الإشعار البنكي"
                               className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs"
                             />
                           </div>
@@ -1173,9 +1213,17 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                           <button
                             type="submit"
                             disabled={disbursing}
-                            className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                            className={`px-6 py-2.5 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 flex items-center gap-2 ${
+                              activeRequest.requestType === 'income'
+                                ? 'bg-emerald-600 hover:bg-emerald-700'
+                                : 'bg-blue-600 hover:bg-blue-700'
+                            }`}
                           >
-                            {disbursing ? 'جاري تسجيل الصرف...' : 'تأكيد وإتمام الصرف المالي ✓'}
+                            {disbursing 
+                              ? 'جاري الحفظ والتنفيذ...' 
+                              : (activeRequest.requestType === 'income' 
+                                  ? '📥 تأكيد إيداع واستلام المبلغ في الخزينة (+ IN)' 
+                                  : '💸 تأكيد تحويل وصرف المبلغ من الخزينة (- OUT)')}
                           </button>
                         </div>
                       </form>

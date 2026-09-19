@@ -287,11 +287,16 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                   <h4 className="font-bold text-slate-900 text-sm mt-2 line-clamp-1">{req.title}</h4>
 
                   <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100 text-xs">
-                    <div>
+                    <div className="flex items-center gap-1.5">
                       {getMethodBadge(req.preferredPaymentMethod)}
+                      {req.requestType === 'income' && (
+                        <span className="text-[10px] font-bold bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-full border border-emerald-200">
+                          📥 توريد
+                        </span>
+                      )}
                     </div>
-                    <span className="font-black text-slate-900 text-sm">
-                      {req.amount.toLocaleString()} {req.currency}
+                    <span className={`font-black text-sm ${req.requestType === 'income' ? 'text-emerald-700' : 'text-slate-900'}`}>
+                      {req.requestType === 'income' ? '+' : '-'}{req.amount.toLocaleString()} {req.currency}
                     </span>
                   </div>
                 </div>
@@ -320,12 +325,21 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                     <span className="font-mono text-xs font-bold text-slate-400">{activeRequest.requestNumber}</span>
                     <span className="text-xs text-slate-400">• تاريخ التقديم: {activeRequest.createdAt.split('T')[0]}</span>
                   </div>
-                  <h2 className="text-lg font-bold text-slate-900 mt-1">{activeRequest.title}</h2>
+                  <div className="flex items-center gap-2 mt-1">
+                    <h2 className="text-lg font-bold text-slate-900">{activeRequest.title}</h2>
+                    <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
+                      activeRequest.requestType === 'income'
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-rose-100 text-rose-800'
+                    }`}>
+                      {activeRequest.requestType === 'income' ? '📥 توريد / تحصيل مالي وارد' : '💸 طلب صرف مالي'}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="text-left">
-                  <div className="text-2xl font-black text-slate-900">
-                    {activeRequest.amount.toLocaleString()} <span className="text-sm font-semibold text-slate-500">{activeRequest.currency}</span>
+                  <div className={`text-2xl font-black ${activeRequest.requestType === 'income' ? 'text-emerald-700' : 'text-slate-900'}`}>
+                    {activeRequest.requestType === 'income' ? '+' : '-'}{activeRequest.amount.toLocaleString()} <span className="text-sm font-semibold text-slate-500">{activeRequest.currency}</span>
                   </div>
                   <div className="mt-1">{getStatusBadge(activeRequest.status)}</div>
                 </div>
@@ -413,9 +427,13 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                           <span>4</span>
                         )}
                       </div>
-                      <span className="text-xs font-bold text-slate-800 mt-2">إتمام التحويل</span>
+                      <span className="text-xs font-bold text-slate-800 mt-2">
+                        {activeRequest.requestType === 'income' ? 'إتمام التوريد' : 'إتمام التحويل'}
+                      </span>
                       <span className="text-[10px] text-slate-400 font-medium">
-                        {activeRequest.status === 'disbursed' ? 'تم الصرف بنجاح' : 'غير مكتمل'}
+                        {activeRequest.status === 'disbursed' 
+                          ? (activeRequest.requestType === 'income' ? 'تم استلام وتوريد المبلغ' : 'تم الصرف بنجاح') 
+                          : 'غير مكتمل'}
                       </span>
                     </div>
 
@@ -563,6 +581,12 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                   <span className="text-slate-400 block mb-0.5">المبرر المالي:</span>
                   <p className="text-slate-700 leading-relaxed">{activeRequest.justification}</p>
                 </div>
+                {activeRequest.itemsDetail && (
+                  <div className="sm:col-span-2 bg-amber-50/70 p-3 rounded-xl border border-amber-200/80">
+                    <span className="text-amber-900 font-bold block mb-0.5">📦 بيانات البضاعة أو الأصناف:</span>
+                    <p className="text-slate-800 font-medium">{activeRequest.itemsDetail}</p>
+                  </div>
+                )}
               </div>
 
               {/* Attachments (Only shown if authentic non-dummy attachments exist) */}

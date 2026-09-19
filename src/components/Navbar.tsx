@@ -9,7 +9,8 @@ import {
   Clock3,
   BadgeAlert,
   Building2,
-  Settings
+  Settings,
+  Landmark
 } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
@@ -59,8 +60,14 @@ export const Navbar: React.FC = () => {
         ) : null,
       },
       {
+        id: 'treasury',
+        label: '🏛️ الخزائن والمحافظ (IN / OUT)',
+        icon: Landmark,
+        badge: null,
+      },
+      {
         id: 'organizations',
-        label: '🏛️ إدارة الشركة والموظفين والعمليات',
+        label: '👥 إدارة الشركة والموظفين والعمليات',
         icon: Users2,
         badge: null,
       },
@@ -86,6 +93,12 @@ export const Navbar: React.FC = () => {
   } else if (currentRole === 'finance') {
     const approvedToDisburseCount = requests.filter(r => r.status === 'approved').length;
     navItems.push(
+      {
+        id: 'treasury',
+        label: '🏛️ الخزائن وحسابات الدفع (IN / OUT)',
+        icon: Landmark,
+        badge: null,
+      },
       {
         id: 'requests',
         label: '💸 طلبات الصرف والتحويل المالي',
@@ -150,8 +163,14 @@ export const Navbar: React.FC = () => {
         ) : null,
       },
       {
+        id: 'treasury',
+        label: '🏛️ الخزائن وحسابات الدفع (IN / OUT)',
+        icon: Landmark,
+        badge: null,
+      },
+      {
         id: 'organizations',
-        label: '🏛️ مركز الإدارة والتحكم الشامل',
+        label: '👥 مركز الإدارة والتحكم الشامل',
         icon: Building2,
         badge: null,
       },

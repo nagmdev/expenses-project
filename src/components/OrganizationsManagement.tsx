@@ -677,6 +677,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         currency: vaultCurrency,
         description: vaultDescription.trim(),
         orgId: vaultOrgId || activeOrgId || displayOrgs[0]?.id || '',
+        initialBalance: 0,
+        currentBalance: 0,
+        totalIn: 0,
+        totalOut: 0,
         active: true,
       });
     }

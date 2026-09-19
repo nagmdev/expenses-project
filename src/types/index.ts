@@ -117,12 +117,16 @@ export interface TimelineEvent {
 
 export type PaymentMethod = 'instapay' | 'bank_transfer' | 'digital_wallet' | 'cash' | 'cheque';
 
+export type RequestType = 'expense' | 'income';
+
 export interface DisbursementDetails {
   disbursedAt: string;
   disbursedBy: string;
   paymentMethod: PaymentMethod;
   referenceNumber: string;
   bankName?: string;
+  accountId?: string;
+  accountName?: string;
   receiptUrl?: string;
   notes?: string;
 }
@@ -149,6 +153,9 @@ export interface ExpenseRequest {
   currency: string;
   status: RequestStatus;
   urgency: 'low' | 'medium' | 'high';
+  requestType?: RequestType; // 'expense' (صرف - فلوس خارجة) أو 'income' (توريد / تحصيل مالي وارد)
+  targetAccountId?: string; // الخزينة أو الحساب المالي المرتبط
+  itemsDetail?: string; // تفاصيل البضاعة أو الأصناف (اسم الصنف، الكمية، السعر)
   attachments: RequestAttachment[];
   comments: RequestComment[];
   timeline: TimelineEvent[];
@@ -223,12 +230,37 @@ export interface PaymentAccount {
   type: PaymentAccountType;
   accountIdentifier: string; // IBAN, IPA (name@instapay), Mobile #, or Account #
   bankName?: string;
-  balance?: number;
+  balance?: number; // legacy alias
+  initialBalance?: number;
+  currentBalance?: number;
+  totalIn?: number;
+  totalOut?: number;
   currency: string;
   active: boolean;
   description?: string;
   createdAt: string;
   updatedAt?: string;
+}
+
+export type TransactionType = 'in' | 'out';
+export type TransactionReferenceType = 'request' | 'manual_adjustment' | 'initial';
+
+export interface AccountTransaction {
+  id: string;
+  orgId: string;
+  accountId: string;
+  accountName: string;
+  type: TransactionType; // 'in' (وارد / إيداع / تحصيل) أو 'out' (منصرف / سحب)
+  amount: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  referenceType: TransactionReferenceType;
+  referenceId?: string; // e.g. requestId
+  referenceNumber?: string; // e.g. REQ-2026-001 or bank ref #
+  description: string;
+  actorName: string;
+  actorId?: string;
+  createdAt: string;
 }
 
 export interface Department {

@@ -126,17 +126,28 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
           {/* Top Amount & Status Banner */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl bg-slate-50 border border-slate-200">
             <div>
-              <span className="text-xs text-slate-400 font-medium">المبلغ المطلوب للصرف</span>
-              <div className="text-3xl font-black text-slate-900 mt-0.5">
-                {request.amount.toLocaleString()} <span className="text-base font-bold text-slate-500">{request.currency}</span>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-xs text-slate-400 font-medium">
+                  {request.requestType === 'income' ? 'المبلغ المورد / المحول (+ IN)' : 'المبلغ المطلوب للصرف (- OUT)'}
+                </span>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  request.requestType === 'income' 
+                    ? 'bg-emerald-100 text-emerald-800' 
+                    : 'bg-rose-100 text-rose-800'
+                }`}>
+                  {request.requestType === 'income' ? '📥 توريد وتحصيل وارد' : '💸 طلب صرف مالي'}
+                </span>
+              </div>
+              <div className={`text-3xl font-black mt-0.5 ${request.requestType === 'income' ? 'text-emerald-700' : 'text-slate-900'}`}>
+                {request.requestType === 'income' ? '+' : '-'}{request.amount.toLocaleString()} <span className="text-base font-bold text-slate-500">{request.currency}</span>
               </div>
             </div>
 
             <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-400">حالة الطلب الحالية:</span>
+              <span className="text-xs text-slate-400">حالة الطلب:</span>
               {request.status === 'pending' && (
                 <span className="bg-amber-100 text-amber-800 text-xs px-3 py-1 rounded-full font-bold">
-                  قيد مراجعة المدير
+                  قيد مراجعة الإدارة
                 </span>
               )}
               {request.status === 'clarification_requested' && (
@@ -146,12 +157,12 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
               )}
               {request.status === 'approved' && (
                 <span className="bg-blue-100 text-blue-800 text-xs px-3 py-1 rounded-full font-bold">
-                  معتمد وبانتظار الصرف
+                  {request.requestType === 'income' ? 'معتمد وبانتظار تأكيد الاستلام والتوريد' : 'معتمد وبانتظار الصرف'}
                 </span>
               )}
               {request.status === 'disbursed' && (
                 <span className="bg-emerald-100 text-emerald-800 text-xs px-3 py-1 rounded-full font-bold">
-                  تم الصرف المالي
+                  {request.requestType === 'income' ? 'تم استلام وتوريد المبلغ في الخزينة ✓' : 'تم الصرف المالي والتحويل ✓'}
                 </span>
               )}
               {request.status === 'rejected' && (
@@ -203,6 +214,16 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
             </div>
           </div>
 
+          {/* Goods / Items Details */}
+          {request.itemsDetail && (
+            <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3.5 text-xs">
+              <span className="font-bold text-amber-900 block mb-1">
+                📦 بيانات البضاعة أو الأصناف المرتبطة بالطلب:
+              </span>
+              <p className="text-slate-800 font-medium whitespace-pre-wrap">{request.itemsDetail}</p>
+            </div>
+          )}
+
           {/* Attachments (Only shown if authentic non-dummy attachments exist) */}
           {(() => {
             const realAttachments = (request.attachments || []).filter(att => 
@@ -235,12 +256,16 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
             <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-xs space-y-2">
               <div className="flex items-center gap-2 font-bold text-emerald-900">
                 <CreditCard className="h-4 w-4 text-emerald-600" />
-                <span>بيانات الصرف المالي المكتمل</span>
+                <span>
+                  {request.requestType === 'income' 
+                    ? 'بيانات استلام وتوريد المبلغ المكتملة في الخزينة' 
+                    : 'بيانات الصرف المالي المكتمل'}
+                </span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 text-slate-700">
-                <div>طريقة الدفع: <span className="font-bold">{request.disbursement.paymentMethod === 'bank_transfer' ? 'تحويل بنكي' : 'نقداً'}</span></div>
+                <div>طريقة الدفع: <span className="font-bold">{request.disbursement.paymentMethod === 'bank_transfer' ? 'تحويل بنكي' : request.disbursement.paymentMethod === 'instapay' ? 'إنستاباي' : 'نقداً / محفظة'}</span></div>
                 <div>رقم المرجع: <span className="font-mono font-bold">{request.disbursement.referenceNumber}</span></div>
-                <div>تاريخ الصرف: <span className="font-bold">{request.disbursement.disbursedAt}</span></div>
+                <div>تاريخ العملية: <span className="font-bold">{request.disbursement.disbursedAt}</span></div>
               </div>
             </div>
           )}
