@@ -38,6 +38,9 @@ export interface OrganizationMember {
   updatedAt?: string;
 }
 
+export type BudgetPeriod = 'monthly' | 'yearly' | 'per_request' | 'unlimited';
+export type RecurringFrequency = 'on_demand' | 'monthly' | 'quarterly' | 'yearly';
+
 export interface ServiceCategory {
   id: string;
   orgId: string;
@@ -46,9 +49,18 @@ export interface ServiceCategory {
   code: string;
   description: string;
   budgetLimit: number;
+  budgetPeriod?: BudgetPeriod; // دورية سقف الميزانية (شهري، سنوي، لكل طلب، غير محدد)
+  recurringFrequency?: RecurringFrequency; // دورية استحقاق البند
   spentAmount: number;
   color: string;
   iconName: string;
+  fixedAccountRef?: string; // رقم العداد / كود المشترك / رقم الاشتراك الثابت
+  vendorId?: string; // المورد / مقدم الخدمة المعتمد
+  vendorName?: string;
+  serviceNature?: string; // طبيعة الخدمة / النوع (مثل: عداد مسبق الدفع، اشتراك شهري، صيانة طارئة)
+  defaultPaymentMethod?: PaymentMethod; // طريقة الصرف الافتراضية
+  defaultAccountId?: string; // الخزينة أو الحساب المالي الافتراضي
+  costCenter?: string; // مركز التكلفة / الفرع
 }
 
 export const isServiceMatchingOrg = (service: ServiceCategory, targetOrgId?: string): boolean => {
@@ -204,7 +216,9 @@ export type AuditEntityType =
   | 'vault' 
   | 'department' 
   | 'role'
-  | 'request';
+  | 'request'
+  | 'custody'
+  | 'transaction';
 
 export interface AuditLogEntry {
   id: string;
@@ -243,7 +257,7 @@ export interface PaymentAccount {
 }
 
 export type TransactionType = 'in' | 'out';
-export type TransactionReferenceType = 'request' | 'manual_adjustment' | 'initial';
+export type TransactionReferenceType = 'request' | 'manual_adjustment' | 'initial' | 'custody';
 
 export interface AccountTransaction {
   id: string;
@@ -260,6 +274,48 @@ export interface AccountTransaction {
   description: string;
   actorName: string;
   actorId?: string;
+  createdAt: string;
+}
+
+export type CustodyStatus = 'active' | 'settled' | 'replenished';
+
+export interface PettyCashCustody {
+  id: string;
+  orgId: string;
+  custodyNumber: string; // e.g. CUS-001
+  employeeId: string;
+  employeeName: string;
+  employeePhone?: string;
+  totalAmount: number;
+  remainingAmount: number;
+  settledAmount: number;
+  currency: string;
+  sourceAccountId: string;
+  sourceAccountName: string;
+  status: CustodyStatus;
+  issuedAt: string;
+  settledAt?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface CustodySettlementItem {
+  id: string;
+  custodyId: string;
+  orgId: string;
+  employeeId: string;
+  employeeName: string;
+  amount: number;
+  currency: string;
+  serviceCategoryId?: string;
+  serviceCategoryName?: string;
+  vendorName?: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+  description: string;
+  receiptUrl?: string;
+  status: 'approved' | 'pending' | 'rejected';
   createdAt: string;
 }
 

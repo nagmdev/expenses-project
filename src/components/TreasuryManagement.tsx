@@ -21,7 +21,9 @@ import {
   ArrowUpRight, 
   History, 
   TrendingUp,
-  TrendingDown
+  TrendingDown,
+  Download,
+  FileSpreadsheet
 } from 'lucide-react';
 import { 
   handleNumericKeyDown, 
@@ -130,6 +132,65 @@ export const TreasuryManagement: React.FC = () => {
 
     return { totalBalance, totalIn, totalOut };
   }, [filteredAccounts]);
+
+  // Export Filtered Ledger Transactions to Excel / CSV with UTF-8 BOM
+  const exportLedgerToExcel = () => {
+    const headers = [
+      'التاريخ والوقت',
+      'الحساب',
+      'الشركة',
+      'نوع الحركة (وارد / منصرف)',
+      'المبلغ',
+      'العملة',
+      'الرصيد قبل',
+      'الرصيد بعد',
+      'البيان',
+      'رقم المرجع',
+      'الموظف المسؤول'
+    ];
+
+    const escapeCsvCell = (cell: any) => {
+      if (cell === null || cell === undefined) return '""';
+      const str = String(cell).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const rows = filteredTransactions.map(tx => {
+      const orgName = orgList.find(o => o.id === tx.orgId)?.name || activeOrg?.name || 'الشركة';
+      const acc = targetAccounts.find(a => a.id === tx.accountId);
+      const txCurrency = acc?.currency || activeOrg?.currency || 'EGP';
+      const typeText = tx.type === 'in' ? 'وارد / إيداع (+ IN)' : 'منصرف / سحب (- OUT)';
+      const dateFormatted = tx.createdAt ? tx.createdAt.replace('T', ' ').slice(0, 19) : '';
+
+      return [
+        dateFormatted,
+        tx.accountName || '',
+        orgName,
+        typeText,
+        tx.amount,
+        txCurrency,
+        tx.balanceBefore,
+        tx.balanceAfter,
+        tx.description || '',
+        tx.referenceNumber || '',
+        tx.actorName || ''
+      ].map(escapeCsvCell).join(',');
+    });
+
+    const csvContent = '\uFEFF' + [headers.map(escapeCsvCell).join(','), ...rows].join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    const fileName = inspectingAccount 
+      ? `كشف_حساب_${inspectingAccount.name.replace(/[/\\?%*:|"<>]/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`
+      : `سجل_حركات_الخزينة_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.setAttribute('download', fileName);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   // Handlers for Account Modal
   const handleOpenAddAccount = () => {
@@ -559,7 +620,7 @@ export const TreasuryManagement: React.FC = () => {
       {/* Main Tab 2: Financial Ledger / Transaction Log */}
       {activeTab === 'ledger' && (
         <div className="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden">
-          <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
+          <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between flex-wrap gap-3">
             <div className="flex items-center gap-2">
               <History className="h-5 w-5 text-emerald-600" />
               <h2 className="font-extrabold text-slate-900 text-sm sm:text-base">
@@ -567,16 +628,28 @@ export const TreasuryManagement: React.FC = () => {
                   ? `دفتر حركات الحساب: ${inspectingAccount.name}` 
                   : 'سجل الحركات المالية المجمعة (جميع الخزائن والمحافظ)'}
               </h2>
+              {inspectingAccount && (
+                <button
+                  type="button"
+                  onClick={() => setInspectingAccount(null)}
+                  className="text-xs text-emerald-700 hover:underline font-bold mr-2 cursor-pointer"
+                >
+                  عرض كل الحركات
+                </button>
+              )}
             </div>
-            {inspectingAccount && (
+
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setInspectingAccount(null)}
-                className="text-xs text-emerald-700 hover:underline font-bold"
+                onClick={exportLedgerToExcel}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs transition cursor-pointer active:scale-95"
+                title="تصدير كشف الحركات المفلترة إلى ملف إكسل CSV"
               >
-                عرض كل الحركات
+                <Download className="h-3.5 w-3.5" />
+                <span>تصدير كشف الحساب إلى Excel (CSV)</span>
               </button>
-            )}
+            </div>
           </div>
 
           {filteredTransactions.length === 0 ? (

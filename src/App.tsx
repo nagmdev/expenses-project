@@ -10,6 +10,7 @@ import { ServicesManagement } from './components/ServicesManagement';
 import { VendorsManagement } from './components/VendorsManagement';
 import { OrganizationsManagement } from './components/OrganizationsManagement';
 import { TreasuryManagement } from './components/TreasuryManagement';
+import { CustodyManagement } from './components/CustodyManagement';
 import { NewRequestModal } from './components/NewRequestModal';
 import { RequestDetailModal } from './components/RequestDetailModal';
 import { FirebaseConfigModal } from './components/FirebaseConfigModal';
@@ -217,6 +218,10 @@ const MainApp: React.FC = () => {
 
             {activeTab === 'treasury' && (
               <TreasuryManagement />
+            )}
+
+            {activeTab === 'custody' && (
+              <CustodyManagement />
             )}
 
             {activeTab === 'services' && (

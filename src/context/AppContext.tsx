@@ -21,7 +21,10 @@ import {
   isServiceMatchingOrg,
   AccountTransaction,
   TransactionType,
-  RequestType
+  RequestType,
+  PettyCashCustody,
+  CustodySettlementItem,
+  CustodyStatus
 } from '../types';
 import { 
   DEFAULT_EMAIL_SETTINGS, 
@@ -73,6 +76,8 @@ const STORAGE_KEYS = {
   EMAIL_SETTINGS: 'expenses_email_settings_v3',
   EMAIL_LOGS: 'expenses_email_logs_v3',
   ACCOUNT_TRANSACTIONS: 'expenses_account_transactions_v3',
+  PETTY_CASH_CUSTODIES: 'expense_system_custodies',
+  CUSTODY_SETTLEMENTS: 'expense_system_custody_settlements',
 };
 
 // Immediate purge of all legacy v1 and v2 localStorage keys
@@ -280,6 +285,37 @@ interface AppContextType {
   togglePaymentAccountStatus: (accountId: string, active: boolean) => Promise<void>;
   recordManualAccountAdjustment: (accountId: string, type: TransactionType, amount: number, description: string) => Promise<void>;
 
+  // Petty Cash & Custodies (العهد النقدية وتصفيتها)
+  custodies: PettyCashCustody[];
+  allCustodies: PettyCashCustody[];
+  custodySettlements: CustodySettlementItem[];
+  allCustodySettlements: CustodySettlementItem[];
+  issueCustody: (
+    orgId: string, 
+    employeeId: string, 
+    employeeName: string, 
+    employeePhone: string | undefined, 
+    amount: number, 
+    sourceAccountId: string, 
+    notes?: string
+  ) => Promise<{ success: boolean; message?: string }>;
+  settleCustodyItem: (
+    custodyId: string, 
+    amount: number, 
+    description: string, 
+    serviceCategoryId?: string, 
+    vendorName?: string, 
+    invoiceNumber?: string, 
+    invoiceDate?: string, 
+    receiptUrl?: string
+  ) => Promise<{ success: boolean; message?: string }>;
+  replenishCustody: (
+    custodyId: string, 
+    amount: number, 
+    sourceAccountId: string, 
+    notes?: string
+  ) => Promise<{ success: boolean; message?: string }>;
+
   // Departments & Structure
   departments: Department[];
   allDepartments: Department[];
@@ -358,6 +394,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [rawTransactions, setRawTransactions] = useState<AccountTransaction[]>(() => {
     return safeGetLocal<AccountTransaction[]>(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, []);
+  });
+
+  const [rawCustodies, setRawCustodies] = useState<PettyCashCustody[]>(() => {
+    return safeGetLocal<PettyCashCustody[]>(STORAGE_KEYS.PETTY_CASH_CUSTODIES, []);
+  });
+
+  const [rawCustodySettlements, setRawCustodySettlements] = useState<CustodySettlementItem[]>(() => {
+    return safeGetLocal<CustodySettlementItem[]>(STORAGE_KEYS.CUSTODY_SETTLEMENTS, []);
   });
 
   const [rawDepartments, setRawDepartments] = useState<Department[]>(() => {
@@ -634,6 +678,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!effectiveOrgId) return [];
     return rawTransactions.filter(t => t.orgId === effectiveOrgId);
   }, [firebaseUser, resolvedRole, rawTransactions, effectiveOrgId]);
+
+  const scopedCustodies = useMemo(() => {
+    if (!firebaseUser) return [];
+    if (resolvedRole === 'super_admin') {
+      return effectiveOrgId === 'all' ? rawCustodies : rawCustodies.filter(c => c.orgId === effectiveOrgId);
+    }
+    if (!effectiveOrgId) return [];
+    if (resolvedRole === 'employee' && currentUser) {
+      return rawCustodies.filter(c => c.orgId === effectiveOrgId && (c.employeeId === currentUser.id || c.employeeName === currentUser.name));
+    }
+    return rawCustodies.filter(c => c.orgId === effectiveOrgId);
+  }, [firebaseUser, resolvedRole, rawCustodies, effectiveOrgId, currentUser]);
+
+  const scopedCustodySettlements = useMemo(() => {
+    if (!firebaseUser) return [];
+    if (resolvedRole === 'super_admin') {
+      return effectiveOrgId === 'all' ? rawCustodySettlements : rawCustodySettlements.filter(s => s.orgId === effectiveOrgId);
+    }
+    if (!effectiveOrgId) return [];
+    if (resolvedRole === 'employee' && currentUser) {
+      return rawCustodySettlements.filter(s => s.orgId === effectiveOrgId && (s.employeeId === currentUser.id || s.employeeName === currentUser.name));
+    }
+    return rawCustodySettlements.filter(s => s.orgId === effectiveOrgId);
+  }, [firebaseUser, resolvedRole, rawCustodySettlements, effectiveOrgId, currentUser]);
 
   const scopedDepartments = useMemo(() => {
     if (!firebaseUser) return [];
@@ -1005,6 +1073,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[Firebase] AccountTransactions onSnapshot error:', err);
     });
 
+    // 12. Petty Cash Custodies Listener
+    const unsubCustodies = onSnapshot(collection(db, 'pettyCashCustodies'), (snapshot) => {
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as PettyCashCustody))
+        .filter(c => !DUMMY_IDS.has(c.id) && !DUMMY_IDS.has(c.orgId));
+      list.sort((a, b) => new Date(b.createdAt || b.issuedAt).getTime() - new Date(a.createdAt || a.issuedAt).getTime());
+
+      const seen = new Set<string>();
+      const deduped: PettyCashCustody[] = [];
+      for (const c of list) {
+        if (!seen.has(c.id)) {
+          seen.add(c.id);
+          deduped.push(c);
+        }
+      }
+      setRawCustodies(deduped);
+      safeSetLocal(STORAGE_KEYS.PETTY_CASH_CUSTODIES, deduped);
+    }, (err) => {
+      console.warn('[Firebase] PettyCashCustodies onSnapshot error:', err);
+    });
+
+    // 13. Custody Settlements Listener
+    const unsubCustodySettlements = onSnapshot(collection(db, 'custodySettlements'), (snapshot) => {
+      const list = snapshot.docs
+        .map(d => ({ id: d.id, ...d.data() } as CustodySettlementItem))
+        .filter(s => !DUMMY_IDS.has(s.id) && !DUMMY_IDS.has(s.orgId));
+      list.sort((a, b) => new Date(b.createdAt || b.invoiceDate || '').getTime() - new Date(a.createdAt || a.invoiceDate || '').getTime());
+
+      const seen = new Set<string>();
+      const deduped: CustodySettlementItem[] = [];
+      for (const s of list) {
+        if (!seen.has(s.id)) {
+          seen.add(s.id);
+          deduped.push(s);
+        }
+      }
+      setRawCustodySettlements(deduped);
+      safeSetLocal(STORAGE_KEYS.CUSTODY_SETTLEMENTS, deduped);
+    }, (err) => {
+      console.warn('[Firebase] CustodySettlements onSnapshot error:', err);
+    });
+
     return () => {
       unsubOrgs();
       unsubMembers();
@@ -1017,6 +1127,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubAuditLogs();
       unsubEmailLogs();
       unsubAccountTransactions();
+      unsubCustodies();
+      unsubCustodySettlements();
     };
   }, [firebaseUser, firebaseSyncCounter]);
 
@@ -2245,6 +2357,317 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
+  // =========================================================================
+  // PETTY CASH & CUSTODIES MANAGEMENT (العهد النقدية وتصفيتها واستعاضتها)
+  // =========================================================================
+  const issueCustody = async (
+    orgId: string, 
+    employeeId: string, 
+    employeeName: string, 
+    employeePhone: string | undefined, 
+    amount: number, 
+    sourceAccountId: string, 
+    notes?: string
+  ): Promise<{ success: boolean; message?: string }> => {
+    const numAmount = Math.abs(Number(amount));
+    if (!numAmount || isNaN(numAmount) || numAmount <= 0) {
+      return { success: false, message: 'يرجى إدخال مبلغ صحيح للعهدة.' };
+    }
+
+    const sourceAccount = rawPaymentAccounts.find(a => a.id === sourceAccountId);
+    if (!sourceAccount) {
+      return { success: false, message: 'حساب الخزينة / مصدر الصرف غير موجود.' };
+    }
+
+    const balanceBefore = Number(sourceAccount.currentBalance ?? sourceAccount.balance ?? 0);
+    const balanceAfter = balanceBefore - numAmount;
+    const newTotalOut = Number(sourceAccount.totalOut || 0) + numAmount;
+
+    const updatedAccount: PaymentAccount = {
+      ...sourceAccount,
+      currentBalance: balanceAfter,
+      balance: balanceAfter,
+      totalOut: newTotalOut,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const custodyId = `cus-${Date.now()}`;
+    const custodyNumber = `CUS-${Math.floor(100 + Math.random() * 900)}`;
+    const txId = `tx-${Date.now()}`;
+
+    const newTransaction: AccountTransaction = {
+      id: txId,
+      orgId: sourceAccount.orgId || orgId,
+      accountId: sourceAccount.id,
+      accountName: sourceAccount.name,
+      type: 'out',
+      amount: numAmount,
+      balanceBefore,
+      balanceAfter,
+      referenceType: 'custody',
+      referenceId: custodyId,
+      referenceNumber: custodyNumber,
+      description: `صرف عهدة نقدية للموظف ${employeeName}`,
+      actorName: currentUser.name || 'مدير النظام',
+      actorId: currentUser.id,
+      createdAt: new Date().toISOString(),
+    };
+
+    const newCustody: PettyCashCustody = {
+      id: custodyId,
+      orgId,
+      custodyNumber,
+      employeeId,
+      employeeName,
+      employeePhone: employeePhone || '',
+      totalAmount: numAmount,
+      remainingAmount: numAmount,
+      settledAmount: 0,
+      currency: sourceAccount.currency || 'EGP',
+      sourceAccountId: sourceAccount.id,
+      sourceAccountName: sourceAccount.name,
+      status: 'active',
+      issuedAt: new Date().toISOString(),
+      notes: notes || '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('pettyCashCustodies', custodyId, newCustody);
+        await updateFirestoreDoc('paymentAccounts', sourceAccountId, updatedAccount);
+        await setFirestoreDoc('accountTransactions', txId, newTransaction);
+      } catch (err) {
+        console.error('[Firebase] Error issuing custody:', err);
+      }
+    }
+
+    setRawCustodies(prev => {
+      const updated = [newCustody, ...prev];
+      safeSetLocal(STORAGE_KEYS.PETTY_CASH_CUSTODIES, updated);
+      return updated;
+    });
+
+    setRawPaymentAccounts(prev => {
+      const updated = prev.map(a => a.id === sourceAccountId ? updatedAccount : a);
+      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
+      return updated;
+    });
+
+    setRawTransactions(prev => {
+      const updated = [newTransaction, ...prev];
+      safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
+      return updated;
+    });
+
+    await logAuditAction({
+      actionType: 'create',
+      entityType: 'custody',
+      entityId: custodyId,
+      entityName: `${custodyNumber} - ${employeeName}`,
+      details: `صرف عهدة نقدية للموظف ${employeeName} بقيمة ${numAmount} ${newCustody.currency} من خزينة/حساب "${sourceAccount.name}"`,
+      orgId,
+      orgName: rawOrganizations.find(o => o.id === orgId)?.name,
+    });
+
+    return { success: true, message: `تم صرف العهدة بنجاح برقم ${custodyNumber}` };
+  };
+
+  const settleCustodyItem = async (
+    custodyId: string, 
+    amount: number, 
+    description: string, 
+    serviceCategoryId?: string, 
+    vendorName?: string, 
+    invoiceNumber?: string, 
+    invoiceDate?: string, 
+    receiptUrl?: string
+  ): Promise<{ success: boolean; message?: string }> => {
+    const custody = rawCustodies.find(c => c.id === custodyId);
+    if (!custody) {
+      return { success: false, message: 'العهدة غير موجودة أو تم حذفها.' };
+    }
+
+    const numAmount = Math.abs(Number(amount));
+    if (!numAmount || isNaN(numAmount) || numAmount <= 0) {
+      return { success: false, message: 'يرجى إدخال مبلغ صحيح للفاتورة.' };
+    }
+
+    const newRemaining = Math.max(0, custody.remainingAmount - numAmount);
+    const newSettled = custody.settledAmount + numAmount;
+    const isFullySettled = newRemaining <= 0;
+    const newStatus: CustodyStatus = isFullySettled ? 'settled' : custody.status;
+    const settledAt = isFullySettled ? new Date().toISOString() : custody.settledAt;
+
+    const matchedService = rawServices.find(s => s.id === serviceCategoryId);
+    const serviceCategoryName = matchedService?.name || '';
+
+    const settlementId = `stl-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+    const newSettlement: CustodySettlementItem = {
+      id: settlementId,
+      custodyId,
+      orgId: custody.orgId,
+      employeeId: custody.employeeId,
+      employeeName: custody.employeeName,
+      amount: numAmount,
+      currency: custody.currency || 'EGP',
+      serviceCategoryId: serviceCategoryId || '',
+      serviceCategoryName,
+      vendorName: vendorName || '',
+      invoiceNumber: invoiceNumber || '',
+      invoiceDate: invoiceDate || new Date().toISOString().split('T')[0],
+      description: description.trim() || 'فاتورة تسوية عهدة',
+      receiptUrl: receiptUrl || '',
+      status: 'approved',
+      createdAt: new Date().toISOString(),
+    };
+
+    const updatedCustody: PettyCashCustody = {
+      ...custody,
+      remainingAmount: newRemaining,
+      settledAmount: newSettled,
+      status: newStatus,
+      settledAt,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await updateFirestoreDoc('pettyCashCustodies', custodyId, updatedCustody);
+        await setFirestoreDoc('custodySettlements', settlementId, newSettlement);
+      } catch (err) {
+        console.error('[Firebase] Error settling custody item:', err);
+      }
+    }
+
+    setRawCustodies(prev => {
+      const updated = prev.map(c => c.id === custodyId ? updatedCustody : c);
+      safeSetLocal(STORAGE_KEYS.PETTY_CASH_CUSTODIES, updated);
+      return updated;
+    });
+
+    setRawCustodySettlements(prev => {
+      const updated = [newSettlement, ...prev];
+      safeSetLocal(STORAGE_KEYS.CUSTODY_SETTLEMENTS, updated);
+      return updated;
+    });
+
+    await logAuditAction({
+      actionType: 'update',
+      entityType: 'custody',
+      entityId: custodyId,
+      entityName: `${custody.custodyNumber} - ${custody.employeeName}`,
+      details: `تسجيل فاتورة تصفية عهدة بمبلغ ${numAmount} ${custody.currency} (فاتورة #${invoiceNumber || 'بدون'}) للموظف ${custody.employeeName}`,
+      orgId: custody.orgId,
+      orgName: rawOrganizations.find(o => o.id === custody.orgId)?.name,
+    });
+
+    return { success: true, message: `تم تسجيل فاتورة التصفية بنجاح بمبلغ ${numAmount} ${custody.currency}` };
+  };
+
+  const replenishCustody = async (
+    custodyId: string, 
+    amount: number, 
+    sourceAccountId: string, 
+    notes?: string
+  ): Promise<{ success: boolean; message?: string }> => {
+    const custody = rawCustodies.find(c => c.id === custodyId);
+    if (!custody) {
+      return { success: false, message: 'العهدة غير موجودة.' };
+    }
+
+    const numAmount = Math.abs(Number(amount));
+    if (!numAmount || isNaN(numAmount) || numAmount <= 0) {
+      return { success: false, message: 'يرجى إدخال مبلغ استعاضة صحيح.' };
+    }
+
+    const sourceAccount = rawPaymentAccounts.find(a => a.id === sourceAccountId);
+    if (!sourceAccount) {
+      return { success: false, message: 'حساب الخزينة / المصدر المالي غير موجود.' };
+    }
+
+    const balanceBefore = Number(sourceAccount.currentBalance ?? sourceAccount.balance ?? 0);
+    const balanceAfter = balanceBefore - numAmount;
+    const newTotalOut = Number(sourceAccount.totalOut || 0) + numAmount;
+
+    const updatedAccount: PaymentAccount = {
+      ...sourceAccount,
+      currentBalance: balanceAfter,
+      balance: balanceAfter,
+      totalOut: newTotalOut,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const txId = `tx-${Date.now()}`;
+    const newTransaction: AccountTransaction = {
+      id: txId,
+      orgId: sourceAccount.orgId || custody.orgId,
+      accountId: sourceAccount.id,
+      accountName: sourceAccount.name,
+      type: 'out',
+      amount: numAmount,
+      balanceBefore,
+      balanceAfter,
+      referenceType: 'custody',
+      referenceId: custodyId,
+      referenceNumber: custody.custodyNumber,
+      description: `استعاضة عهدة نقدية للموظف ${custody.employeeName} (${custody.custodyNumber})`,
+      actorName: currentUser.name || 'مدير النظام',
+      actorId: currentUser.id,
+      createdAt: new Date().toISOString(),
+    };
+
+    const updatedCustody: PettyCashCustody = {
+      ...custody,
+      totalAmount: custody.totalAmount + numAmount,
+      remainingAmount: custody.remainingAmount + numAmount,
+      status: 'active',
+      notes: notes ? (custody.notes ? `${custody.notes} | [استعاضة: ${notes}]` : notes) : custody.notes,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await updateFirestoreDoc('pettyCashCustodies', custodyId, updatedCustody);
+        await updateFirestoreDoc('paymentAccounts', sourceAccountId, updatedAccount);
+        await setFirestoreDoc('accountTransactions', txId, newTransaction);
+      } catch (err) {
+        console.error('[Firebase] Error replenishing custody:', err);
+      }
+    }
+
+    setRawCustodies(prev => {
+      const updated = prev.map(c => c.id === custodyId ? updatedCustody : c);
+      safeSetLocal(STORAGE_KEYS.PETTY_CASH_CUSTODIES, updated);
+      return updated;
+    });
+
+    setRawPaymentAccounts(prev => {
+      const updated = prev.map(a => a.id === sourceAccountId ? updatedAccount : a);
+      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
+      return updated;
+    });
+
+    setRawTransactions(prev => {
+      const updated = [newTransaction, ...prev];
+      safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
+      return updated;
+    });
+
+    await logAuditAction({
+      actionType: 'update',
+      entityType: 'custody',
+      entityId: custodyId,
+      entityName: `${custody.custodyNumber} - ${custody.employeeName}`,
+      details: `استعاضة عهدة بقيمة ${numAmount} ${custody.currency} للموظف ${custody.employeeName} من حساب ${sourceAccount.name}`,
+      orgId: custody.orgId,
+      orgName: rawOrganizations.find(o => o.id === custody.orgId)?.name,
+    });
+
+    return { success: true, message: `تمت استعاضة العهدة بنجاح بمبلغ ${numAmount} ${custody.currency}` };
+  };
+
   // 6. DEPARTMENTS & STRUCTURE
   const addDepartment = async (deptData: Omit<Department, 'id' | 'createdAt'>) => {
     const id = `dept-${Date.now()}`;
@@ -3315,6 +3738,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deletePaymentAccount,
         togglePaymentAccountStatus,
         recordManualAccountAdjustment,
+        custodies: scopedCustodies,
+        allCustodies: rawCustodies,
+        custodySettlements: scopedCustodySettlements,
+        allCustodySettlements: rawCustodySettlements,
+        issueCustody,
+        settleCustodyItem,
+        replenishCustody,
         departments: scopedDepartments,
         allDepartments: rawDepartments,
         addDepartment,

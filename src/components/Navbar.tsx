@@ -10,7 +10,8 @@ import {
   BadgeAlert,
   Building2,
   Settings,
-  Landmark
+  Landmark,
+  Briefcase
 } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
@@ -66,6 +67,12 @@ export const Navbar: React.FC = () => {
         badge: null,
       },
       {
+        id: 'custody',
+        label: '💼 العهد النقدية',
+        icon: Briefcase,
+        badge: null,
+      },
+      {
         id: 'organizations',
         label: '👥 إدارة الشركة والموظفين والعمليات',
         icon: Users2,
@@ -97,6 +104,12 @@ export const Navbar: React.FC = () => {
         id: 'treasury',
         label: '🏛️ الخزائن وحسابات الدفع (IN / OUT)',
         icon: Landmark,
+        badge: null,
+      },
+      {
+        id: 'custody',
+        label: '💼 العهد النقدية',
+        icon: Briefcase,
         badge: null,
       },
       {
@@ -166,6 +179,12 @@ export const Navbar: React.FC = () => {
         id: 'treasury',
         label: '🏛️ الخزائن وحسابات الدفع (IN / OUT)',
         icon: Landmark,
+        badge: null,
+      },
+      {
+        id: 'custody',
+        label: '💼 العهد النقدية',
+        icon: Briefcase,
         badge: null,
       },
       {

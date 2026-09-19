@@ -26,7 +26,12 @@ import {
   Landmark,
   FolderTree,
   History,
-  DollarSign
+  DollarSign,
+  Calendar,
+  Clock,
+  Hash,
+  MapPin,
+  Tag
 } from 'lucide-react';
 import { 
   Role, 
@@ -37,7 +42,10 @@ import {
   PaymentAccount, 
   Department, 
   SUPPORTED_CURRENCIES,
-  isServiceMatchingOrg
+  isServiceMatchingOrg,
+  BudgetPeriod,
+  RecurringFrequency,
+  PaymentMethod
 } from '../types';
 import { 
   sanitizeDigitsOnly, 
@@ -48,6 +56,28 @@ import {
   handleNumericKeyDown, 
   isValidEmail 
 } from '../utils/validation';
+
+const budgetPeriodLabels: Record<string, string> = {
+  monthly: 'شهرياً',
+  yearly: 'سنوياً',
+  per_request: 'لكل طلب صرف',
+  unlimited: 'سقف مفتوح',
+};
+
+const recurringFrequencyLabels: Record<string, string> = {
+  on_demand: 'عند الطلب / طارئ',
+  monthly: 'دوري شهرياً',
+  quarterly: 'ربع سنوي',
+  yearly: 'سنوي',
+};
+
+const paymentMethodLabels: Record<string, string> = {
+  cash: 'نقداً / خزينة',
+  instapay: 'إنستاباي',
+  digital_wallet: 'محفظة إلكترونية',
+  bank_transfer: 'تحويل بنكي',
+  cheque: 'شيك مصرفي',
+};
 
 export type AdminSection = 
   | 'companies' 
@@ -201,6 +231,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [serviceCode, setServiceCode] = useState('');
   const [serviceDescription, setServiceDescription] = useState('');
   const [serviceBudget, setServiceBudget] = useState('50000');
+  const [serviceBudgetPeriod, setServiceBudgetPeriod] = useState<BudgetPeriod>('monthly');
+  const [serviceRecurringFrequency, setServiceRecurringFrequency] = useState<RecurringFrequency>('monthly');
+  const [serviceFixedAccountRef, setServiceFixedAccountRef] = useState('');
+  const [serviceVendorId, setServiceVendorId] = useState('');
+  const [serviceServiceNature, setServiceServiceNature] = useState('');
+  const [serviceDefaultPaymentMethod, setServiceDefaultPaymentMethod] = useState<PaymentMethod | ''>('');
+  const [serviceDefaultAccountId, setServiceDefaultAccountId] = useState('');
+  const [serviceCostCenter, setServiceCostCenter] = useState('');
   const [serviceColor, setServiceColor] = useState('#10b981');
   const [serviceOrgIds, setServiceOrgIds] = useState<string[]>([]);
   const [deletingService, setDeletingService] = useState<ServiceCategory | null>(null);
@@ -476,6 +514,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setServiceCode(`SRV-${Math.floor(100 + Math.random() * 900)}`);
     setServiceDescription('');
     setServiceBudget('50000');
+    setServiceBudgetPeriod('monthly');
+    setServiceRecurringFrequency('monthly');
+    setServiceFixedAccountRef('');
+    setServiceVendorId('');
+    setServiceServiceNature('');
+    setServiceDefaultPaymentMethod('');
+    setServiceDefaultAccountId('');
+    setServiceCostCenter('');
     setServiceColor('#10b981');
     const defaultOrg = (selectedOrgFilter && selectedOrgFilter !== 'all')
       ? selectedOrgFilter
@@ -491,6 +537,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setServiceDescription(srv.description || '');
     setServiceBudget(srv.budgetLimit.toString());
     setServiceColor(srv.color || '#10b981');
+    setServiceBudgetPeriod(srv.budgetPeriod || 'monthly');
+    setServiceRecurringFrequency(srv.recurringFrequency || 'monthly');
+    setServiceFixedAccountRef(srv.fixedAccountRef || '');
+    setServiceVendorId(srv.vendorId || '');
+    setServiceServiceNature(srv.serviceNature || '');
+    setServiceDefaultPaymentMethod(srv.defaultPaymentMethod || '');
+    setServiceDefaultAccountId(srv.defaultAccountId || '');
+    setServiceCostCenter(srv.costCenter || '');
     const initialOrgs = (srv.orgIds && srv.orgIds.length > 0)
       ? srv.orgIds
       : (srv.orgId ? [srv.orgId] : (displayOrgs[0]?.id ? [displayOrgs[0].id] : []));
@@ -503,6 +557,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     if (!serviceName.trim() || serviceOrgIds.length === 0) return;
 
     const primaryOrgId = serviceOrgIds[0] || displayOrgs[0]?.id || '';
+    const chosenVendor = targetVendors.find(v => v.id === serviceVendorId);
+    const vendorName = chosenVendor ? chosenVendor.name : undefined;
 
     if (editingService) {
       await updateService({
@@ -511,6 +567,15 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         code: serviceCode.trim().toUpperCase() || editingService.code,
         description: serviceDescription.trim(),
         budgetLimit: Number(serviceBudget) || 0,
+        budgetPeriod: serviceBudgetPeriod,
+        recurringFrequency: serviceRecurringFrequency,
+        fixedAccountRef: serviceFixedAccountRef.trim() || undefined,
+        vendorId: serviceVendorId || undefined,
+        vendorName: vendorName,
+        serviceNature: serviceServiceNature.trim() || undefined,
+        defaultPaymentMethod: (serviceDefaultPaymentMethod as PaymentMethod) || undefined,
+        defaultAccountId: serviceDefaultAccountId || undefined,
+        costCenter: serviceCostCenter.trim() || undefined,
         color: serviceColor,
         orgId: primaryOrgId,
         orgIds: serviceOrgIds,
@@ -521,6 +586,15 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         code: serviceCode.trim().toUpperCase() || `SRV-${Math.floor(100 + Math.random() * 900)}`,
         description: serviceDescription.trim(),
         budgetLimit: Number(serviceBudget) || 0,
+        budgetPeriod: serviceBudgetPeriod,
+        recurringFrequency: serviceRecurringFrequency,
+        fixedAccountRef: serviceFixedAccountRef.trim() || undefined,
+        vendorId: serviceVendorId || undefined,
+        vendorName: vendorName,
+        serviceNature: serviceServiceNature.trim() || undefined,
+        defaultPaymentMethod: (serviceDefaultPaymentMethod as PaymentMethod) || undefined,
+        defaultAccountId: serviceDefaultAccountId || undefined,
+        costCenter: serviceCostCenter.trim() || undefined,
         color: serviceColor,
         iconName: 'Layers',
         orgId: primaryOrgId,
@@ -867,6 +941,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     return orgFiltered.filter(s => 
       s.name.toLowerCase().includes(q) || 
       s.code.toLowerCase().includes(q) ||
+      (s.fixedAccountRef && s.fixedAccountRef.toLowerCase().includes(q)) ||
+      (s.vendorName && s.vendorName.toLowerCase().includes(q)) ||
+      (s.costCenter && s.costCenter.toLowerCase().includes(q)) ||
+      (s.serviceNature && s.serviceNature.toLowerCase().includes(q)) ||
       (s.description && s.description.toLowerCase().includes(q))
     );
   }, [targetServices, selectedOrgFilter, serviceSearch]);
@@ -1591,9 +1669,29 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredServices.map((srv) => {
               const spent = srv.spentAmount || 0;
-              const limit = srv.budgetLimit || 1;
-              const percent = Math.min(100, Math.round((spent / limit) * 100));
+              const budget = srv.budgetLimit || 0;
+              const percent = budget > 0 ? Math.round((spent / budget) * 100) : 0;
+              const progressWidth = Math.min(100, Math.max(0, percent));
               const parentOrg = displayOrgs.find(o => o.id === srv.orgId);
+              const currency = parentOrg?.currency || activeOrg?.currency || 'ج.م';
+
+              let budgetStatus: 'safe' | 'warning' | 'danger' = 'safe';
+              let barColor = 'bg-emerald-500';
+              if (budget > 0) {
+                if (percent >= 100) {
+                  budgetStatus = 'danger';
+                  barColor = 'bg-rose-500';
+                } else if (percent >= 80) {
+                  budgetStatus = 'warning';
+                  barColor = 'bg-amber-500';
+                } else {
+                  budgetStatus = 'safe';
+                  barColor = 'bg-emerald-500';
+                }
+              }
+
+              const vendor = targetVendors.find(v => v.id === srv.vendorId);
+              const assignedVendorName = srv.vendorName || vendor?.name;
 
               return (
                 <div key={srv.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition flex flex-col justify-between">
@@ -1633,7 +1731,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                     </div>
 
                     {/* Company connection badge (Multi-Company Support) */}
-                    <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                    <div className="mt-2.5 flex items-center gap-1.5 flex-wrap">
                       {(() => {
                         const linkedOrgIds = srv.orgIds && srv.orgIds.length > 0 ? srv.orgIds : (srv.orgId ? [srv.orgId] : []);
                         const matchingOrgs = displayOrgs.filter(o => linkedOrgIds.includes(o.id));
@@ -1662,18 +1760,103 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                       })()}
                     </div>
 
+                    {/* Service Badges Row (Meter, Vendor, Budget Period, Frequency, Cost Center) */}
+                    <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                      {srv.fixedAccountRef && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-sky-50 text-sky-800 border border-sky-200/80" title="رقم العداد / كود المشترك / رقم الاشتراك الثابت">
+                          <Hash className="h-3 w-3 text-sky-600" />
+                          <span>{srv.fixedAccountRef}</span>
+                        </span>
+                      )}
+
+                      {assignedVendorName && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-blue-50 text-blue-800 border border-blue-200/80" title="المورد / مقدم الخدمة المعتمد">
+                          <Truck className="h-3 w-3 text-blue-600" />
+                          <span>{assignedVendorName}</span>
+                        </span>
+                      )}
+
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200/80" title="دورية سقف الميزانية">
+                        <Calendar className="h-3 w-3 text-amber-600" />
+                        <span>{budgetPeriodLabels[srv.budgetPeriod || 'monthly']}</span>
+                      </span>
+
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200/80" title="دورية الاستحقاق والتكرار">
+                        <Clock className="h-3 w-3 text-indigo-600" />
+                        <span>{recurringFrequencyLabels[srv.recurringFrequency || 'monthly']}</span>
+                      </span>
+
+                      {srv.costCenter && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200/80" title="مركز التكلفة / الفرع">
+                          <MapPin className="h-3 w-3 text-teal-600" />
+                          <span>{srv.costCenter}</span>
+                        </span>
+                      )}
+
+                      {srv.serviceNature && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200" title="طبيعة الخدمة">
+                          <Tag className="h-3 w-3 text-slate-500" />
+                          <span>{srv.serviceNature}</span>
+                        </span>
+                      )}
+                    </div>
+
                     <p className="text-[11px] text-slate-500 mt-2 line-clamp-2">
                       {srv.description || 'بند ومصروف معتمد للشركة.'}
                     </p>
                   </div>
 
-                  <div className="mt-3 pt-3 border-t border-slate-100">
-                    <div className="flex items-center justify-between text-[11px] mb-1">
-                      <span className="text-slate-400">سقف الميزانية:</span>
-                      <span className="font-bold font-mono text-slate-800">{srv.budgetLimit.toLocaleString()} {parentOrg?.currency || 'ج.م'}</span>
+                  {/* Financial Progress & Visual Budget vs Actual */}
+                  <div className="mt-3.5 pt-3 border-t border-slate-100">
+                    <div className="flex items-center justify-between text-xs mb-1.5">
+                      <div className="flex items-center gap-1 text-slate-600 font-medium">
+                        <span className="text-[11px]">الفعلي:</span>
+                        <span className="font-bold text-slate-900 font-mono text-xs">
+                          {spent.toLocaleString()} {currency}
+                        </span>
+                      </div>
+
+                      {budgetStatus === 'danger' && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 text-[10px] font-black animate-pulse">
+                          <AlertCircle className="h-3 w-3" />
+                          <span>تجاوز الميزانية ({percent}%)</span>
+                        </span>
+                      )}
+                      {budgetStatus === 'warning' && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-black">
+                          <AlertTriangle className="h-3 w-3" />
+                          <span>اقترب من السقف ({percent}%)</span>
+                        </span>
+                      )}
+                      {budgetStatus === 'safe' && budget > 0 && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                          <CheckCircle2 className="h-3 w-3" />
+                          <span>ضمن السقف ({percent}%)</span>
+                        </span>
+                      )}
+                      {budget === 0 && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[10px] font-bold">
+                          <span>سقف مفتوح</span>
+                        </span>
+                      )}
                     </div>
-                    <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-teal-500 rounded-full" style={{ width: `${percent}%` }}></div>
+
+                    <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1.5">
+                      <div className="flex items-center gap-1">
+                        <span>الميزانية:</span>
+                        <span className="font-bold font-mono text-slate-800">
+                          {budget > 0 ? `${budget.toLocaleString()} ${currency}` : 'غير محدد'}
+                        </span>
+                      </div>
+                      {budget > 0 && (
+                        <span className="font-mono text-[10px] text-slate-500">
+                          المتبقي: {Math.max(0, budget - spent).toLocaleString()} {currency}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden p-0.5">
+                      <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${progressWidth}%` }}></div>
                     </div>
                   </div>
                 </div>
@@ -2771,20 +2954,26 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
       {/* 7. Service Modal (Add / Edit) */}
       {isServiceModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-2xl w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 shrink-0">
               <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
-                <Layers className="h-4 w-4 text-teal-600" />
-                <span>{editingService ? `تعديل وإعادة تسمية البند (${editingService.name})` : 'إضافة بند صرف وتكلفة جديد'}</span>
+                <div className="p-2 bg-teal-50 text-teal-600 rounded-xl">
+                  <Layers className="h-4 w-4" />
+                </div>
+                <div>
+                  <span className="block">{editingService ? `تعديل وإعادة تسمية البند (${editingService.name})` : 'إضافة بند صرف وتكلفة جديد'}</span>
+                  <span className="text-[11px] font-normal text-slate-400">تحديد سقف الميزانية، دورية الاستحقاق، المورد المعتمد، وبيانات السداد</span>
+                </div>
               </h3>
-              <button onClick={() => setIsServiceModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600">
+              <button onClick={() => setIsServiceModalOpen(false)} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer">
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveService} className="mt-4 space-y-3 text-xs">
-              <div>
+            <form onSubmit={handleSaveService} className="mt-4 space-y-4 text-xs overflow-y-auto pr-1 flex-1">
+              {/* Companies Multi-Selection */}
+              <div className="bg-slate-50/70 p-3.5 rounded-2xl border border-slate-200/80">
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="block font-bold text-slate-700 flex items-center gap-1.5">
                     <Building2 className="h-3.5 w-3.5 text-teal-600" />
@@ -2805,7 +2994,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-44 overflow-y-auto p-2 bg-slate-50 border border-slate-200 rounded-xl">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-36 overflow-y-auto p-2 bg-white border border-slate-200 rounded-xl">
                   {displayOrgs.map(org => {
                     const isSelected = serviceOrgIds.includes(org.id);
                     return (
@@ -2838,70 +3027,226 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   })}
                 </div>
                 {serviceOrgIds.length === 0 && (
-                  <p className="mt-1 text-[11px] text-rose-600 font-bold">
+                  <p className="mt-1.5 text-[11px] text-rose-600 font-bold">
                     * يرجى تحديد شركة واحدة على الأقل لربط البند بها.
                   </p>
                 )}
               </div>
 
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">اسم بند الصرف *</label>
-                <input
-                  type="text"
-                  required
-                  value={serviceName}
-                  onChange={(e) => setServiceName(e.target.value)}
-                  placeholder="مثال: خدمات سحابية واستضافة"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden"
-                />
-              </div>
+              {/* Basic Info & Budget Section */}
+              <div className="bg-slate-50/70 p-3.5 rounded-2xl border border-slate-200/80 space-y-3">
+                <h4 className="font-bold text-slate-800 text-[11px] flex items-center gap-1.5">
+                  <DollarSign className="h-3.5 w-3.5 text-teal-600" />
+                  <span>البيانات الأساسية وسقف الميزانية التقديرية</span>
+                </h4>
 
-              <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">الرمز المحاسبي</label>
+                  <label className="block font-bold text-slate-700 mb-1">اسم بند الصرف *</label>
                   <input
                     type="text"
-                    value={serviceCode}
-                    onChange={(e) => setServiceCode(sanitizeCode(e.target.value, 8))}
-                    placeholder="SRV-101"
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs font-mono uppercase text-slate-800 outline-hidden"
+                    required
+                    value={serviceName}
+                    onChange={(e) => setServiceName(e.target.value)}
+                    placeholder="مثال: فاتورة الكهرباء، اشتراكات سحابية، صيانة المصاعد..."
+                    className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition"
                   />
                 </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">الرمز المحاسبي</label>
+                    <input
+                      type="text"
+                      value={serviceCode}
+                      onChange={(e) => setServiceCode(sanitizeCode(e.target.value, 8))}
+                      placeholder="SRV-101"
+                      className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs font-mono uppercase text-slate-800 outline-hidden focus:border-teal-500 transition"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">سقف الميزانية التقديرية</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      onKeyDown={handleNumericKeyDown}
+                      value={serviceBudget}
+                      onChange={(e) => setServiceBudget(sanitizeDigitsOnly(e.target.value))}
+                      placeholder="50000"
+                      className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs font-mono text-slate-800 outline-hidden focus:border-teal-500 transition"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">دورية سقف الميزانية</label>
+                    <select
+                      value={serviceBudgetPeriod}
+                      onChange={(e) => setServiceBudgetPeriod(e.target.value as BudgetPeriod)}
+                      className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition cursor-pointer"
+                    >
+                      <option value="monthly">شهرياً (Monthly)</option>
+                      <option value="yearly">سنوياً (Yearly)</option>
+                      <option value="per_request">لكل طلب صرف (Per Request)</option>
+                      <option value="unlimited">سقف مفتوح / غير محدد (Unlimited)</option>
+                    </select>
+                  </div>
+                </div>
+
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">سقف الميزانية التقديرية</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    onKeyDown={handleNumericKeyDown}
-                    value={serviceBudget}
-                    onChange={(e) => setServiceBudget(sanitizeDigitsOnly(e.target.value))}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs font-mono text-slate-800 outline-hidden"
-                  />
+                  <label className="block font-bold text-slate-700 mb-1.5">لون التمييز للبند</label>
+                  <div className="flex items-center gap-2">
+                    {['#10b981', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#ef4444', '#64748b'].map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => setServiceColor(c)}
+                        className={`h-6 w-6 rounded-full transition cursor-pointer ${serviceColor === c ? 'ring-2 ring-offset-2 ring-slate-800 scale-110' : 'hover:scale-105'}`}
+                        style={{ backgroundColor: c }}
+                      />
+                    ))}
+                  </div>
                 </div>
               </div>
 
+              {/* Vendor & Operational Specs Section */}
+              <div className="bg-slate-50/70 p-3.5 rounded-2xl border border-slate-200/80 space-y-3">
+                <h4 className="font-bold text-slate-800 text-[11px] flex items-center gap-1.5">
+                  <Truck className="h-3.5 w-3.5 text-teal-600" />
+                  <span>المورد المعتمد وبيانات التعاقد والاشتراك</span>
+                </h4>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">المورد / مقدم الخدمة المعتمد</label>
+                    <select
+                      value={serviceVendorId}
+                      onChange={(e) => setServiceVendorId(e.target.value)}
+                      className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition cursor-pointer"
+                    >
+                      <option value="">بدون مورد محدد (غير مقيد بمورد)</option>
+                      {targetVendors.map(v => (
+                        <option key={v.id} value={v.id}>{v.name} {v.contactPerson ? `(${v.contactPerson})` : ''}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      رقم العداد / كود المشترك / رقم الاشتراك الثابت
+                    </label>
+                    <input
+                      type="text"
+                      value={serviceFixedAccountRef}
+                      onChange={(e) => setServiceFixedAccountRef(e.target.value)}
+                      placeholder="مثال: عداد رقم 45802199 أو كود فوري 88392"
+                      className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">دورية الاستحقاق / التكرار</label>
+                    <select
+                      value={serviceRecurringFrequency}
+                      onChange={(e) => setServiceRecurringFrequency(e.target.value as RecurringFrequency)}
+                      className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition cursor-pointer"
+                    >
+                      <option value="monthly">دوري شهرياً</option>
+                      <option value="quarterly">ربع سنوي (كل 3 أشهر)</option>
+                      <option value="yearly">سنوي</option>
+                      <option value="on_demand">عند الطلب / طارئ</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">طبيعة الخدمة / النوع</label>
+                    <input
+                      type="text"
+                      value={serviceServiceNature}
+                      onChange={(e) => setServiceServiceNature(e.target.value)}
+                      placeholder="مثال: عداد مسبق الدفع، فاتورة مؤجلة، اشتراك شهري"
+                      className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">مركز التكلفة / الفرع</label>
+                    <input
+                      type="text"
+                      value={serviceCostCenter}
+                      onChange={(e) => setServiceCostCenter(e.target.value)}
+                      placeholder="مثال: مقر التجمع، فرع المعادي، إدارة العمليات"
+                      className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Payment Defaults Section */}
+              <div className="bg-slate-50/70 p-3.5 rounded-2xl border border-slate-200/80 space-y-3">
+                <h4 className="font-bold text-slate-800 text-[11px] flex items-center gap-1.5">
+                  <CreditCard className="h-3.5 w-3.5 text-teal-600" />
+                  <span>إعدادات الدفع والصرف الافتراضية</span>
+                </h4>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">طريقة الصرف الافتراضية</label>
+                    <select
+                      value={serviceDefaultPaymentMethod}
+                      onChange={(e) => setServiceDefaultPaymentMethod(e.target.value as PaymentMethod | '')}
+                      className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition cursor-pointer"
+                    >
+                      <option value="">بدون تحديد افتراضي (تحدد عند تقديم الطلب)</option>
+                      <option value="cash">نقداً / الخزينة النقدية (Cash)</option>
+                      <option value="instapay">إنستاباي (InstaPay)</option>
+                      <option value="digital_wallet">محفظة إلكترونية (Digital Wallet)</option>
+                      <option value="bank_transfer">تحويل بنكي (Bank Transfer)</option>
+                      <option value="cheque">شيك مصرفي (Cheque)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">الخزينة / الحساب المالي الافتراضي</label>
+                    <select
+                      value={serviceDefaultAccountId}
+                      onChange={(e) => setServiceDefaultAccountId(e.target.value)}
+                      className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition cursor-pointer"
+                    >
+                      <option value="">بدون حساب محدد (يحدد عند الصرف)</option>
+                      {targetVaults.map(vault => (
+                        <option key={vault.id} value={vault.id}>
+                          {vault.name} ({vault.accountIdentifier || vault.type})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Description & Notes */}
               <div>
-                <label className="block font-bold text-slate-700 mb-1">الوصف</label>
+                <label className="block font-bold text-slate-700 mb-1">الوصف والملاحظات</label>
                 <textarea
                   rows={2}
                   value={serviceDescription}
                   onChange={(e) => setServiceDescription(e.target.value)}
                   placeholder="ملاحظات وتفاصيل هذا البند..."
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden resize-none"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition resize-none"
                 ></textarea>
               </div>
 
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+              {/* Actions Footer */}
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 shrink-0">
                 <button
                   type="button"
                   onClick={() => setIsServiceModalOpen(false)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                  className="px-6 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
                 >
                   حفظ البند
                 </button>

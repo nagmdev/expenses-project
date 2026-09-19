@@ -9,9 +9,10 @@ import {
   Building,
   Landmark,
   ArrowDownLeft,
-  ArrowUpRight
+  ArrowUpRight,
+  Zap
 } from 'lucide-react';
-import { PaymentMethod, SUPPORTED_CURRENCIES, isServiceMatchingOrg, RequestType } from '../types';
+import { PaymentMethod, SUPPORTED_CURRENCIES, isServiceMatchingOrg, RequestType, ServiceCategory } from '../types';
 import { 
   sanitizeAmount, 
   sanitizeDigitalWallet, 
@@ -24,6 +25,39 @@ interface NewRequestModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
+
+const QUICK_TEMPLATES = [
+  {
+    label: '⚡ شحن كارت كهرباء',
+    title: 'شحن كارت كهرباء المقر',
+    description: 'شحن كارت عداد الكهرباء الدوري',
+    keywords: ['كهرباء', 'طاقة', 'عداد', 'مرافق'],
+  },
+  {
+    label: '⚡ فواتير إنترنت وهاتف',
+    title: 'سداد فاتورة الإنترنت الشهرية',
+    description: 'سداد فاتورة واشتراك الإنترنت والاتصالات للأعمال',
+    keywords: ['إنترنت', 'انترنت', 'اتصالات', 'هاتف', 'شبكات', 'سحابية'],
+  },
+  {
+    label: '⚡ بوفيه ومستلزمات مقر',
+    title: 'شراء مستلزمات بوفيه وضيافة',
+    description: 'شراء مستلزمات بوفيه وضيافة ومستلزمات نظافة دورية للمقر',
+    keywords: ['بوفيه', 'ضيافة', 'مستلزمات', 'أدوات مكتبية', 'نثريات', 'تشغيل'],
+  },
+  {
+    label: '⚡ شحن محفظة مندوب',
+    title: 'شحن رصيد محفظة للمندوب / مأمورية',
+    description: 'شحن رصيد محفظة إلكترونية للمندوب لتغطية مصاريف المأمورية والانتقالات',
+    keywords: ['مندوب', 'محفظة', 'مأمورية', 'سفر', 'انتقالات', 'عهدة'],
+  },
+  {
+    label: '⚡ وقود وانتقالات',
+    title: 'بدل وقود ومصروفات انتقالات مأمورية',
+    description: 'سداد فواتير وقود وبنزين ومصروفات انتقالات مأمورية رسمية',
+    keywords: ['وقود', 'بنزين', 'انتقالات', 'سفر', 'سيارات', 'مهمة'],
+  },
+];
 
 const TITLE_TEMPLATES = [
   'شراء تراخيص برمجيات واشتراكات سحابية',
@@ -185,6 +219,54 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     ? customDescription 
     : (selectedDescPreset === '✏️ كتابة تفاصيل ومواصفات مخصصة...' ? customDescription : selectedDescPreset);
 
+  // Auto-fill logic when a Service Category is selected
+  const applyServiceCategoryDefaults = (srv: ServiceCategory) => {
+    // 1. If it has fixedAccountRef, auto-set or append to itemsDetail
+    if (srv.fixedAccountRef) {
+      const refTag = `(الرقم المرجعي / كود العداد: ${srv.fixedAccountRef})`;
+      setItemsDetail(prev => {
+        if (!prev) return refTag;
+        if (prev.includes(srv.fixedAccountRef!)) return prev;
+        return `${prev} - ${refTag}`;
+      });
+    }
+
+    // 2. If it has vendorId and matching provider exists in providers list, auto-select that provider!
+    if (srv.vendorId && availableProviders.some(p => p.id === srv.vendorId)) {
+      setSelectedProviderId(srv.vendorId);
+    }
+
+    // 3. If it has defaultPaymentMethod, auto-select preferredPaymentMethod!
+    if (srv.defaultPaymentMethod) {
+      setPreferredPaymentMethod(srv.defaultPaymentMethod);
+    }
+
+    // 4. If it has defaultAccountId and matching account exists, auto-select targetAccountId!
+    if (srv.defaultAccountId && availableAccounts.some(a => a.id === srv.defaultAccountId)) {
+      setTargetAccountId(srv.defaultAccountId);
+    }
+  };
+
+  // Quick Template Activation
+  const applyQuickTemplate = (tpl: typeof QUICK_TEMPLATES[0]) => {
+    setIsCustomTitle(true);
+    setCustomTitle(tpl.title);
+    setIsCustomDescription(true);
+    setCustomDescription(tpl.description);
+
+    // Automatically match service category
+    const matched = availableServices.find(s => {
+      const sName = s.name.toLowerCase();
+      const sDesc = (s.description || '').toLowerCase();
+      return tpl.keywords.some(k => sName.includes(k.toLowerCase()) || sDesc.includes(k.toLowerCase()));
+    });
+
+    if (matched) {
+      setSelectedServiceId(matched.id);
+      applyServiceCategoryDefaults(matched);
+    }
+  };
+
   const handleClose = () => {
     setIsCustomTitle(false);
     setIsCustomJustification(false);
@@ -193,6 +275,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setCustomJustification('');
     setCustomDescription('');
     setAmount('');
+    setItemsDetail('');
+    setTargetAccountId('');
     onClose();
   };
 
@@ -271,6 +355,31 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           {/* Scrollable Form Body */}
           <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
           
+            {/* Quick Request Templates Bar (قوالب سريعة للطلبات المتكررة) */}
+            <div className="bg-gradient-to-r from-indigo-50/90 via-purple-50/70 to-blue-50/90 p-3.5 rounded-2xl border border-indigo-100/90 shadow-2xs space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="font-black text-indigo-950 text-xs flex items-center gap-1.5">
+                  <Zap className="h-4 w-4 text-indigo-600 fill-indigo-600" />
+                  <span>قوالب سريعة للطلبات المتكررة:</span>
+                </span>
+                <span className="text-[10px] text-indigo-600/80 font-bold">تعبئة وتحديد آلي للبنود بنقرة واحدة</span>
+              </div>
+
+              <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-thin">
+                {QUICK_TEMPLATES.map((tpl) => (
+                  <button
+                    key={tpl.label}
+                    type="button"
+                    onClick={() => applyQuickTemplate(tpl)}
+                    className="shrink-0 px-3.5 py-2 bg-white hover:bg-indigo-600 hover:text-white text-indigo-900 border border-indigo-200/80 rounded-xl text-xs font-bold transition-all duration-150 shadow-2xs hover:shadow-xs cursor-pointer active:scale-95 flex items-center gap-1.5"
+                    title={`تطبيق قالب سريع: ${tpl.title}`}
+                  >
+                    <span>{tpl.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Operation / Request Type Selector (Inflow vs Outflow) */}
             <div className="bg-slate-100/90 p-1.5 rounded-2xl flex gap-2">
               <button
@@ -404,7 +513,14 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   <select
                     required
                     value={selectedServiceId}
-                    onChange={(e) => setSelectedServiceId(e.target.value)}
+                    onChange={(e) => {
+                      const sId = e.target.value;
+                      setSelectedServiceId(sId);
+                      const srv = availableServices.find(s => s.id === sId);
+                      if (srv) {
+                        applyServiceCategoryDefaults(srv);
+                      }
+                    }}
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 font-bold text-slate-900 text-xs"
                   >
                     {availableServices.map((s) => (

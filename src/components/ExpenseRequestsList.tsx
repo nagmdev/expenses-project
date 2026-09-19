@@ -25,7 +25,13 @@ import {
   User as UserIcon,
   Tag,
   Flame,
-  Filter
+  Filter,
+  Download,
+  QrCode,
+  Zap,
+  CheckSquare,
+  Square,
+  FileSpreadsheet
 } from 'lucide-react';
 
 interface ExpenseRequestsListProps {
@@ -39,6 +45,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 }) => {
   const { 
     requests, 
+    organizations,
+    allOrganizations,
     activeOrg, 
     activeOrgId, 
     services, 
@@ -54,6 +62,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
   const [selectedReqId, setSelectedReqId] = useState<string | null>(null);
   const [copiedText, setCopiedText] = useState(false);
+  const [copiedItemId, setCopiedItemId] = useState<string | null>(null);
 
   // Search and Rich Filter States
   const [search, setSearch] = useState('');
@@ -78,6 +87,18 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   const [disburseBankName, setDisburseBankName] = useState('انستاباي / المصرف الرئيسي');
   const [disburseNotes, setDisburseNotes] = useState('');
   const [disbursing, setDisbursing] = useState(false);
+
+  // Batch Disbursement States (الصرف المجمع)
+  const [selectedApprovedIds, setSelectedApprovedIds] = useState<string[]>([]);
+  const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
+  const [batchAccountId, setBatchAccountId] = useState<string>('');
+  const [batchPaymentMethod, setBatchPaymentMethod] = useState<'auto' | PaymentMethod>('auto');
+  const [batchRefNumber, setBatchRefNumber] = useState(`BATCH-${Math.floor(10000000 + Math.random() * 90000000)}`);
+  const [batchNotes, setBatchNotes] = useState('صرف دفعة مجمعة معتمدة');
+  const [isBatchDisbursing, setIsBatchDisbursing] = useState(false);
+
+  // Instant QR Code Modal State
+  const [qrModalRequest, setQrModalRequest] = useState<ExpenseRequest | null>(null);
 
   // Derive unique departments for filter dropdown
   const uniqueDepartments = useMemo(() => {
@@ -181,11 +202,173 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     setActiveAction('none');
   }, [activeRequest?.id, paymentAccounts]);
 
-  // Copy Bank Account Details to Clipboard
-  const handleCopyAccountDetails = (text: string) => {
+  // Copy Bank Account Details to Clipboard with Visual Feedback
+  const handleCopyAccountDetails = (text: string, itemId?: string) => {
+    if (!text) return;
     navigator.clipboard.writeText(text);
+    if (itemId) setCopiedItemId(itemId);
     setCopiedText(true);
-    setTimeout(() => setCopiedText(false), 2000);
+    setTimeout(() => {
+      setCopiedText(false);
+      setCopiedItemId(null);
+    }, 2500);
+  };
+
+  // Approved requests currently visible in filtered results
+  const approvedRequestsInFilter = useMemo(() => {
+    return filteredRequests.filter(r => r.status === 'approved');
+  }, [filteredRequests]);
+
+  // Selected approved requests objects for batch payment
+  const selectedBatchRequests = useMemo(() => {
+    return requests.filter(r => selectedApprovedIds.includes(r.id) && r.status === 'approved');
+  }, [requests, selectedApprovedIds]);
+
+  const selectedBatchSum = useMemo(() => {
+    return selectedBatchRequests.reduce((sum, r) => sum + r.amount, 0);
+  }, [selectedBatchRequests]);
+
+  const toggleSelectApproved = (id: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setSelectedApprovedIds(prev => 
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    );
+  };
+
+  const toggleSelectAllApproved = () => {
+    if (approvedRequestsInFilter.length === 0) return;
+    const allSelected = approvedRequestsInFilter.every(r => selectedApprovedIds.includes(r.id));
+    if (allSelected) {
+      const filterIds = new Set(approvedRequestsInFilter.map(r => r.id));
+      setSelectedApprovedIds(prev => prev.filter(id => !filterIds.has(id)));
+    } else {
+      const currentSet = new Set(selectedApprovedIds);
+      approvedRequestsInFilter.forEach(r => currentSet.add(r.id));
+      setSelectedApprovedIds(Array.from(currentSet));
+    }
+  };
+
+  // Open batch modal & prefill defaults
+  const handleOpenBatchDisburseModal = () => {
+    if (selectedApprovedIds.length === 0) return;
+    if (paymentAccounts.length > 0 && !batchAccountId) {
+      setBatchAccountId(paymentAccounts[0].id);
+    }
+    setBatchRefNumber(`BATCH-${Math.floor(10000000 + Math.random() * 90000000)}`);
+    setIsBatchModalOpen(true);
+  };
+
+  // Execute Batch Pay (الصرف المجمع)
+  const handleConfirmBatchDisburse = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (selectedBatchRequests.length === 0 || isBatchDisbursing) return;
+
+    setIsBatchDisbursing(true);
+    try {
+      const selectedAccount = paymentAccounts.find(a => a.id === batchAccountId);
+      const accName = selectedAccount 
+        ? `${selectedAccount.name} (${selectedAccount.accountIdentifier})` 
+        : (paymentAccounts[0] ? `${paymentAccounts[0].name} (${paymentAccounts[0].accountIdentifier})` : 'الخزينة المعتمدة');
+      const accountId = selectedAccount?.id || paymentAccounts[0]?.id;
+
+      for (let i = 0; i < selectedBatchRequests.length; i++) {
+        const req = selectedBatchRequests[i];
+        const singleRef = `${batchRefNumber.trim()}-${i + 1}`;
+        const methodToUse: PaymentMethod = batchPaymentMethod === 'auto'
+          ? (req.preferredPaymentMethod || 'instapay')
+          : batchPaymentMethod;
+
+        await disburseRequest(req.id, {
+          paymentMethod: methodToUse,
+          referenceNumber: singleRef,
+          bankName: accName,
+          accountId: accountId,
+          accountName: selectedAccount?.name || paymentAccounts[0]?.name,
+          notes: batchNotes.trim() 
+            ? `${batchNotes.trim()} [دفعة مجمعة ${batchRefNumber.trim()}]` 
+            : `صرف دفعة مجمعة [${batchRefNumber.trim()}]`,
+        });
+      }
+
+      setSelectedApprovedIds([]);
+      setIsBatchModalOpen(false);
+    } catch (err) {
+      console.error('[Batch Disburse Error]', err);
+    } finally {
+      setIsBatchDisbursing(false);
+    }
+  };
+
+  // Export Filtered Requests to Excel / CSV with UTF-8 BOM
+  const exportRequestsToExcel = () => {
+    const headers = [
+      'رقم الطلب',
+      'الشركة',
+      'نوع العملية (صرف/توريد)',
+      'بند الصرف',
+      'المورد',
+      'المبلغ',
+      'العملة',
+      'الأولوية',
+      'الحالة',
+      'مقدم الطلب',
+      'الحساب المالي',
+      'رقم المرجع',
+      'تاريخ الطلب',
+      'تاريخ الصرف'
+    ];
+
+    const escapeCsvCell = (cell: any) => {
+      if (cell === null || cell === undefined) return '""';
+      const str = String(cell).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const rows = filteredRequests.map(req => {
+      const orgName = organizations?.find(o => o.id === req.orgId)?.name || activeOrg?.name || 'الشركة';
+      const opType = req.requestType === 'income' ? 'توريد مالي' : 'صرف مالي';
+      const urgencyText = req.urgency === 'high' ? 'عاجل وهام' : req.urgency === 'medium' ? 'متوسط' : 'عادي';
+      const statusText = 
+        req.status === 'disbursed' ? 'تم الصرف والتحويل' :
+        req.status === 'approved' ? 'معتمد للصرف' :
+        req.status === 'pending' ? 'قيد المراجعة' :
+        req.status === 'clarification_requested' ? 'مطلوب توضيح' : 'مرفوض';
+
+      const accountName = req.disbursement?.accountName || req.disbursement?.bankName || (
+        req.targetAccountId ? paymentAccounts.find(a => a.id === req.targetAccountId)?.name : ''
+      ) || '';
+
+      const createdAtStr = req.createdAt ? req.createdAt.replace('T', ' ').slice(0, 16) : '';
+      const disbursedAtStr = req.disbursement?.disbursedAt ? req.disbursement.disbursedAt.replace('T', ' ').slice(0, 16) : '';
+
+      return [
+        req.requestNumber || '',
+        orgName,
+        opType,
+        req.serviceCategoryName || '',
+        req.providerName || '',
+        req.amount,
+        req.currency || 'EGP',
+        urgencyText,
+        statusText,
+        req.requesterName || '',
+        accountName,
+        req.disbursement?.referenceNumber || '',
+        createdAtStr,
+        disbursedAtStr
+      ].map(escapeCsvCell).join(',');
+    });
+
+    const csvContent = '\uFEFF' + [headers.map(escapeCsvCell).join(','), ...rows].join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `طلبات_المصروفات_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   // Inline Action Handlers
@@ -376,14 +559,26 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={onOpenNewRequest}
-            className="flex items-center gap-2 bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-sm px-6 py-3.5 rounded-2xl shadow-xl shadow-emerald-500/20 transition cursor-pointer self-start md:self-auto shrink-0 active:scale-98"
-          >
-            <Plus className="h-5 w-5 stroke-[2.5]" />
-            <span>إنشاء طلب صرف جديد</span>
-          </button>
+          <div className="flex items-center gap-2.5 flex-wrap self-start md:self-auto shrink-0">
+            <button
+              type="button"
+              onClick={exportRequestsToExcel}
+              className="flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white font-bold text-xs sm:text-sm px-4 py-3.5 rounded-2xl shadow-md border border-white/15 transition cursor-pointer active:scale-98"
+              title="تصدير النتائج المفلترة الحالية إلى ملف Excel / CSV"
+            >
+              <Download className="h-4 w-4 text-emerald-400" />
+              <span>تصدير إلى Excel</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenNewRequest}
+              className="flex items-center gap-2 bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-sm px-6 py-3.5 rounded-2xl shadow-xl shadow-emerald-500/20 transition cursor-pointer active:scale-98"
+            >
+              <Plus className="h-5 w-5 stroke-[2.5]" />
+              <span>إنشاء طلب صرف جديد</span>
+            </button>
+          </div>
         </div>
 
         {/* 4 Financial KPI Cards */}
@@ -564,7 +759,18 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
             {/* Results count & reset filters */}
             <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs text-slate-500">
-              <span>النتائج المعروضة: <strong>{filteredRequests.length}</strong> طلب</span>
+              <div className="flex items-center gap-2">
+                <span>النتائج المعروضة: <strong>{filteredRequests.length}</strong> طلب</span>
+                <button
+                  type="button"
+                  onClick={exportRequestsToExcel}
+                  className="inline-flex items-center gap-1 text-[11px] text-emerald-700 hover:text-emerald-900 font-bold bg-emerald-50 px-2 py-0.5 rounded-md hover:bg-emerald-100 transition cursor-pointer"
+                  title="تصدير نتائج البحث والفلترة الحالية إلى ملف Excel (CSV)"
+                >
+                  <FileSpreadsheet className="h-3 w-3" />
+                  <span>تصدير Excel</span>
+                </button>
+              </div>
               {(statusFilter !== 'all' || categoryFilter !== 'all' || providerFilter !== 'all' || departmentFilter !== 'all' || urgencyFilter !== 'all' || paymentMethodFilter !== 'all' || datePeriodFilter !== 'all' || search) && (
                 <button
                   type="button"
@@ -587,12 +793,33 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
           </div>
 
+          {/* Select All Approved for Batch Payment Toggle */}
+          {approvedRequestsInFilter.length > 0 && (
+            <div className="flex items-center justify-between px-3.5 py-2.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200/80 rounded-2xl text-xs shadow-2xs">
+              <label className="flex items-center gap-2 cursor-pointer font-bold text-blue-950 select-none">
+                <input
+                  type="checkbox"
+                  checked={approvedRequestsInFilter.length > 0 && approvedRequestsInFilter.every(r => selectedApprovedIds.includes(r.id))}
+                  onChange={toggleSelectAllApproved}
+                  className="h-4 w-4 rounded border-blue-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
+                />
+                <span>تحديد جميع الطلبات المعتمدة للصرف ({approvedRequestsInFilter.length})</span>
+              </label>
+              {selectedApprovedIds.length > 0 && (
+                <span className="text-[11px] font-black text-indigo-700 bg-white/90 px-2.5 py-0.5 rounded-lg border border-indigo-200">
+                  تم تحديد: {selectedApprovedIds.length} طلب
+                </span>
+              )}
+            </div>
+          )}
+
           {/* Cards List */}
           <div className="space-y-3">
             {filteredRequests.map((req) => {
               const isSelected = activeRequest?.id === req.id;
               const hasClarification = req.status === 'clarification_requested';
               const isApproved = req.status === 'approved';
+              const isBatchSelected = selectedApprovedIds.includes(req.id);
 
               return (
                 <div
@@ -601,6 +828,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                   className={`p-4 rounded-2xl border transition cursor-pointer relative ${
                     isSelected
                       ? 'bg-indigo-50/50 border-indigo-500 ring-2 ring-indigo-500/20 shadow-md'
+                      : isBatchSelected
+                      ? 'bg-indigo-50/40 border-indigo-300 ring-1 ring-indigo-300 shadow-xs'
                       : isApproved
                       ? 'bg-blue-50/20 border-blue-200 hover:border-blue-400 shadow-2xs'
                       : 'bg-white border-slate-200 hover:border-slate-300 shadow-2xs'
@@ -612,6 +841,21 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
+                      {/* Batch Checkbox for Approved Requests */}
+                      {isApproved && (
+                        <div 
+                          className="flex items-center mr-0.5"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isBatchSelected}
+                            onChange={(e) => toggleSelectApproved(req.id, e as any)}
+                            title="تحديد للصرف المجمع"
+                            className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
+                          />
+                        </div>
+                      )}
                       <span className="font-mono text-xs font-bold text-slate-500">{req.requestNumber}</span>
                       {getUrgencyBadge(req.urgency)}
                     </div>
@@ -632,8 +876,32 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                   </div>
 
                   <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100 text-xs">
-                    <div>
+                    <div className="flex items-center gap-1.5">
                       {getMethodBadge(req.preferredPaymentMethod)}
+                      {req.paymentAccountDetails && (
+                        <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyAccountDetails(req.paymentAccountDetails!, req.id)}
+                            className="p-1 hover:bg-slate-100 text-slate-400 hover:text-emerald-700 rounded-lg transition"
+                            title={copiedItemId === req.id ? 'تم النسخ بنجاح ✓' : 'نسخ بيانات الحساب'}
+                          >
+                            {copiedItemId === req.id ? (
+                              <span className="text-[10px] text-emerald-600 font-bold">تم النسخ ✓</span>
+                            ) : (
+                              <Copy className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setQrModalRequest(req)}
+                            className="p-1 hover:bg-slate-100 text-slate-400 hover:text-indigo-700 rounded-lg transition"
+                            title="رمز QR للدفع"
+                          >
+                            <QrCode className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      )}
                     </div>
                     <span className="font-black text-slate-900 text-sm">
                       {req.amount.toLocaleString()} {req.currency}
@@ -775,31 +1043,42 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 </div>
               </div>
 
-              {/* Bank Account & InstaPay Transfer Box (With 1-Click Copy Button) */}
+              {/* Bank Account & InstaPay Transfer Box (With 1-Click Copy & Instant QR Modal) */}
               <div className="bg-emerald-50/70 border border-emerald-200 rounded-2xl p-4 sm:p-5 space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <div className="flex items-center gap-2 font-black text-emerald-950 text-xs">
                     <CreditCard className="h-4 w-4 text-emerald-700" />
                     <span>بيانات المستفيد للتحويل البنكي والصرف (Recipient Payment Data)</span>
                   </div>
                   {activeRequest.paymentAccountDetails && (
-                    <button
-                      type="button"
-                      onClick={() => handleCopyAccountDetails(activeRequest.paymentAccountDetails!)}
-                      className="flex items-center gap-1 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-lg transition cursor-pointer shadow-xs"
-                    >
-                      {copiedText ? (
-                        <>
-                          <Check className="h-3.5 w-3.5" />
-                          <span>تم النسخ بنجاح ✓</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3.5 w-3.5" />
-                          <span>نسخ بيانات التحويل</span>
-                        </>
-                      )}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleCopyAccountDetails(activeRequest.paymentAccountDetails!, activeRequest.id)}
+                        className="flex items-center gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-xl transition cursor-pointer shadow-xs active:scale-95 relative"
+                      >
+                        {copiedText && (!copiedItemId || copiedItemId === activeRequest.id) ? (
+                          <>
+                            <Check className="h-3.5 w-3.5 stroke-[3]" />
+                            <span className="animate-pulse">تم النسخ بنجاح ✓</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3.5 w-3.5" />
+                            <span>نسخ بيانات التحويل</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setQrModalRequest(activeRequest)}
+                        className="flex items-center gap-1.5 text-xs bg-slate-900 hover:bg-slate-800 text-white font-bold px-3 py-1.5 rounded-xl transition cursor-pointer shadow-xs active:scale-95"
+                      >
+                        <QrCode className="h-3.5 w-3.5 text-emerald-400" />
+                        <span>توليد كود الدفع (QR)</span>
+                      </button>
+                    </div>
                   )}
                 </div>
 
@@ -812,12 +1091,34 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                   </div>
 
                   <div className="bg-white p-3 rounded-xl border border-emerald-100 sm:col-span-2">
-                    <span className="text-slate-400 block mb-0.5">
-                      {activeRequest.preferredPaymentMethod === 'instapay' ? 'عنوان انستاباي / رقم الهاتف:' :
-                       activeRequest.preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية:' :
-                       activeRequest.preferredPaymentMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN) / الحساب:' : 'جهة الاستلام:'}
-                    </span>
-                    <span className="font-mono font-black text-emerald-900 text-xs sm:text-sm select-all">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-slate-400 block">
+                        {activeRequest.preferredPaymentMethod === 'instapay' ? 'عنوان انستاباي / رقم الهاتف:' :
+                         activeRequest.preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية:' :
+                         activeRequest.preferredPaymentMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN) / الحساب:' : 'جهة الاستلام:'}
+                      </span>
+                      {activeRequest.paymentAccountDetails && (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleCopyAccountDetails(activeRequest.paymentAccountDetails!, activeRequest.id)}
+                            className="inline-flex items-center gap-1 text-[11px] text-emerald-700 hover:text-emerald-900 font-bold bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 rounded-md transition cursor-pointer"
+                          >
+                            <Copy className="h-3 w-3" />
+                            <span>{copiedText && (!copiedItemId || copiedItemId === activeRequest.id) ? 'تم النسخ ✓' : 'نسخ سريع'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setQrModalRequest(activeRequest)}
+                            className="inline-flex items-center gap-1 text-[11px] text-slate-700 hover:text-slate-900 font-bold bg-slate-100 hover:bg-slate-200 px-2 py-0.5 rounded-md transition cursor-pointer"
+                          >
+                            <QrCode className="h-3 w-3 text-indigo-600" />
+                            <span>كود QR</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <span className="font-mono font-black text-emerald-900 text-xs sm:text-sm select-all break-all">
                       {activeRequest.paymentAccountDetails || 'لم يتم إدخال تفاصيل'}
                     </span>
                   </div>
@@ -1256,6 +1557,350 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
         </div>
 
       </div>
+
+      {/* Sticky/Floating Batch Action Toolbar when >= 1 requests are selected */}
+      {selectedApprovedIds.length > 0 && (
+        <div className="fixed bottom-6 right-6 left-6 md:right-12 md:left-12 z-40 bg-slate-900/95 backdrop-blur-md text-white p-4 sm:p-5 rounded-3xl shadow-2xl border border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-4 animate-in slide-in-from-bottom-5 duration-200">
+          <div className="flex items-center gap-3.5 text-right w-full sm:w-auto">
+            <div className="h-11 w-11 rounded-2xl bg-gradient-to-tr from-amber-400 to-amber-500 text-slate-950 flex items-center justify-center font-black shadow-lg shadow-amber-500/20 shrink-0">
+              <Zap className="h-6 w-6 fill-slate-950" />
+            </div>
+            <div>
+              <div className="text-sm sm:text-base font-black flex items-center gap-2 flex-wrap">
+                <span>تم تحديد {selectedApprovedIds.length} طلبات معتمدة</span>
+                <span className="text-emerald-400 font-extrabold bg-emerald-950/60 px-2.5 py-0.5 rounded-lg border border-emerald-500/30">
+                  بإجمالي {selectedBatchSum.toLocaleString()} {currency}
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 mt-0.5">
+                جاهزة الآن لتنفيذ الصرف والتحويل المجمع بضغطة زر واحدة.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end">
+            <button
+              type="button"
+              onClick={() => setSelectedApprovedIds([])}
+              className="px-4 py-2.5 text-xs font-bold text-slate-300 hover:text-white hover:bg-slate-800 rounded-xl transition cursor-pointer"
+            >
+              إلغاء التحديد
+            </button>
+
+            <button
+              type="button"
+              onClick={handleOpenBatchDisburseModal}
+              className="flex-1 sm:flex-initial flex items-center justify-center gap-2 bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-xs sm:text-sm px-6 py-3 rounded-xl shadow-xl shadow-emerald-500/20 transition cursor-pointer active:scale-95"
+            >
+              <Zap className="h-4 w-4 fill-slate-950" />
+              <span>⚡ صرف الدفعة المحددة دفعة واحدة (Batch Pay)</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Batch Disbursement Confirmation Modal */}
+      {isBatchModalOpen && (
+        <div 
+          className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
+          onClick={() => !isBatchDisbursing && setIsBatchModalOpen(false)}
+        >
+          <div 
+            className="bg-white rounded-3xl max-w-2xl w-full p-6 sm:p-7 shadow-2xl border border-slate-100 max-h-[90vh] flex flex-col my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="h-11 w-11 rounded-2xl bg-blue-100 text-blue-700 flex items-center justify-center shadow-xs">
+                  <Zap className="h-6 w-6 fill-blue-700" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-900">
+                    صرف الدفعة المجمعة (Batch Disbursement)
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    تنفيذ تحويل مالي فوري لعدد {selectedBatchRequests.length} طلبات معتمدة
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={isBatchDisbursing}
+                onClick={() => setIsBatchModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Content Form */}
+            <form onSubmit={handleConfirmBatchDisburse} className="flex-1 overflow-y-auto py-4 space-y-4 text-xs">
+              
+              {/* Batch Financial Summary Card */}
+              <div className="bg-gradient-to-r from-blue-50 via-indigo-50 to-emerald-50 border border-blue-200/80 rounded-2xl p-4 flex items-center justify-between">
+                <div>
+                  <span className="text-[11px] font-bold text-slate-600 block">إجمالي مبالغ الصرف المطلوب:</span>
+                  <div className="text-2xl font-black text-indigo-950 mt-0.5">
+                    {selectedBatchSum.toLocaleString()} <span className="text-sm font-bold text-indigo-700">{currency}</span>
+                  </div>
+                </div>
+                <div className="text-left bg-white/80 backdrop-blur-xs px-3.5 py-2 rounded-xl border border-indigo-100 text-xs">
+                  <span className="text-slate-500 block text-[10px]">عدد الطلبات:</span>
+                  <span className="font-extrabold text-slate-900 text-sm">{selectedBatchRequests.length} طلبات معتمدة</span>
+                </div>
+              </div>
+
+              {/* Source Treasury Account */}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  خزينة / حساب الصرف المحول منه (- OUT) *
+                </label>
+                <select
+                  required
+                  value={batchAccountId}
+                  onChange={(e) => setBatchAccountId(e.target.value)}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-800 text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                >
+                  {paymentAccounts.length > 0 ? (
+                    paymentAccounts.map(acc => {
+                      const bal = Number(acc.currentBalance ?? acc.balance ?? 0);
+                      return (
+                        <option key={acc.id} value={acc.id}>
+                          {acc.name} ({acc.accountIdentifier}) — الرصيد: {bal.toLocaleString()} {acc.currency}
+                        </option>
+                      );
+                    })
+                  ) : (
+                    <option value="">الحساب المصرفي الرئيسي</option>
+                  )}
+                </select>
+                {(() => {
+                  const currentAcc = paymentAccounts.find(a => a.id === batchAccountId);
+                  const bal = Number(currentAcc?.currentBalance ?? currentAcc?.balance ?? 0);
+                  if (currentAcc && bal < selectedBatchSum) {
+                    return (
+                      <div className="mt-1.5 p-2 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-[11px] font-bold flex items-center gap-1.5">
+                        <AlertCircle className="h-3.5 w-3.5 text-rose-600 shrink-0" />
+                        <span>تنبيه: رصيد الحساب المختار ({bal.toLocaleString()}) أقل من إجمالي مبلغ الدفعة ({selectedBatchSum.toLocaleString()}).</span>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+
+              {/* Payment Method & Reference */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">طريقة الصرف والتحويل</label>
+                  <select
+                    value={batchPaymentMethod}
+                    onChange={(e: any) => setBatchPaymentMethod(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-xs"
+                  >
+                    <option value="auto">حسب وسيلة كل طلب (افتراضي)</option>
+                    <option value="instapay">انستاباي (InstaPay) للجميع</option>
+                    <option value="bank_transfer">تحويل بنكي فوري (IBAN)</option>
+                    <option value="digital_wallet">محفظة إلكترونية</option>
+                    <option value="cash">نقداً من الخزينة</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">كود / مرجع الدفعة *</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      required
+                      value={batchRefNumber}
+                      onChange={(e) => setBatchRefNumber(e.target.value)}
+                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-xs font-bold"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setBatchRefNumber(`BATCH-${Math.floor(10000000 + Math.random() * 90000000)}`)}
+                      className="px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-[11px] font-bold shrink-0 cursor-pointer"
+                      title="توليد كود جديد"
+                    >
+                      توليد ↺
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Batch Notes */}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">ملاحظات وبيان الدفعة</label>
+                <input
+                  type="text"
+                  value={batchNotes}
+                  onChange={(e) => setBatchNotes(e.target.value)}
+                  placeholder="مثال: صرف دفعة مستحقات المصروفات الدورية المعتمدة"
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs"
+                />
+              </div>
+
+              {/* Selected Requests Breakdown */}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1.5">
+                  تفاصيل الطلبات المشمولة بالصرف ({selectedBatchRequests.length}):
+                </label>
+                <div className="max-h-48 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
+                  {selectedBatchRequests.map((req, idx) => (
+                    <div key={req.id} className="p-2.5 bg-white flex items-center justify-between gap-2 hover:bg-slate-50/80 transition">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono text-[10px] text-slate-400 font-bold w-5">{idx + 1}.</span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono font-bold text-slate-700 text-xs">{req.requestNumber}</span>
+                            <span className="text-slate-400">•</span>
+                            <span className="font-semibold text-slate-800 text-xs truncate">{req.title}</span>
+                          </div>
+                          <div className="text-[11px] text-slate-500 truncate">
+                            {req.requesterName} {req.paymentAccountDetails ? `(${req.paymentAccountDetails})` : ''}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="text-left shrink-0">
+                        <span className="font-bold text-emerald-700 text-xs">
+                          {req.amount.toLocaleString()} {req.currency}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Modal Actions */}
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isBatchDisbursing}
+                  onClick={() => setIsBatchModalOpen(false)}
+                  className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl font-bold text-xs cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isBatchDisbursing || selectedBatchRequests.length === 0}
+                  className="px-6 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 flex items-center gap-2 active:scale-95"
+                >
+                  <Zap className="h-4 w-4 fill-white" />
+                  <span>
+                    {isBatchDisbursing ? 'جاري تنفيذ الصرف المجمع...' : `تأكيد وصرف جميع الطلبات (${selectedBatchRequests.length})`}
+                  </span>
+                </button>
+              </div>
+
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Instant QR Code Modal */}
+      {qrModalRequest && (
+        <div 
+          className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setQrModalRequest(null)}
+        >
+          <div 
+            className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <div className="flex items-center gap-2.5 text-right">
+                <div className="h-9 w-9 rounded-xl bg-slate-900 text-emerald-400 flex items-center justify-center shadow-md">
+                  <QrCode className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-900 text-sm">رمز الاستجابة السريعة للدفع (QR)</h3>
+                  <span className="text-[11px] text-slate-400 font-mono">{qrModalRequest.requestNumber}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQrModalRequest(null)}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* QR Code Container */}
+            <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 inline-block mx-auto mb-4 relative shadow-inner">
+              <div className="p-3 bg-white rounded-xl shadow-xs border border-slate-100">
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=10&data=${encodeURIComponent(
+                    qrModalRequest.paymentAccountDetails || qrModalRequest.requestNumber
+                  )}`}
+                  alt="Payment QR Code"
+                  className="w-48 h-48 sm:w-52 sm:h-52 mx-auto object-contain"
+                  loading="lazy"
+                />
+              </div>
+              <div className="mt-2.5 flex items-center justify-center gap-1.5 text-[11px] font-bold text-slate-600">
+                <Smartphone className="h-3.5 w-3.5 text-emerald-600" />
+                <span>امسح الكود عبر تطبيق البنك أو انستاباي أو المحفظة</span>
+              </div>
+            </div>
+
+            {/* Payment Details Box */}
+            <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200/80 text-right text-xs space-y-2 mb-4">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">المستفيد:</span>
+                <span className="font-bold text-slate-800">{qrModalRequest.requesterName}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">المبلغ المطلوب:</span>
+                <span className="font-black text-emerald-700 text-sm">
+                  {qrModalRequest.amount.toLocaleString()} {qrModalRequest.currency}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">وسيلة الصرف:</span>
+                <span className="font-bold text-slate-800">
+                  {qrModalRequest.preferredPaymentMethod === 'instapay' ? 'انستاباي (InstaPay)' :
+                   qrModalRequest.preferredPaymentMethod === 'digital_wallet' ? 'محفظة إلكترونية' :
+                   qrModalRequest.preferredPaymentMethod === 'bank_transfer' ? 'تحويل بنكي (IBAN)' : 'نقداً'}
+                </span>
+              </div>
+              <div className="pt-2 border-t border-slate-200 flex items-center justify-between">
+                <span className="text-slate-500">بيانات الحساب / المعرف:</span>
+                <span className="font-mono font-bold text-slate-900 select-all">
+                  {qrModalRequest.paymentAccountDetails || '—'}
+                </span>
+              </div>
+            </div>
+
+            {/* Buttons */}
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (qrModalRequest.paymentAccountDetails) {
+                    handleCopyAccountDetails(qrModalRequest.paymentAccountDetails, qrModalRequest.id);
+                  }
+                }}
+                className="flex items-center justify-center gap-1.5 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer shadow-xs active:scale-95"
+              >
+                <Copy className="h-4 w-4" />
+                <span>{copiedText && (!copiedItemId || copiedItemId === qrModalRequest.id) ? 'تم النسخ بنجاح ✓' : 'نسخ البيانات'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="flex items-center justify-center gap-1.5 py-2.5 px-4 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition cursor-pointer shadow-xs active:scale-95"
+              >
+                <Printer className="h-4 w-4" />
+                <span>طباعة / حفظ</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );
