@@ -1214,12 +1214,12 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
               {/* ACTION PANELS ACCORDING TO ROLES */}
               <div className="pt-4 border-t border-slate-100 space-y-4">
                 
-                {/* 1. If Manager / Admin: Can Approve, Clarify, or Reject */}
-                {(currentRole === 'org_admin' || currentRole === 'super_admin') && 
+                {/* 1. If Manager / Admin / Finance: Can Approve, Clarify, or Reject */}
+                {(currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance') && 
                  (activeRequest.status === 'pending' || activeRequest.status === 'clarification_requested') && (
                   <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
-                      <span className="text-xs font-bold text-slate-700">اتخاذ إجراء إداري على هذا الطلب:</span>
+                      <span className="text-xs font-bold text-slate-700">اتخاذ إجراء مالي أو إداري على هذا الطلب:</span>
                       
                       <div className="flex items-center gap-2">
                         <button
@@ -1343,20 +1343,6 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                         </div>
                       </div>
                     )}
-                  </div>
-                )}
-
-                {/* 2. If Finance Role: Notice when request is awaiting admin approval */}
-                {currentRole === 'finance' && 
-                 (activeRequest.status === 'pending' || activeRequest.status === 'clarification_requested') && (
-                  <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-2xl flex items-center gap-3 text-xs text-amber-900">
-                    <AlertCircle className="h-5 w-5 text-amber-600 shrink-0" />
-                    <div>
-                      <span className="font-bold block">هذا الطلب بانتظار اعتماد مدير المؤسسة أولاً.</span>
-                      <span className="text-[11px] text-amber-700">
-                        بصفتك مسؤول الصرف والخزينة، ستتمكن من تنفيذ التحويل المالي وإصدار الإشعار فور صدور اعتماد الإدارة.
-                      </span>
-                    </div>
                   </div>
                 )}
 

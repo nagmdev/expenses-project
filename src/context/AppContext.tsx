@@ -562,8 +562,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setActiveTab('providers');
       }
     } else if (resolvedRole === 'finance') {
-      if (activeTab === 'dashboard' || activeTab === 'services' || activeTab === 'organizations' || activeTab === 'settings') {
-        setActiveTab('requests');
+      if (activeTab === 'organizations' || activeTab === 'settings') {
+        setActiveTab('treasury');
       }
     }
   }, [resolvedRole, firebaseUser, activeTab]);

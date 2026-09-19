@@ -123,6 +123,24 @@ export const Navbar: React.FC = () => {
         ) : null,
       },
       {
+        id: 'services',
+        label: 'بنود الصرف والميزانيات',
+        icon: Layers,
+        badge: null,
+      },
+      {
+        id: 'providers',
+        label: 'مقدمي الخدمة والموردين',
+        icon: Building,
+        badge: null,
+      },
+      {
+        id: 'dashboard',
+        label: 'لوحة التحليلات والمصروفات',
+        icon: BarChart3,
+        badge: null,
+      },
+      {
         id: 'my-requests',
         label: 'طلباتي الشخصية',
         icon: Clock3,
