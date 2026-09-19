@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import { ExpenseRequest } from '../types';
+import { ExpenseRequest, PaymentMethod, PaymentAccount, PaymentAccountType } from '../types';
 import { 
   X, 
   CheckCircle2, 
@@ -14,7 +14,12 @@ import {
   Building,
   User as UserIcon,
   Tag,
-  AlertTriangle
+  AlertTriangle,
+  ArrowDownLeft,
+  Landmark,
+  Smartphone,
+  Wallet,
+  Coins
 } from 'lucide-react';
 
 interface RequestDetailModalProps {
@@ -30,7 +35,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     rejectRequest, 
     requestClarification, 
     replyClarification, 
-    disburseRequest 
+    disburseRequest,
+    paymentAccounts
   } = useApp();
 
   const [activeAction, setActiveAction] = useState<'none' | 'approve' | 'reject' | 'clarify' | 'reply' | 'disburse'>('none');
@@ -43,12 +49,59 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
   const [replyAttachment, setReplyAttachment] = useState('');
 
   // Disbursement states
-  const [paymentMethod, setPaymentMethod] = useState<'bank_transfer' | 'cash' | 'cheque'>('bank_transfer');
-  const [referenceNumber, setReferenceNumber] = useState(`TXN-${Math.floor(10000000 + Math.random() * 90000000)}`);
-  const [bankName, setBankName] = useState('مصرف الراجحي');
+  const [disburseAccountId, setDisburseAccountId] = useState<string>('');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('bank_transfer');
+  const [referenceNumber, setReferenceNumber] = useState('');
+  const [bankName, setBankName] = useState('المصرف الرئيسي');
   const [disbursementNotes, setDisbursementNotes] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Sync state whenever request changes
+  useEffect(() => {
+    if (request) {
+      setDisburseAccountId(request.targetAccountId || '');
+      setPaymentMethod(request.preferredPaymentMethod || (request.requestType === 'income' ? 'instapay' : 'bank_transfer'));
+      setReferenceNumber(
+        request.requestType === 'income'
+          ? `IN-${Math.floor(100000 + Math.random() * 900000)}`
+          : `TXN-${Math.floor(10000000 + Math.random() * 90000000)}`
+      );
+      setBankName('المصرف الرئيسي');
+      setDisbursementNotes(request.requestType === 'income' ? `استلام وتوريد لحساب ${request.providerName || ''}`.trim() : '');
+      setActiveAction('none');
+      setApprovalNote('');
+      setRejectionReason('');
+      setClarificationQuestion('');
+      setReplyText('');
+      setReplyAttachment('');
+    }
+  }, [request]);
 
   if (!request) return null;
+
+  const mapAccountTypeToPaymentMethod = (type: PaymentAccount['type']): PaymentMethod => {
+    switch (type) {
+      case 'bank': return 'bank_transfer';
+      case 'instapay': return 'instapay';
+      case 'wallet': return 'digital_wallet';
+      case 'cash': return 'cash';
+      default: return 'bank_transfer';
+    }
+  };
+
+  const mapPaymentMethodToAccountType = (method: PaymentMethod): PaymentAccount['type'] => {
+    switch (method) {
+      case 'bank_transfer': return 'bank';
+      case 'instapay': return 'instapay';
+      case 'digital_wallet': return 'wallet';
+      case 'cash': return 'cash';
+      default: return 'other';
+    }
+  };
+
+  const companyAccounts = (paymentAccounts || []).filter(
+    a => a.orgId === request?.orgId && a.active !== false
+  );
 
   const handleApprove = (e: React.FormEvent) => {
     e.preventDefault();
@@ -81,17 +134,30 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     onClose();
   };
 
-  const handleDisburse = (e: React.FormEvent) => {
+  const handleDisburse = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!referenceNumber.trim()) return;
-    disburseRequest(request.id, {
-      paymentMethod,
-      referenceNumber,
-      bankName,
-      notes: disbursementNotes.trim() || undefined,
-    });
-    setActiveAction('none');
-    onClose();
+    setIsSubmitting(true);
+    try {
+      const targetAcc = companyAccounts.find(a => a.id === disburseAccountId) 
+        || companyAccounts.find(a => a.type === mapPaymentMethodToAccountType(paymentMethod)) 
+        || companyAccounts[0];
+
+      await disburseRequest(request.id, {
+        paymentMethod,
+        referenceNumber: referenceNumber.trim(),
+        bankName: targetAcc ? `${targetAcc.name} (${targetAcc.accountIdentifier})` : bankName,
+        accountId: targetAcc?.id || disburseAccountId || undefined,
+        accountName: targetAcc?.name,
+        notes: disbursementNotes.trim() || undefined,
+      });
+      setActiveAction('none');
+      onClose();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -114,7 +180,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition"
+            className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition cursor-pointer"
           >
             <X className="h-5 w-5" />
           </button>
@@ -124,18 +190,29 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
         <div className="p-6 space-y-6">
           
           {/* Top Amount & Status Banner */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl bg-slate-50 border border-slate-200">
+          <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl border ${
+            request.requestType === 'income' 
+              ? 'bg-emerald-50/50 border-emerald-200' 
+              : 'bg-slate-50 border-slate-200'
+          }`}>
             <div>
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-xs text-slate-400 font-medium">
+                <span className="text-xs text-slate-500 font-medium">
                   {request.requestType === 'income' ? 'المبلغ المورد / المحول (+ IN)' : 'المبلغ المطلوب للصرف (- OUT)'}
                 </span>
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${
                   request.requestType === 'income' 
                     ? 'bg-emerald-100 text-emerald-800' 
                     : 'bg-rose-100 text-rose-800'
                 }`}>
-                  {request.requestType === 'income' ? '📥 توريد وتحصيل وارد' : '💸 طلب صرف مالي'}
+                  {request.requestType === 'income' ? (
+                    <>
+                      <ArrowDownLeft className="h-3 w-3" />
+                      <span>توريد وتحصيل وارد (+ IN)</span>
+                    </>
+                  ) : (
+                    <span>💸 طلب صرف مالي</span>
+                  )}
                 </span>
               </div>
               <div className={`text-3xl font-black mt-0.5 ${request.requestType === 'income' ? 'text-emerald-700' : 'text-slate-900'}`}>
@@ -146,8 +223,12 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
             <div className="flex items-center gap-2">
               <span className="text-xs text-slate-400">حالة الطلب:</span>
               {request.status === 'pending' && (
-                <span className="bg-amber-100 text-amber-800 text-xs px-3 py-1 rounded-full font-bold">
-                  قيد مراجعة الإدارة
+                <span className={`text-xs px-3 py-1 rounded-full font-bold ${
+                  request.requestType === 'income' 
+                    ? 'bg-amber-100 text-amber-900 border border-amber-300' 
+                    : 'bg-amber-100 text-amber-800'
+                }`}>
+                  {request.requestType === 'income' ? 'تحت المراجعة وبانتظار الاستلام' : 'قيد مراجعة الإدارة'}
                 </span>
               )}
               {request.status === 'clarification_requested' && (
@@ -173,55 +254,133 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
             </div>
           </div>
 
-          {/* Key Metadata Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-            <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
-              <span className="text-slate-400 block mb-1">طالب الصرف</span>
-              <span className="font-bold text-slate-800">{request.requesterName}</span>
-              <span className="text-[10px] text-slate-400 block">{request.requesterDepartment}</span>
-            </div>
+          {/* Key Metadata Section */}
+          {request.requestType === 'income' ? (
+            /* Inflow Clean Metadata */
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                  <span className="text-slate-400 block mb-1">المسؤول عن التوريد</span>
+                  <span className="font-bold text-slate-800">{request.requesterName}</span>
+                  <span className="text-[10px] text-slate-400 block">{request.requesterDepartment || 'الإدارة'}</span>
+                </div>
 
-            <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
-              <span className="text-slate-400 block mb-1">بند الخدمة</span>
-              <span className="font-bold text-slate-800">{request.serviceCategoryName}</span>
-            </div>
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                  <span className="text-slate-400 block mb-1">طريقة وشكل التوريد</span>
+                  <span className="font-bold text-emerald-700 flex items-center gap-1">
+                    {request.preferredPaymentMethod === 'instapay' && '📱 إنستاباي'}
+                    {request.preferredPaymentMethod === 'digital_wallet' && '💳 محفظة كاش'}
+                    {request.preferredPaymentMethod === 'bank_transfer' && '🏦 حساب بنكي'}
+                    {request.preferredPaymentMethod === 'cash' && '💵 خزينة نقدية'}
+                    {!['instapay', 'digital_wallet', 'bank_transfer', 'cash'].includes(request.preferredPaymentMethod || '') && '📥 توريد مباشر'}
+                  </span>
+                </div>
 
-            <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
-              <span className="text-slate-400 block mb-1">مقدم الخدمة / المورد</span>
-              <span className="font-bold text-slate-800">{request.providerName}</span>
-            </div>
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                  <span className="text-slate-400 block mb-1">المودع / بيان التوريد</span>
+                  <span className="font-bold text-slate-800 truncate block" title={request.providerName}>
+                    {request.providerName && request.providerName !== 'توريدات نقدية عامة' && request.providerName !== 'مورد توريد عام'
+                      ? request.providerName
+                      : 'توريد مباشر لحساب الشركة'}
+                  </span>
+                </div>
 
-            <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
-              <span className="text-slate-400 block mb-1">تاريخ الطلب</span>
-              <span className="font-bold text-slate-800">{request.createdAt.split('T')[0]}</span>
-            </div>
-          </div>
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                  <span className="text-slate-400 block mb-1">تاريخ إنشاء الطلب</span>
+                  <span className="font-bold text-slate-800">{request.createdAt.split('T')[0]}</span>
+                </div>
+              </div>
 
-          {/* Description & Justification */}
-          <div className="space-y-3 text-xs">
-            <div>
-              <h4 className="font-bold text-slate-700 mb-1">التفاصيل والوصف:</h4>
-              <p className="text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-100 leading-relaxed">
-                {request.description}
-              </p>
-            </div>
+              {/* Target Treasury Card Preview with live balance */}
+              {(() => {
+                const targetType = request.preferredPaymentMethod 
+                  ? mapPaymentMethodToAccountType(request.preferredPaymentMethod) 
+                  : undefined;
+                const targetAcc = companyAccounts.find(a => a.id === request.targetAccountId) 
+                  || (targetType ? companyAccounts.find(a => a.type === targetType) : undefined);
+                if (!targetAcc) return null;
+                const accBal = targetAcc.currentBalance ?? targetAcc.balance ?? 0;
+                return (
+                  <div className="p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-xl flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold text-lg shadow-xs">
+                        💳
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-emerald-800 font-bold block">كارت الخزينة المستهدف للتوريد</span>
+                        <span className="font-bold text-slate-900 text-xs">{targetAcc.name} ({targetAcc.accountIdentifier})</span>
+                      </div>
+                    </div>
+                    <div className="text-left">
+                      <span className="text-[10px] text-slate-500 block">الرصيد الفعلي الحالي بالكارت</span>
+                      <span className="font-black text-emerald-700 text-sm font-mono">{accBal.toLocaleString()} {targetAcc.currency || 'EGP'}</span>
+                    </div>
+                  </div>
+                );
+              })()}
 
-            <div>
-              <h4 className="font-bold text-slate-700 mb-1">المبرر المالي للطلب:</h4>
-              <p className="text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-100 leading-relaxed">
-                {request.justification}
-              </p>
+              {request.description && (
+                <div>
+                  <h4 className="font-bold text-slate-700 text-xs mb-1">بيان وملاحظات التوريد:</h4>
+                  <p className="text-slate-700 bg-slate-50 p-3 rounded-xl border border-slate-100 text-xs leading-relaxed">
+                    {request.description}
+                  </p>
+                </div>
+              )}
             </div>
-          </div>
+          ) : (
+            /* Outflow Expense Metadata */
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                  <span className="text-slate-400 block mb-1">طالب الصرف</span>
+                  <span className="font-bold text-slate-800">{request.requesterName}</span>
+                  <span className="text-[10px] text-slate-400 block">{request.requesterDepartment}</span>
+                </div>
 
-          {/* Goods / Items Details */}
-          {request.itemsDetail && (
-            <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3.5 text-xs">
-              <span className="font-bold text-amber-900 block mb-1">
-                📦 بيانات البضاعة أو الأصناف المرتبطة بالطلب:
-              </span>
-              <p className="text-slate-800 font-medium whitespace-pre-wrap">{request.itemsDetail}</p>
-            </div>
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                  <span className="text-slate-400 block mb-1">بند الخدمة</span>
+                  <span className="font-bold text-slate-800">{request.serviceCategoryName}</span>
+                </div>
+
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                  <span className="text-slate-400 block mb-1">مقدم الخدمة / المورد</span>
+                  <span className="font-bold text-slate-800">{request.providerName}</span>
+                </div>
+
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                  <span className="text-slate-400 block mb-1">تاريخ الطلب</span>
+                  <span className="font-bold text-slate-800">{request.createdAt.split('T')[0]}</span>
+                </div>
+              </div>
+
+              {/* Description & Justification */}
+              <div className="space-y-3 text-xs">
+                <div>
+                  <h4 className="font-bold text-slate-700 mb-1">التفاصيل والوصف:</h4>
+                  <p className="text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-100 leading-relaxed">
+                    {request.description}
+                  </p>
+                </div>
+
+                <div>
+                  <h4 className="font-bold text-slate-700 mb-1">المبرر المالي للطلب:</h4>
+                  <p className="text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-100 leading-relaxed">
+                    {request.justification}
+                  </p>
+                </div>
+              </div>
+
+              {/* Goods / Items Details */}
+              {request.itemsDetail && (
+                <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3.5 text-xs">
+                  <span className="font-bold text-amber-900 block mb-1">
+                    📦 بيانات البضاعة أو الأصناف المرتبطة بالطلب:
+                  </span>
+                  <p className="text-slate-800 font-medium whitespace-pre-wrap">{request.itemsDetail}</p>
+                </div>
+              )}
+            </>
           )}
 
           {/* Attachments (Only shown if authentic non-dummy attachments exist) */}
@@ -263,7 +422,12 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 </span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 text-slate-700">
-                <div>طريقة الدفع: <span className="font-bold">{request.disbursement.paymentMethod === 'bank_transfer' ? 'تحويل بنكي' : request.disbursement.paymentMethod === 'instapay' ? 'إنستاباي' : 'نقداً / محفظة'}</span></div>
+                <div>طريقة الدفع / التوريد: <span className="font-bold">
+                  {request.disbursement.paymentMethod === 'bank_transfer' ? 'تحويل بنكي' : 
+                   request.disbursement.paymentMethod === 'instapay' ? 'إنستاباي' : 
+                   request.disbursement.paymentMethod === 'digital_wallet' ? 'محفظة كاش' : 
+                   request.disbursement.paymentMethod === 'cash' ? 'خزينة نقدية' : 'أخرى'}
+                </span></div>
                 <div>رقم المرجع: <span className="font-mono font-bold">{request.disbursement.referenceNumber}</span></div>
                 <div>تاريخ العملية: <span className="font-bold">{request.disbursement.disbursedAt}</span></div>
               </div>
@@ -309,56 +473,82 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
           )}
 
           {/* ACTION FORMS ACCORDING TO ROLES */}
-
-          {/* Manager & Super Admin & Finance Action Buttons Bar */}
           {(currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance') && (
             <div className="pt-4 border-t border-slate-100">
               <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-xs font-bold text-slate-500">إجراءات الاعتماد والصرف المالي:</span>
+                <span className="text-xs font-bold text-slate-500">
+                  {request.requestType === 'income' ? 'إجراءات استلام وتوريد المبلغ في الخزينة:' : 'إجراءات الاعتماد والصرف المالي:'}
+                </span>
                 
                 <div className="flex items-center gap-2 flex-wrap">
-                  {/* For Admin & Finance: If pending or clarification_requested: can approve, clarify, reject */}
-                  {(currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance') && (request.status === 'pending' || request.status === 'clarification_requested') && (
+                  {/* For Income Requests: Direct Receipt or Reject */}
+                  {request.requestType === 'income' ? (
+                    (request.status === 'pending' || request.status === 'approved') && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setActiveAction(activeAction === 'disburse' ? 'none' : 'disburse')}
+                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <ArrowDownLeft className="h-4 w-4" />
+                          <span>📥 تأكيد الاستلام والتوريد في الخزينة (تم الاستلام)</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setActiveAction(activeAction === 'reject' ? 'none' : 'reject')}
+                          className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <XCircle className="h-4 w-4" />
+                          <span>رفض التوريد</span>
+                        </button>
+                      </>
+                    )
+                  ) : (
+                    /* For Expense Requests */
                     <>
-                      <button
-                        type="button"
-                        onClick={() => setActiveAction(activeAction === 'approve' ? 'none' : 'approve')}
-                        className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <CheckCircle2 className="h-4 w-4" />
-                        <span>اعتماد الطلب</span>
-                      </button>
+                      {(request.status === 'pending' || request.status === 'clarification_requested') && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setActiveAction(activeAction === 'approve' ? 'none' : 'approve')}
+                            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <CheckCircle2 className="h-4 w-4" />
+                            <span>اعتماد الطلب</span>
+                          </button>
 
-                      <button
-                        type="button"
-                        onClick={() => setActiveAction(activeAction === 'clarify' ? 'none' : 'clarify')}
-                        className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <HelpCircle className="h-4 w-4" />
-                        <span>طلب توضيح أكثر</span>
-                      </button>
+                          <button
+                            type="button"
+                            onClick={() => setActiveAction(activeAction === 'clarify' ? 'none' : 'clarify')}
+                            className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <HelpCircle className="h-4 w-4" />
+                            <span>طلب توضيح أكثر</span>
+                          </button>
 
-                      <button
-                        type="button"
-                        onClick={() => setActiveAction(activeAction === 'reject' ? 'none' : 'reject')}
-                        className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <XCircle className="h-4 w-4" />
-                        <span>رفض الطلب</span>
-                      </button>
+                          <button
+                            type="button"
+                            onClick={() => setActiveAction(activeAction === 'reject' ? 'none' : 'reject')}
+                            className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <XCircle className="h-4 w-4" />
+                            <span>رفض الطلب</span>
+                          </button>
+                        </>
+                      )}
+
+                      {request.status === 'approved' && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveAction(activeAction === 'disburse' ? 'none' : 'disburse')}
+                          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <CreditCard className="h-4 w-4" />
+                          <span>تسجيل وتنفيذ الصرف المالي</span>
+                        </button>
+                      )}
                     </>
-                  )}
-
-                  {/* If approved: both Admin and Finance can disburse */}
-                  {request.status === 'approved' && (
-                    <button
-                      type="button"
-                      onClick={() => setActiveAction(activeAction === 'disburse' ? 'none' : 'disburse')}
-                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-                    >
-                      <CreditCard className="h-4 w-4" />
-                      <span>تسجيل وتنفيذ الصرف المالي</span>
-                    </button>
                   )}
                 </div>
               </div>
@@ -425,7 +615,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
               {/* Sub-form: Reject Form */}
               {activeAction === 'reject' && (
                 <form onSubmit={handleReject} className="mt-4 p-4 bg-rose-50/70 border border-rose-200 rounded-xl space-y-3">
-                  <h5 className="font-bold text-rose-900 text-xs">رفض طلب المصروف</h5>
+                  <h5 className="font-bold text-rose-900 text-xs">رفض الطلب</h5>
                   <textarea
                     rows={2}
                     required
@@ -452,73 +642,169 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 </form>
               )}
 
-              {/* Sub-form: Disburse Form */}
+              {/* Sub-form: Disburse / Receipt Form */}
               {activeAction === 'disburse' && (
-                <form onSubmit={handleDisburse} className="mt-4 p-4 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
-                  <h5 className="font-bold text-blue-900 text-xs">توثيق وتسجيل الصرف المالي الفعلي</h5>
-                  
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-600 mb-1">طريقة الدفع:</label>
-                      <select
-                        value={paymentMethod}
-                        onChange={(e: any) => setPaymentMethod(e.target.value)}
-                        className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs"
-                      >
-                        <option value="bank_transfer">تحويل بنكي</option>
-                        <option value="cash">نقداً / خزينة</option>
-                        <option value="cheque">شيك مصرفي</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-600 mb-1">رقم المرجع / الحوالة:</label>
-                      <input
-                        type="text"
-                        required
-                        value={referenceNumber}
-                        onChange={(e) => setReferenceNumber(e.target.value)}
-                        className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-600 mb-1">اسم البنك:</label>
-                      <input
-                        type="text"
-                        value={bankName}
-                        onChange={(e) => setBankName(e.target.value)}
-                        className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs"
-                      />
-                    </div>
+                <form onSubmit={handleDisburse} className={`mt-4 p-4 border rounded-xl space-y-3 ${
+                  request.requestType === 'income' ? 'bg-emerald-50/80 border-emerald-300' : 'bg-blue-50/70 border-blue-200'
+                }`}>
+                  <div className="flex items-center justify-between">
+                    <h5 className={`font-black text-xs flex items-center gap-1.5 ${
+                      request.requestType === 'income' ? 'text-emerald-900' : 'text-blue-900'
+                    }`}>
+                      {request.requestType === 'income' ? (
+                        <>
+                          <ArrowDownLeft className="h-4 w-4 text-emerald-600" />
+                          <span>📥 تأكيد استلام المبلغ وتوريده في الرصيد (+ IN)</span>
+                        </>
+                      ) : (
+                        <span>توثيق وتسجيل الصرف المالي الفعلي</span>
+                      )}
+                    </h5>
+                    <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-white border border-slate-200">
+                      المبلغ: {request.amount.toLocaleString()} {request.currency}
+                    </span>
                   </div>
 
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-600 mb-1">ملاحظات إضافية:</label>
-                    <input
-                      type="text"
-                      value={disbursementNotes}
-                      onChange={(e) => setDisbursementNotes(e.target.value)}
-                      placeholder="مثل: تم التحويل إلى حساب المورد المعتمد..."
-                      className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs"
-                    />
-                  </div>
+                  {request.requestType === 'income' ? (
+                    <>
+                      {/* Income: Card selection and quick reference */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                            حساب الخزينة / الكارت المستلم للرصيد:
+                          </label>
+                          <select
+                            value={disburseAccountId}
+                            onChange={(e) => {
+                              setDisburseAccountId(e.target.value);
+                              const acc = companyAccounts.find(a => a.id === e.target.value);
+                              if (acc) setPaymentMethod(mapAccountTypeToPaymentMethod(acc.type));
+                            }}
+                            className="w-full p-2.5 bg-white border border-emerald-300 rounded-lg text-xs font-medium"
+                          >
+                            {companyAccounts.map(acc => (
+                              <option key={acc.id} value={acc.id}>
+                                {acc.name} ({acc.accountIdentifier}) - رصيده الحالي: {(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency || 'EGP'}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
 
-                  <div className="flex justify-end gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setActiveAction('none')}
-                      className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
-                    >
-                      إلغاء
-                    </button>
-                    <button
-                      type="submit"
-                      className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg"
-                    >
-                      تأكيد الصرف وإغلاق الطلب
-                    </button>
-                  </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                            رقم إيصال / مرجع التوريد:
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={referenceNumber}
+                            onChange={(e) => setReferenceNumber(e.target.value)}
+                            className="w-full p-2.5 bg-white border border-emerald-300 rounded-lg text-xs font-mono font-bold"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          بيان / ملاحظات التوريد:
+                        </label>
+                        <input
+                          type="text"
+                          value={disbursementNotes}
+                          onChange={(e) => setDisbursementNotes(e.target.value)}
+                          placeholder="مثال: تم التأكد من وصول الحوالة في الحساب البنكي..."
+                          className="w-full p-2.5 bg-white border border-emerald-200 rounded-lg text-xs"
+                        />
+                      </div>
+
+                      <div className="flex justify-end gap-2 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => setActiveAction('none')}
+                          className="px-3.5 py-2 text-xs text-slate-600 hover:bg-slate-100 rounded-lg cursor-pointer"
+                        >
+                          إلغاء
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={isSubmitting}
+                          className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl shadow-sm flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <CheckCircle2 className="h-4 w-4" />
+                          <span>{isSubmitting ? 'جارٍ توريد المبلغ...' : `✓ تأكيد الاستلام والتوريد في الرصيد الآن (+ ${request.amount.toLocaleString()} ${request.currency})`}</span>
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    /* Expense disburse form */
+                    <>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-600 mb-1">طريقة الدفع:</label>
+                          <select
+                            value={paymentMethod}
+                            onChange={(e: any) => setPaymentMethod(e.target.value)}
+                            className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs"
+                          >
+                            <option value="bank_transfer">تحويل بنكي</option>
+                            <option value="instapay">إنستاباي</option>
+                            <option value="digital_wallet">محفظة إلكترونية</option>
+                            <option value="cash">نقداً / خزينة</option>
+                            <option value="cheque">شيك مصرفي</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-600 mb-1">رقم المرجع / الحوالة:</label>
+                          <input
+                            type="text"
+                            required
+                            value={referenceNumber}
+                            onChange={(e) => setReferenceNumber(e.target.value)}
+                            className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-mono"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-600 mb-1">اسم البنك / الحساب:</label>
+                          <input
+                            type="text"
+                            value={bankName}
+                            onChange={(e) => setBankName(e.target.value)}
+                            className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-600 mb-1">ملاحظات إضافية:</label>
+                        <input
+                          type="text"
+                          value={disbursementNotes}
+                          onChange={(e) => setDisbursementNotes(e.target.value)}
+                          placeholder="مثل: تم التحويل إلى حساب المورد المعتمد..."
+                          className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs"
+                        />
+                      </div>
+
+                      <div className="flex justify-end gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setActiveAction('none')}
+                          className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
+                        >
+                          إلغاء
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={isSubmitting}
+                          className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg"
+                        >
+                          {isSubmitting ? 'جارٍ تسجيل الصرف...' : 'تأكيد الصرف وإغلاق الطلب'}
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </form>
               )}
             </div>

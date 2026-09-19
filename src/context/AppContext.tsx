@@ -1245,6 +1245,125 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [rawRequests, rawMembers, firebaseUser, userEmail, isSuperAdmin, rawOrganizations]);
 
+  // =========================================================================
+  // PROACTIVE TREASURY CARDS & ACCOUNTS AUTO-PROVISIONING (SELF-HEALING)
+  // Guarantees every organization ALWAYS has the 4 standard financial cards:
+  // 1. خزينة كاش (Cash)
+  // 2. إنستاباي (InstaPay)
+  // 3. محفظة إلكترونية (Digital Wallet - Vodafone/Orange/Etisalat)
+  // 4. حساب بنكي (Bank Account)
+  // =========================================================================
+  useEffect(() => {
+    if (rawOrganizations.length === 0) return;
+
+    const newAccountsToAppend: PaymentAccount[] = [];
+    const now = new Date().toISOString();
+
+    for (const org of rawOrganizations) {
+      const orgAccounts = rawPaymentAccounts.filter(a => a.orgId === org.id);
+      const orgCode = org.code || 'ORG';
+
+      const hasCash = orgAccounts.some(a => a.type === 'cash');
+      const hasInstapay = orgAccounts.some(a => a.type === 'instapay');
+      const hasWallet = orgAccounts.some(a => a.type === 'wallet');
+      const hasBank = orgAccounts.some(a => a.type === 'bank');
+
+      if (!hasCash) {
+        newAccountsToAppend.push({
+          id: `vault-cash-${org.id}`,
+          orgId: org.id,
+          name: `خزينة نقدية (${org.name})`,
+          type: 'cash',
+          accountIdentifier: `CASH-${orgCode}`,
+          balance: 0,
+          initialBalance: 0,
+          currentBalance: 0,
+          totalIn: 0,
+          totalOut: 0,
+          currency: org.currency || 'EGP',
+          active: true,
+          description: `الخزينة النقدية الرئيسية لمقر ${org.name}`,
+          createdAt: now,
+        });
+      }
+
+      if (!hasInstapay) {
+        newAccountsToAppend.push({
+          id: `vault-insta-${org.id}`,
+          orgId: org.id,
+          name: `إنستاباي (${org.name})`,
+          type: 'instapay',
+          accountIdentifier: `${orgCode.toLowerCase()}@instapay`,
+          balance: 0,
+          initialBalance: 0,
+          currentBalance: 0,
+          totalIn: 0,
+          totalOut: 0,
+          currency: org.currency || 'EGP',
+          active: true,
+          description: `حساب استقبال وتحويلات إنستاباي لـ ${org.name}`,
+          createdAt: now,
+        });
+      }
+
+      if (!hasWallet) {
+        newAccountsToAppend.push({
+          id: `vault-wallet-${org.id}`,
+          orgId: org.id,
+          name: `محفظة إلكترونية (${org.name})`,
+          type: 'wallet',
+          accountIdentifier: `01000000000`,
+          balance: 0,
+          initialBalance: 0,
+          currentBalance: 0,
+          totalIn: 0,
+          totalOut: 0,
+          currency: org.currency || 'EGP',
+          active: true,
+          description: `محفظة كاش إلكترونية (فودافون/أورانج/اتصالات/وي) لـ ${org.name}`,
+          createdAt: now,
+        });
+      }
+
+      if (!hasBank) {
+        newAccountsToAppend.push({
+          id: `vault-bank-${org.id}`,
+          orgId: org.id,
+          name: `حساب بنكي رئيسي (${org.name})`,
+          type: 'bank',
+          accountIdentifier: `EG00${orgCode}00000000000000`,
+          bankName: 'البنك التجاري الدولي CIB / البنك الأهلي',
+          balance: 0,
+          initialBalance: 0,
+          currentBalance: 0,
+          totalIn: 0,
+          totalOut: 0,
+          currency: org.currency || 'EGP',
+          active: true,
+          description: `الحساب المصرفي البنكي الرئيسي لـ ${org.name}`,
+          createdAt: now,
+        });
+      }
+    }
+
+    if (newAccountsToAppend.length > 0) {
+      console.info(`[Self-Healing] Auto-provisioning ${newAccountsToAppend.length} standard treasury cards across organizations...`);
+      if (isFirebaseConfigured() && getDb()) {
+        newAccountsToAppend.forEach(acc => {
+          setFirestoreDoc('paymentAccounts', acc.id, acc).catch(() => {});
+        });
+      }
+      setRawPaymentAccounts(prev => {
+        const existingIds = new Set(prev.map(a => a.id));
+        const filtered = newAccountsToAppend.filter(a => !existingIds.has(a.id));
+        if (filtered.length === 0) return prev;
+        const updated = [...prev, ...filtered];
+        safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
+        return updated;
+      });
+    }
+  }, [rawOrganizations, rawPaymentAccounts.length]);
+
   // Refresh data: sync with local Express API if present and Firebase is not active
   const refreshData = useCallback(async () => {
     if (isFirebaseConfigured()) {
@@ -2838,6 +2957,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const isIncome = data.requestType === 'income';
 
+    let resolvedTargetAccountId = data.targetAccountId;
+    if (!resolvedTargetAccountId && isIncome) {
+      const preferredMethod = data.preferredPaymentMethod || 'cash';
+      const targetType = preferredMethod === 'instapay' ? 'instapay' : preferredMethod === 'digital_wallet' ? 'wallet' : preferredMethod === 'bank_transfer' ? 'bank' : 'cash';
+      const matching = rawPaymentAccounts.find(a => a.orgId === targetOrgId && a.type === targetType);
+      if (matching) {
+        resolvedTargetAccountId = matching.id;
+      }
+    }
+
+    const defaultTitle = isIncome 
+      ? (data.title || `توريد مالي (+ IN) - ${data.amount.toLocaleString()} ${data.currency || 'EGP'}`)
+      : data.title;
+    const defaultDesc = isIncome 
+      ? (data.description || `توريد وتحصيل مالي مباشر لخزينة وحساب الشركة بمبلغ ${data.amount.toLocaleString()} ${data.currency || 'EGP'}`)
+      : data.description;
+    const defaultJust = isIncome 
+      ? (data.justification || 'إيداع وتوريد مالي مباشر')
+      : data.justification;
+    const defaultSrvId = isIncome ? (data.serviceCategoryId || 'srv-income-general') : data.serviceCategoryId;
+    const defaultSrvName = isIncome ? (service?.name || data.serviceCategoryName || 'توريدات ومتحصلات نقدية') : (service?.name || data.serviceCategoryName || 'خدمة عامة');
+    const defaultProvId = isIncome ? (data.providerId || 'prov-income-general') : data.providerId;
+    const defaultProvName = isIncome ? (provider?.name || data.providerName || (data.paymentAccountDetails ? `المودع: ${data.paymentAccountDetails}` : 'توريد مباشر / عميل')) : (provider?.name || data.providerName || 'مورد عام');
+
     const newRequest: ExpenseRequest = {
       id: `req-${Date.now()}`,
       requestNumber: `REQ-${Math.floor(10000 + Math.random() * 90000)}`,
@@ -2847,21 +2990,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       requesterEmail: currentUser.email || userEmail,
       requesterDepartment: currentUser.role === 'org_admin' ? 'الإدارة العامة' : (userMemberRecord?.department || 'العمليات والتوريد'),
       requesterPhone: currentUser.phone || userMemberRecord?.phone,
-      preferredPaymentMethod: data.preferredPaymentMethod || 'instapay',
+      preferredPaymentMethod: data.preferredPaymentMethod || (isIncome ? 'cash' : 'instapay'),
       paymentAccountDetails: data.paymentAccountDetails || '',
-      serviceCategoryId: data.serviceCategoryId,
-      serviceCategoryName: service?.name || data.serviceCategoryName || 'خدمة عامة',
-      providerId: data.providerId,
-      providerName: provider?.name || data.providerName || 'مورد عام',
-      title: data.title,
-      description: data.description,
-      justification: data.justification,
+      serviceCategoryId: defaultSrvId,
+      serviceCategoryName: defaultSrvName,
+      providerId: defaultProvId,
+      providerName: defaultProvName,
+      title: defaultTitle,
+      description: defaultDesc,
+      justification: defaultJust,
       amount: data.amount,
       currency: data.currency,
       status: 'pending',
-      urgency: data.urgency,
+      urgency: data.urgency || 'medium',
       requestType: data.requestType || 'expense',
-      targetAccountId: data.targetAccountId,
+      targetAccountId: resolvedTargetAccountId,
       itemsDetail: data.itemsDetail,
       attachments,
       comments: [],
@@ -3370,6 +3513,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const isIncome = reqObj.requestType === 'income';
 
       let targetAccount = details.accountId ? rawPaymentAccounts.find(a => a.id === details.accountId) : null;
+      if (!targetAccount && reqObj.targetAccountId) {
+        targetAccount = rawPaymentAccounts.find(a => a.id === reqObj.targetAccountId) || null;
+      }
       if (!targetAccount && details.bankName) {
         targetAccount = rawPaymentAccounts.find(a => 
           (a.orgId === reqObj.orgId) && 
@@ -3377,10 +3523,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ) || null;
       }
       if (!targetAccount) {
+        const methodKey = details.paymentMethod || reqObj.preferredPaymentMethod || (isIncome ? 'cash' : 'instapay');
+        const expectedType = 
+          methodKey === 'instapay' ? 'instapay' :
+          methodKey === 'digital_wallet' ? 'wallet' :
+          methodKey === 'bank_transfer' ? 'bank' : 'cash';
         targetAccount = rawPaymentAccounts.find(a => 
-          a.orgId === reqObj.orgId && 
-          a.type === (details.paymentMethod === 'instapay' ? 'instapay' : details.paymentMethod === 'digital_wallet' ? 'wallet' : details.paymentMethod === 'bank_transfer' ? 'bank' : 'cash')
+          a.orgId === reqObj.orgId && a.type === expectedType
         ) || null;
+      }
+
+      if (!targetAccount && isIncome) {
+        const methodKey = details.paymentMethod || reqObj.preferredPaymentMethod || 'cash';
+        const expectedType = 
+          methodKey === 'instapay' ? 'instapay' :
+          methodKey === 'digital_wallet' ? 'wallet' :
+          methodKey === 'bank_transfer' ? 'bank' : 'cash';
+        const autoId = `vault-${expectedType}-${reqObj.orgId || Date.now()}`;
+        targetAccount = {
+          id: autoId,
+          orgId: reqObj.orgId,
+          name: expectedType === 'instapay' ? 'إنستاباي' : expectedType === 'wallet' ? 'محفظة إلكترونية' : expectedType === 'bank' ? 'حساب بنكي' : 'خزينة نقدية',
+          type: expectedType,
+          accountIdentifier: expectedType === 'instapay' ? 'main@instapay' : expectedType === 'wallet' ? '01000000000' : expectedType === 'bank' ? 'EG000000000000' : 'CASH',
+          initialBalance: 0,
+          currentBalance: 0,
+          balance: 0,
+          totalIn: 0,
+          totalOut: 0,
+          currency: reqObj.currency || 'EGP',
+          active: true,
+          createdAt: now.toISOString(),
+        };
       }
 
       if (targetAccount) {
@@ -3412,7 +3586,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           referenceId: reqObj.id,
           referenceNumber: reqObj.requestNumber,
           description: isIncome 
-            ? `توريد وتحصيل للطلب رقم (${reqObj.requestNumber}) - ${reqObj.title} - المودع: ${reqObj.requesterName}`
+            ? `توريد وتحصيل للطلب رقم (${reqObj.requestNumber}) - ${reqObj.title} - المودع: ${reqObj.paymentAccountDetails || reqObj.requesterName}`
             : `صرف وتحويل للطلب رقم (${reqObj.requestNumber}) - ${reqObj.title} - المستلم: ${reqObj.requesterName}`,
           actorName: currentUser.name,
           actorId: currentUser.id,
@@ -3420,12 +3594,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
 
         if (isFirebaseConfigured() && getDb()) {
-          updateFirestoreDoc('paymentAccounts', targetAccount.id, updatedAccount).catch(console.error);
+          setFirestoreDoc('paymentAccounts', targetAccount.id, updatedAccount).catch(console.error);
           setFirestoreDoc('accountTransactions', txId, newTx).catch(console.error);
         }
 
         setRawPaymentAccounts(prev => {
-          const updated = prev.map(a => a.id === targetAccount!.id ? updatedAccount : a);
+          const exists = prev.some(a => a.id === targetAccount!.id);
+          const updated = exists 
+            ? prev.map(a => a.id === targetAccount!.id ? updatedAccount : a)
+            : [updatedAccount, ...prev];
           safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
           return updated;
         });

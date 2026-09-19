@@ -31,7 +31,9 @@ import {
   Zap,
   CheckSquare,
   Square,
-  FileSpreadsheet
+  FileSpreadsheet,
+  ArrowDownLeft,
+  Landmark
 } from 'lucide-react';
 
 interface ExpenseRequestsListProps {
@@ -59,6 +61,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     requestClarification,
     disburseRequest
   } = useApp();
+
+  const canApprove = currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance';
 
   const [selectedReqId, setSelectedReqId] = useState<string | null>(null);
   const [copiedText, setCopiedText] = useState(false);
@@ -857,7 +861,14 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                         </div>
                       )}
                       <span className="font-mono text-xs font-bold text-slate-500">{req.requestNumber}</span>
-                      {getUrgencyBadge(req.urgency)}
+                      {req.requestType === 'income' ? (
+                        <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1">
+                          <ArrowDownLeft className="h-3 w-3 text-emerald-600" />
+                          <span>توريد (+ IN)</span>
+                        </span>
+                      ) : (
+                        getUrgencyBadge(req.urgency)
+                      )}
                     </div>
                     {getStatusBadge(req.status)}
                   </div>
@@ -903,9 +914,30 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                         </div>
                       )}
                     </div>
-                    <span className="font-black text-slate-900 text-sm">
-                      {req.amount.toLocaleString()} {req.currency}
-                    </span>
+
+                    <div className="flex items-center gap-2">
+                      {req.requestType === 'income' && req.status === 'pending' && canApprove && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedReqId(req.id);
+                            if (!disburseRefNumber) {
+                              setDisburseRefNumber(`IN-${Math.floor(100000 + Math.random() * 900000)}`);
+                            }
+                            setActiveAction('disburse');
+                          }}
+                          className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[10px] rounded-lg shadow-2xs flex items-center gap-1 transition cursor-pointer active:scale-95"
+                          title="تأكيد الاستلام والتوريد في الخزينة"
+                        >
+                          <CheckCircle2 className="h-3 w-3" />
+                          <span>تم الاستلام</span>
+                        </button>
+                      )}
+                      <span className={`font-black text-sm ${req.requestType === 'income' ? 'text-emerald-700' : 'text-slate-900'}`}>
+                        {req.requestType === 'income' ? '+' : '-'}{req.amount.toLocaleString()} {req.currency}
+                      </span>
+                    </div>
                   </div>
                 </div>
               );
@@ -1217,6 +1249,205 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 {/* 1. If Manager / Admin / Finance: Can Approve, Clarify, or Reject */}
                 {(currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance') && 
                  (activeRequest.status === 'pending' || activeRequest.status === 'clarification_requested') && (
+                  activeRequest.requestType === 'income' ? (
+                    <div className="p-5 bg-gradient-to-r from-emerald-50 via-teal-50/60 to-white rounded-2xl border-2 border-emerald-300 shadow-xs space-y-4 animate-in fade-in duration-150">
+                      <div className="flex items-center justify-between flex-wrap gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="p-1.5 bg-emerald-600 text-white rounded-lg">
+                              <ArrowDownLeft className="h-4 w-4" />
+                            </span>
+                            <span className="font-black text-emerald-950 text-sm">
+                              طلب توريد وتحصيل مالي (+ IN) بانتظار تأكيد الاستلام
+                            </span>
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800 border border-emerald-300">
+                              تحت المراجعة والاستلام
+                            </span>
+                          </div>
+                          <p className="text-xs text-emerald-800 mt-1">
+                            المبلغ: <strong className="text-emerald-950 font-black">+{activeRequest.amount.toLocaleString()} {activeRequest.currency}</strong> | طريقة التوريد: <strong>{activeRequest.preferredPaymentMethod === 'instapay' ? 'إنستاباي' : activeRequest.preferredPaymentMethod === 'digital_wallet' ? 'محفظة إلكترونية' : activeRequest.preferredPaymentMethod === 'bank_transfer' ? 'حساب بنكي' : 'خزينة نقدية'}</strong> {activeRequest.paymentAccountDetails ? `| المودع: ${activeRequest.paymentAccountDetails}` : ''}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (activeAction !== 'disburse') {
+                                if (!disburseRefNumber) {
+                                  setDisburseRefNumber(`IN-${Math.floor(100000 + Math.random() * 900000)}`);
+                                }
+                                setActiveAction('disburse');
+                              } else {
+                                setActiveAction('none');
+                              }
+                            }}
+                            className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl shadow-md flex items-center gap-2 transition cursor-pointer active:scale-95"
+                          >
+                            <CheckCircle2 className="h-4 w-4" />
+                            <span>📥 تأكيد الاستلام والتوريد في الخزينة (تم الاستلام)</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setActiveAction(activeAction === 'reject' ? 'none' : 'reject')}
+                            className="px-3.5 py-2.5 bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold text-xs rounded-xl transition cursor-pointer"
+                          >
+                            <XCircle className="h-4 w-4" />
+                            <span>رفض التوريد ✕</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Disburse Drawer for Income Receipt Confirmation */}
+                      {activeAction === 'disburse' && (
+                        <form onSubmit={handleDisburse} className="mt-4 p-4 bg-white rounded-2xl border-2 border-emerald-300 space-y-4 animate-in fade-in duration-150">
+                          <div className="flex items-center justify-between pb-2 border-emerald-100 border-b">
+                            <span className="font-bold text-emerald-950 text-xs flex items-center gap-1.5">
+                              <Landmark className="h-4 w-4 text-emerald-600" />
+                              <span>تأكيد استلام المبلغ وإضافته لرصيد كارت الخزينة:</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setActiveAction('none')}
+                              className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                            <div>
+                              <label className="block font-bold text-slate-700 mb-1">
+                                الكارت / الحساب المودع فيه المبلغ (+ IN) *
+                              </label>
+                              <select
+                                value={disburseAccountId}
+                                onChange={(e) => {
+                                  setDisburseAccountId(e.target.value);
+                                  const acc = paymentAccounts.find(a => a.id === e.target.value);
+                                  if (acc) {
+                                    setDisburseBankName(`${acc.name} (${acc.accountIdentifier})`);
+                                    if (acc.type === 'instapay') setDisburseMethod('instapay');
+                                    else if (acc.type === 'wallet') setDisburseMethod('digital_wallet');
+                                    else if (acc.type === 'bank') setDisburseMethod('bank_transfer');
+                                    else if (acc.type === 'cash') setDisburseMethod('cash');
+                                  }
+                                }}
+                                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold"
+                              >
+                                {paymentAccounts.map(acc => (
+                                  <option key={acc.id} value={acc.id}>
+                                    {acc.name} — ({acc.accountIdentifier}) — الرصيد: {Number(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block font-bold text-slate-700 mb-1">طريقة الاستلام والتوريد *</label>
+                              <select
+                                value={disburseMethod}
+                                onChange={(e: any) => setDisburseMethod(e.target.value)}
+                                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold"
+                              >
+                                <option value="instapay">انستاباي (InstaPay)</option>
+                                <option value="digital_wallet">محفظة إلكترونية</option>
+                                <option value="bank_transfer">إيداع / تحويل بنكي</option>
+                                <option value="cash">نقداً في خزينة الشركة</option>
+                              </select>
+                            </div>
+
+                            <div>
+                              <div className="flex items-center justify-between mb-1">
+                                <label className="font-bold text-slate-700">رقم إيصال الاستلام / المرجع *</label>
+                                <button
+                                  type="button"
+                                  onClick={() => setDisburseRefNumber(`IN-${Math.floor(100000 + Math.random() * 900000)}`)}
+                                  className="text-[10px] text-emerald-600 font-bold hover:underline cursor-pointer"
+                                >
+                                  توليد رقم تلقائي ↺
+                                </button>
+                              </div>
+                              <input
+                                type="text"
+                                required
+                                value={disburseRefNumber}
+                                onChange={(e) => setDisburseRefNumber(e.target.value)}
+                                placeholder="رقم العملية أو الإشعار..."
+                                className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-mono text-xs"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block font-bold text-slate-700 mb-1">ملاحظات الاستلام (اختياري)</label>
+                              <input
+                                type="text"
+                                value={disburseNotes}
+                                onChange={(e) => setDisburseNotes(e.target.value)}
+                                placeholder="أي ملاحظات إضافية على الاستلام والتوريد..."
+                                className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                            <span className="text-xs font-bold text-emerald-800">
+                              سيتم زيادة رصيد الكارت المختار فوراً بمبلغ (+{activeRequest.amount.toLocaleString()} {activeRequest.currency})
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setActiveAction('none')}
+                                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl text-xs font-semibold cursor-pointer"
+                              >
+                                إلغاء
+                              </button>
+                              <button
+                                type="submit"
+                                disabled={disbursing}
+                                className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl shadow-md transition cursor-pointer flex items-center gap-2"
+                              >
+                                <CheckCircle2 className="h-4 w-4" />
+                                <span>{disbursing ? 'جاري التأكيد وإيداع المبلغ...' : '✓ تأكيد الاستلام والتوريد في الرصيد الآن'}</span>
+                              </button>
+                            </div>
+                          </div>
+                        </form>
+                      )}
+
+                      {/* Reject Form */}
+                      {activeAction === 'reject' && (
+                        <div className="mt-3 p-4 bg-rose-50 rounded-xl border border-rose-200 space-y-3 animate-in fade-in duration-150">
+                          <h5 className="font-bold text-rose-950 text-xs">تأكيد رفض طلب التوريد:</h5>
+                          <input
+                            type="text"
+                            required
+                            value={rejectionReason}
+                            onChange={(e) => setRejectionReason(e.target.value)}
+                            placeholder="اكتب سبب رفض التوريد بوضوح..."
+                            className="w-full p-2.5 bg-white border border-rose-200 rounded-xl text-xs outline-none"
+                          />
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setActiveAction('none')}
+                              className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
+                            >
+                              إلغاء
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleReject}
+                              className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer"
+                            >
+                              تأكيد الرفض
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
                   <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <span className="text-xs font-bold text-slate-700">اتخاذ إجراء مالي أو إداري على هذا الطلب:</span>
@@ -1344,7 +1575,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                       </div>
                     )}
                   </div>
-                )}
+                )
+              )}
 
                 {/* 3. Both Finance & Admin: When Request is Approved -> Prominent Disbursement Action */}
                 {activeRequest.status === 'approved' && (
