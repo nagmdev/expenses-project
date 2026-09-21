@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
   X, 
@@ -105,6 +105,7 @@ const EXPENSE_QUICK_TEMPLATES = [
 ];
 
 const EXPENSE_TITLE_TEMPLATES = [
+  'شراء مستلزمات بوفيه وضيافة',
   'شراء تراخيص برمجيات واشتراكات سحابية',
   'بدل انتقالات ومصروفات سفر ومهمات عمل',
   'تجديد باقات اتصالات وإنترنت للأعمال',
@@ -119,9 +120,9 @@ const EXPENSE_TITLE_TEMPLATES = [
 ];
 
 const EXPENSE_JUSTIFICATION_TEMPLATES = [
+  'زيادة كفاءة الإنتاجية وتطوير أدوات فريق العمل',
   'دعم استمرارية العمليات اليومية وتفادي انقطاع الخدمة',
   'تنفيذ مهام عمل رسمية معتمدة من الإدارة لصالح الشركة',
-  'زيادة كفاءة الإنتاجية وتطوير أدوات فريق العمل',
   'تغطية تكاليف سفر ومهمة عمل رسمية خارج المقر',
   'تجديد دوري سنوي/شهري متفق عليه في الميزانية التشغيلية',
   'متطلبات عاجلة للمشروع لضمان التسليم في الموعد المحدد',
@@ -129,6 +130,7 @@ const EXPENSE_JUSTIFICATION_TEMPLATES = [
 ];
 
 const EXPENSE_DESCRIPTION_TEMPLATES = [
+  'شراء مستلزمات بوفيه وضيافة ومستلزمات نظافة دورية للمقر',
   'تمت مراجعة التكلفة ومطابقة العروض المقدمة للحصول على أفضل سعر وأعلى كفاءة.',
   'شراء وتفعيل الخدمة فوراً لخدمة أهداف ومشاريع الشركة المعتمدة.',
   'سداد مباشر للفواتير والمستحقات المرفقة مع الطلب بعد التحقق منها.',
@@ -184,6 +186,29 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     return sourceServices.filter(s => isServiceMatchingOrg(s, selectedOrgId));
   }, [sourceServices, selectedOrgId]);
 
+  // Guaranteed fallback service so no organization is ever blocked
+  const FALLBACK_SERVICE: ServiceCategory = useMemo(() => ({
+    id: 'srv-general',
+    orgId: selectedOrgId || 'general',
+    orgIds: [selectedOrgId],
+    name: 'مصروفات وتشغيل عام / نثريات',
+    code: 'GEN',
+    description: 'بند المصروفات والنثريات العامة والتشغيلية',
+    budgetLimit: 50000,
+    spentAmount: 0,
+    color: '#4f46e5',
+    iconName: 'Layers',
+    active: true,
+  }), [selectedOrgId]);
+
+  const effectiveServices = useMemo(() => {
+    const list = [...availableServices];
+    if (!list.some(s => s.id === 'srv-general')) {
+      list.push(FALLBACK_SERVICE);
+    }
+    return list;
+  }, [availableServices, FALLBACK_SERVICE]);
+
   const sourceProviders = (allProviders && allProviders.length > 0) ? allProviders : providers;
   const availableProviders = useMemo(() => {
     if (!selectedOrgId) return sourceProviders;
@@ -195,6 +220,23 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       return p.orgId === selectedOrgId || !p.orgId;
     });
   }, [sourceProviders, selectedOrgId]);
+
+  // Guaranteed fallback provider so purchases (like office groceries) are never blocked
+  const FALLBACK_PROVIDER = useMemo(() => ({
+    id: 'prov-direct-purchase',
+    name: 'شراء مباشر / بدون مورد محدد (سوبرماركت / محلات تجارية)',
+    code: 'DIRECT',
+    orgIds: [selectedOrgId],
+    active: true,
+  }), [selectedOrgId]);
+
+  const effectiveProviders = useMemo(() => {
+    const list = [...availableProviders];
+    if (!list.some(p => p.id === 'prov-direct-purchase')) {
+      list.push(FALLBACK_PROVIDER as any);
+    }
+    return list;
+  }, [availableProviders, FALLBACK_PROVIDER]);
 
   const sourcePaymentAccounts = (allPaymentAccounts && allPaymentAccounts.length > 0) ? allPaymentAccounts : paymentAccounts;
   const availableAccounts = useMemo(() => {
@@ -213,24 +255,20 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [selectedProviderId, setSelectedProviderId] = useState<string>('');
 
   useEffect(() => {
-    if (availableServices.length > 0) {
-      if (!availableServices.some(s => s.id === selectedServiceId)) {
-        setSelectedServiceId(availableServices[0].id);
+    if (effectiveServices.length > 0) {
+      if (!selectedServiceId || !effectiveServices.some(s => s.id === selectedServiceId)) {
+        setSelectedServiceId(effectiveServices[0].id);
       }
-    } else {
-      setSelectedServiceId('');
     }
-  }, [availableServices, selectedServiceId]);
+  }, [effectiveServices, selectedServiceId]);
 
   useEffect(() => {
-    if (availableProviders.length > 0) {
-      if (!availableProviders.some(p => p.id === selectedProviderId)) {
-        setSelectedProviderId(availableProviders[0].id);
+    if (effectiveProviders.length > 0) {
+      if (!selectedProviderId || !effectiveProviders.some(p => p.id === selectedProviderId)) {
+        setSelectedProviderId(effectiveProviders[0].id);
       }
-    } else {
-      setSelectedProviderId('');
     }
-  }, [availableProviders, selectedProviderId]);
+  }, [effectiveProviders, selectedProviderId]);
 
   // Title State (for Expense)
   const [isCustomTitle, setIsCustomTitle] = useState(false);
@@ -252,6 +290,16 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [preferredPaymentMethod, setPreferredPaymentMethod] = useState<PaymentMethod>('instapay');
   const [paymentAccountDetails, setPaymentAccountDetails] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // Validation & Error Handling States
+  const [formError, setFormError] = useState<string | null>(null);
+  const [fieldHighlight, setFieldHighlight] = useState<'amount' | 'title' | 'paymentDetails' | null>(null);
+
+  // Element Refs for Auto-Scrolling and Auto-Focus
+  const amountInputRef = useRef<HTMLInputElement>(null);
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const paymentInputRef = useRef<HTMLInputElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (currentOrg?.currency) {
@@ -282,6 +330,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
   const handleSelectIncomeShape = (shapeId: IncomeShape) => {
     setSelectedIncomeShape(shapeId);
+    setFormError(null);
     const shape = INCOME_PAYMENT_SHAPES.find(s => s.id === shapeId) || INCOME_PAYMENT_SHAPES[0];
     setPreferredPaymentMethod(shape.method);
     const matching = availableAccounts.filter(a => a.type === shape.accountType);
@@ -296,6 +345,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const handleSwitchRequestType = (type: RequestType) => {
     if (type === requestType) return;
     setRequestType(type);
+    setFormError(null);
+    setFieldHighlight(null);
     setIsCustomTitle(false);
     setIsCustomJustification(false);
     setIsCustomDescription(false);
@@ -349,7 +400,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       });
     }
 
-    if (srv.vendorId && availableProviders.some(p => p.id === srv.vendorId)) {
+    if (srv.vendorId && effectiveProviders.some(p => p.id === srv.vendorId)) {
       setSelectedProviderId(srv.vendorId);
     }
 
@@ -368,8 +419,10 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setCustomTitle(tpl.title);
     setIsCustomDescription(true);
     setCustomDescription(tpl.description);
+    setFormError(null);
+    setFieldHighlight(null);
 
-    const matched = availableServices.find(s => {
+    const matched = effectiveServices.find(s => {
       const sName = s.name.toLowerCase();
       const sDesc = (s.description || '').toLowerCase();
       return tpl.keywords.some(k => sName.includes(k.toLowerCase()) || sDesc.includes(k.toLowerCase()));
@@ -379,6 +432,11 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       setSelectedServiceId(matched.id);
       applyServiceCategoryDefaults(matched);
     }
+
+    // Auto-focus amount input so the user can easily enter the cost!
+    setTimeout(() => {
+      amountInputRef.current?.focus();
+    }, 100);
   };
 
   const handleClose = () => {
@@ -397,15 +455,29 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setItemsDetail('');
     setTargetAccountId('');
     setPaymentAccountDetails('');
+    setFormError(null);
+    setFieldHighlight(null);
     onClose();
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setFormError(null);
+    setFieldHighlight(null);
 
-    // 1. INFLOW (توريد مالي مباشر) - Pure Money, Zero Clutter
+    // ==========================================
+    // 1. INFLOW (توريد مالي مباشر)
+    // ==========================================
     if (requestType === 'income') {
-      if (!amount || Number(amount) <= 0 || submitting) return;
+      if (!amount || Number(amount) <= 0) {
+        setFormError('⚠️ يرجى إدخال المبلغ المطلوب توريده (+ IN) أولاً للمتابعة');
+        setFieldHighlight('amount');
+        amountInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        amountInputRef.current?.focus();
+        return;
+      }
+
+      if (submitting) return;
 
       const shapeObj = INCOME_PAYMENT_SHAPES.find(s => s.id === selectedIncomeShape) || INCOME_PAYMENT_SHAPES[0];
       const matchingAccount = availableAccounts.find(a => a.id === targetAccountId) || 
@@ -437,43 +509,69 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         });
 
         handleClose();
-      } catch (err) {
+      } catch (err: any) {
         console.error('[NewRequestModal] Error creating income request:', err);
+        setFormError(err?.message || 'حدث خطأ أثناء إرسال طلب التوريد، يرجى المحاولة ثانية');
       } finally {
         setSubmitting(false);
       }
       return;
     }
 
+    // ==========================================
     // 2. OUTFLOW (طلب صرف ومصروف مالي)
-    if (!effectiveTitle.trim() || !amount || Number(amount) <= 0 || submitting) return;
-
-    let serviceId = selectedServiceId;
-    let serviceName = '';
-    const selectedService = availableServices.find(s => s.id === selectedServiceId);
-    if (selectedService) {
-      serviceName = selectedService.name;
-    } else {
-      alert('يرجى اختيار بند خدمة معتمد ومسجل لدى المؤسسة للمتابعة.');
+    // ==========================================
+    // Validation 1: Amount
+    if (!amount || Number(amount) <= 0) {
+      setFormError('⚠️ يرجى إدخال المبلغ المطلوب صرفه (- OUT) أولاً للمتابعة');
+      setFieldHighlight('amount');
+      amountInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      amountInputRef.current?.focus();
       return;
     }
 
-    let providerId = selectedProviderId;
-    let providerName = '';
-    const selectedProvider = availableProviders.find(p => p.id === selectedProviderId);
-    if (selectedProvider) {
-      providerName = selectedProvider.name;
-    } else {
-      alert('يرجى اختيار مورد معتمد ومسجل لدى المؤسسة للمتابعة.');
+    // Validation 2: Title
+    if (!effectiveTitle.trim()) {
+      setFormError('⚠️ يرجى كتابة أو اختيار موضوع وعنوان الطلب');
+      setFieldHighlight('title');
+      titleInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      titleInputRef.current?.focus();
       return;
     }
+
+    // Validation 3: Payment details
+    if (preferredPaymentMethod !== 'cash' && !paymentAccountDetails.trim()) {
+      setFormError(
+        preferredPaymentMethod === 'instapay'
+          ? '⚠️ يرجى إدخال عنوان إنستاباي أو رقم الهاتف للمستفيد'
+          : preferredPaymentMethod === 'digital_wallet'
+          ? '⚠️ يرجى إدخال رقم المحفظة الإلكترونية للمستفيد'
+          : '⚠️ يرجى إدخال رقم الحساب البنكي / الآيبان للمستفيد'
+      );
+      setFieldHighlight('paymentDetails');
+      paymentInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      paymentInputRef.current?.focus();
+      return;
+    }
+
+    if (submitting) return;
+
+    // Resolve Service (with safe fallbacks so no submission is ever blocked)
+    const selectedService = effectiveServices.find(s => s.id === selectedServiceId) || effectiveServices[0];
+    const serviceId = selectedService?.id || 'srv-general';
+    const serviceName = selectedService?.name || 'مصروفات وتشغيل عام / نثريات';
+
+    // Resolve Provider (with safe fallbacks so direct market purchases are supported)
+    const selectedProvider = effectiveProviders.find(p => p.id === selectedProviderId) || effectiveProviders[0];
+    const providerId = selectedProvider?.id || 'prov-direct-purchase';
+    const providerName = selectedProvider?.name || 'شراء مباشر / بدون مورد محدد';
 
     setSubmitting(true);
     try {
       await createRequest({
         title: effectiveTitle.trim(),
-        description: effectiveDescription.trim(),
-        justification: effectiveJustification.trim(),
+        description: effectiveDescription.trim() || 'سداد مباشر للمصروفات الموضحة بالطلب',
+        justification: effectiveJustification.trim() || 'دعم استمرارية العمليات والتشغيل',
         amount: Number(amount),
         currency: currency || currentOrg?.currency || 'EGP',
         serviceCategoryId: serviceId,
@@ -491,8 +589,9 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       });
 
       handleClose();
-    } catch (err) {
-      console.error('[NewRequestModal] Error creating request:', err);
+    } catch (err: any) {
+      console.error('[NewRequestModal] Error creating expense request:', err);
+      setFormError(err?.message || 'حدث خطأ أثناء حفظ طلب الصرف، يرجى المحاولة ثانية');
     } finally {
       setSubmitting(false);
     }
@@ -508,7 +607,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         <div className={`shrink-0 flex items-center justify-between p-4 sm:p-5 border-b sticky top-0 z-10 transition-colors ${
           requestType === 'income'
             ? 'border-emerald-100 bg-gradient-to-r from-emerald-50/95 via-teal-50/50 to-white'
-            : 'border-slate-100 bg-slate-50/80'
+            : 'border-rose-100 bg-gradient-to-r from-rose-50/95 via-pink-50/40 to-white'
         }`}>
           <div>
             <div className="flex items-center gap-2">
@@ -526,7 +625,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
             <p className="text-xs text-slate-500 mt-0.5">
               {requestType === 'income'
                 ? 'حدد المبلغ وشكل التوريد لإيداعه في كارت الخزينة وتحديث الرصيد فور الاستلام'
-                : 'اختر النماذج الجاهزة أو اكتب بياناتك المخصصة لصرف المبلغ بنقرة واحدة'}
+                : 'اكتب المبلغ والبيانات المطلوبة لتقديم طلب الصرف للاعتماد الفوري'}
             </p>
           </div>
           <button
@@ -542,7 +641,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0 overflow-hidden">
           
           {/* Scrollable Form Body */}
-          <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
+          <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
           
             {/* Primary Operation Switcher (Always at the very top) */}
             <div className="bg-slate-100/90 p-1.5 rounded-2xl flex gap-2">
@@ -577,17 +676,17 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
-                    <Building2 className="h-4 w-4 text-emerald-600" />
+                    <Building2 className="h-4 w-4 text-indigo-600" />
                     المؤسسة / الشركة المستهدفة بالطلب *
                   </label>
-                  <span className="text-[10px] text-emerald-700 bg-emerald-100/70 font-bold px-2 py-0.5 rounded-full">
+                  <span className="text-[10px] text-indigo-700 bg-indigo-100/70 font-bold px-2 py-0.5 rounded-full">
                     تحديد بصلاحية مدير النظام
                   </span>
                 </div>
                 <select
                   value={selectedOrgId}
                   onChange={(e) => setSelectedOrgId(e.target.value)}
-                  className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 font-bold text-slate-900 text-xs"
+                  className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900 text-xs"
                 >
                   {orgList.map((org) => (
                     <option key={org.id} value={org.id}>
@@ -599,12 +698,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
             ) : (
               <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200/80 rounded-2xl text-xs">
                 <div className="flex items-center gap-2">
-                  <Building2 className="h-4 w-4 text-emerald-600" />
+                  <Building2 className="h-4 w-4 text-indigo-600" />
                   <span className="text-slate-600 font-semibold">المؤسسة التابع لها الطلب:</span>
                   <span className="font-bold text-slate-900">{currentOrg?.name || 'المؤسسة المعتمدة'}</span>
                 </div>
                 {currentOrg?.code && (
-                  <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-lg font-black text-[11px]">
+                  <span className="px-2.5 py-1 bg-indigo-100 text-indigo-800 rounded-lg font-black text-[11px]">
                     {currentOrg.code}
                   </span>
                 )}
@@ -618,7 +717,11 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
             {requestType === 'income' ? (
               <div className="space-y-4 animate-in fade-in duration-150">
                 {/* 1. Amount to Inflow */}
-                <div className="bg-gradient-to-br from-emerald-50/80 via-teal-50/40 to-white p-4 sm:p-5 rounded-2xl border-2 border-emerald-300/80 shadow-xs space-y-2">
+                <div className={`bg-gradient-to-br from-emerald-50/80 via-teal-50/40 to-white p-4 sm:p-5 rounded-2xl border-2 transition-all shadow-xs space-y-2 ${
+                  fieldHighlight === 'amount' 
+                    ? 'border-emerald-500 ring-4 ring-emerald-500/20' 
+                    : 'border-emerald-300/80'
+                }`}>
                   <div className="flex items-center justify-between">
                     <label className="font-black text-slate-800 text-sm flex items-center gap-2">
                       <span className="p-1.5 bg-emerald-600 text-white rounded-lg">
@@ -634,13 +737,17 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 pt-1">
                     <div className="sm:col-span-8 relative">
                       <input
+                        ref={amountInputRef}
                         type="text"
                         inputMode="decimal"
-                        required
                         autoFocus
                         value={amount}
                         onKeyDown={(e) => handleNumericKeyDown(e, true)}
-                        onChange={(e) => setAmount(sanitizeAmount(e.target.value))}
+                        onChange={(e) => {
+                          setAmount(sanitizeAmount(e.target.value));
+                          if (formError) setFormError(null);
+                          if (fieldHighlight === 'amount') setFieldHighlight(null);
+                        }}
                         placeholder="0.00"
                         className="w-full p-3.5 bg-white border-2 border-emerald-400 rounded-xl focus:outline-none focus:ring-4 focus:ring-emerald-500/20 font-black text-slate-900 pl-24 text-xl shadow-xs"
                       />
@@ -791,10 +898,10 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               </div>
             ) : (
               /* =========================================================================
-                  OUTFLOW FORM (طلب صرف ومصروف)
+                  OUTFLOW FORM (طلب صرف ومصروف مالي)
                  ========================================================================= */
               <div className="space-y-4 animate-in fade-in duration-150">
-                {/* Quick Request Templates Bar */}
+                {/* 1. Quick Request Templates Bar */}
                 <div className="p-3.5 rounded-2xl border shadow-2xs space-y-2 bg-gradient-to-r from-indigo-50/90 via-purple-50/70 to-blue-50/90 border-indigo-100/90">
                   <div className="flex items-center justify-between">
                     <span className="font-black text-xs flex items-center gap-1.5 text-indigo-950">
@@ -821,7 +928,101 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   </div>
                 </div>
 
-                {/* Title Selection */}
+                {/* 2. Amount, Currency & Urgency Card (Prominent & Easy to Fill) */}
+                <div 
+                  className={`bg-gradient-to-br from-rose-50/90 via-pink-50/40 to-white p-4 sm:p-5 rounded-2xl border-2 transition-all shadow-xs space-y-2.5 ${
+                    fieldHighlight === 'amount' 
+                      ? 'border-rose-500 ring-4 ring-rose-500/20' 
+                      : 'border-rose-300/90'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <label className="font-black text-slate-800 text-sm flex items-center gap-2">
+                      <span className="p-1.5 bg-rose-600 text-white rounded-lg">
+                        <ArrowUpRight className="h-4 w-4" />
+                      </span>
+                      <span>المبلغ المطلوب صرفه (- OUT) *</span>
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {fieldHighlight === 'amount' && (
+                        <span className="text-[11px] font-black text-rose-700 bg-rose-100 border border-rose-300 px-2.5 py-0.5 rounded-full animate-pulse">
+                          ⚠️ يرجى إدخال المبلغ هنا
+                        </span>
+                      )}
+                      <span className="text-[11px] font-bold text-rose-800 bg-rose-100/90 px-2.5 py-0.5 rounded-full">
+                        منصرف مالي
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 pt-1">
+                    <div className="sm:col-span-8 relative">
+                      <input
+                        ref={amountInputRef}
+                        type="text"
+                        inputMode="decimal"
+                        value={amount}
+                        onKeyDown={(e) => handleNumericKeyDown(e, true)}
+                        onChange={(e) => {
+                          setAmount(sanitizeAmount(e.target.value));
+                          if (formError) setFormError(null);
+                          if (fieldHighlight === 'amount') setFieldHighlight(null);
+                        }}
+                        placeholder="0.00"
+                        className={`w-full p-3.5 bg-white border-2 rounded-xl focus:outline-none focus:ring-4 font-black text-slate-900 pl-24 text-xl shadow-xs transition-all ${
+                          fieldHighlight === 'amount'
+                            ? 'border-rose-500 focus:ring-rose-500/30 ring-2 ring-rose-500/20'
+                            : 'border-rose-400 focus:ring-rose-500/20'
+                        }`}
+                      />
+                      <span className="absolute left-3 top-3.5 px-2.5 py-1 rounded-lg text-xs font-black bg-rose-100 text-rose-800 border border-rose-300 flex items-center gap-1 pointer-events-none select-none">
+                        <span>-</span>
+                        <span>{currency}</span>
+                      </span>
+                    </div>
+
+                    <div className="sm:col-span-4">
+                      <select
+                        value={currency}
+                        onChange={(e) => setCurrency(e.target.value)}
+                        className="w-full p-3.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-rose-500/20 font-bold text-xs shadow-xs h-full"
+                      >
+                        {SUPPORTED_CURRENCIES.map((c) => (
+                          <option key={c.code} value={c.code}>
+                            {c.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Urgency selector buttons */}
+                  <div className="pt-2 flex items-center justify-between border-t border-rose-100/80 text-xs">
+                    <span className="font-bold text-slate-600">درجة الأولوية:</span>
+                    <div className="flex items-center gap-2">
+                      {[
+                        { id: 'low', label: '🟢 عادي' },
+                        { id: 'medium', label: '🟡 متوسط الأهمية' },
+                        { id: 'high', label: '🔴 عاجل جداً' },
+                      ].map((u) => (
+                        <button
+                          key={u.id}
+                          type="button"
+                          onClick={() => setUrgency(u.id as any)}
+                          className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                            urgency === u.id
+                              ? 'bg-rose-600 text-white shadow-xs'
+                              : 'bg-white/80 text-slate-600 hover:bg-white border border-slate-200'
+                          }`}
+                        >
+                          {u.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. Title Selection */}
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="font-bold text-slate-700">موضوع وعنوان الطلب *</label>
@@ -841,13 +1042,20 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                   {isCustomTitle ? (
                     <input
+                      ref={titleInputRef}
                       type="text"
-                      required
-                      autoFocus
                       value={customTitle}
-                      onChange={(e) => setCustomTitle(e.target.value)}
+                      onChange={(e) => {
+                        setCustomTitle(e.target.value);
+                        if (formError) setFormError(null);
+                        if (fieldHighlight === 'title') setFieldHighlight(null);
+                      }}
                       placeholder="اكتب موضوع وعنوان الطلب بالتفصيل هنا..."
-                      className="w-full p-2.5 bg-white border border-indigo-400 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-900 font-medium text-xs shadow-xs"
+                      className={`w-full p-2.5 bg-white border rounded-xl focus:outline-none focus:ring-2 font-medium text-xs shadow-xs ${
+                        fieldHighlight === 'title' 
+                          ? 'border-rose-500 ring-2 ring-rose-500/20' 
+                          : 'border-indigo-400 focus:ring-indigo-500/20 text-slate-900'
+                      }`}
                     />
                   ) : (
                     <select
@@ -859,6 +1067,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         } else {
                           setSelectedTitlePreset(e.target.value);
                         }
+                        if (formError) setFormError(null);
+                        if (fieldHighlight === 'title') setFieldHighlight(null);
                       }}
                       className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900"
                     >
@@ -869,7 +1079,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   )}
                 </div>
 
-                {/* Service & Provider Dropdowns */}
+                {/* 4. Service & Provider Dropdowns (With Auto Fallbacks) */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <div className="flex items-center justify-between mb-1">
@@ -878,36 +1088,28 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         <span>بند الخدمة / مركز التكلفة *</span>
                       </label>
                       <span className="text-[10px] text-slate-400 font-bold">
-                        ({availableServices.length} بند معتمد)
+                        ({effectiveServices.length} بند متاح)
                       </span>
                     </div>
 
-                    {availableServices.length > 0 ? (
-                      <select
-                        required
-                        value={selectedServiceId}
-                        onChange={(e) => {
-                          const sId = e.target.value;
-                          setSelectedServiceId(sId);
-                          const srv = availableServices.find(s => s.id === sId);
-                          if (srv) {
-                            applyServiceCategoryDefaults(srv);
-                          }
-                        }}
-                        className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900 text-xs"
-                      >
-                        {availableServices.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.name} {s.code ? `(${s.code})` : ''}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-[11px] font-semibold flex items-center gap-1.5">
-                        <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
-                        <span>لا توجد بنود خدمة معتمدة لهذه المؤسسة حتى الآن.</span>
-                      </div>
-                    )}
+                    <select
+                      value={selectedServiceId}
+                      onChange={(e) => {
+                        const sId = e.target.value;
+                        setSelectedServiceId(sId);
+                        const srv = effectiveServices.find(s => s.id === sId);
+                        if (srv) {
+                          applyServiceCategoryDefaults(srv);
+                        }
+                      }}
+                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900 text-xs"
+                    >
+                      {effectiveServices.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} {s.code ? `(${s.code})` : ''}
+                        </option>
+                      ))}
+                    </select>
                   </div>
 
                   <div>
@@ -917,102 +1119,34 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         <span>مقدم الخدمة / المورد *</span>
                       </label>
                       <span className="text-[10px] text-slate-400 font-bold">
-                        ({availableProviders.length} مورد معتمد)
+                        ({effectiveProviders.length} مورد متاح)
                       </span>
                     </div>
 
-                    {availableProviders.length > 0 ? (
-                      <select
-                        required
-                        value={selectedProviderId}
-                        onChange={(e) => setSelectedProviderId(e.target.value)}
-                        className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900 text-xs"
-                      >
-                        {availableProviders.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name} {p.contactPerson ? `(مسؤول: ${p.contactPerson})` : ''}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-[11px] font-semibold flex items-center gap-1.5">
-                        <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
-                        <span>لا يوجد موردون معتمدون مسجلون لهذه المؤسسة.</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Warning if company has no services or providers */}
-                {(availableServices.length === 0 || availableProviders.length === 0) && (
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-2 text-amber-900 text-xs">
-                    <AlertCircle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
-                    <div>
-                      <span className="font-bold">تنبيه الحوكمة المالية: </span>
-                      <span>
-                        يجب أن تحتوي الشركة على بنود صرف وموردين معتمدين مسبقاً مسجلين من قبل مدير النظام قبل تقديم الطلب.
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Amount, Currency & Urgency */}
-                <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                  <div className="sm:col-span-5">
-                    <label className="block font-bold text-slate-700 mb-1">المبلغ المطلوب صرفه (- OUT) *</label>
-                    <div className="relative">
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        required
-                        value={amount}
-                        onKeyDown={(e) => handleNumericKeyDown(e, true)}
-                        onChange={(e) => setAmount(sanitizeAmount(e.target.value))}
-                        placeholder="0.00"
-                        className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-rose-500/20 font-bold text-slate-900 pl-20 text-sm"
-                      />
-                      <span className="absolute left-2.5 top-2.5 px-2 py-0.5 rounded-lg text-xs font-black bg-rose-100 text-rose-800 border border-rose-300 flex items-center gap-1 pointer-events-none select-none">
-                        <span>-</span>
-                        <span>{currency}</span>
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="sm:col-span-4">
-                    <label className="block font-bold text-slate-700 mb-1">عملة الصرف *</label>
                     <select
-                      value={currency}
-                      onChange={(e) => setCurrency(e.target.value)}
-                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-bold text-xs"
+                      value={selectedProviderId}
+                      onChange={(e) => setSelectedProviderId(e.target.value)}
+                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900 text-xs"
                     >
-                      {SUPPORTED_CURRENCIES.map((c) => (
-                        <option key={c.code} value={c.code}>
-                          {c.label}
+                      {effectiveProviders.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} {p.contactPerson ? `(مسؤول: ${p.contactPerson})` : ''}
                         </option>
                       ))}
                     </select>
                   </div>
-
-                  <div className="sm:col-span-3">
-                    <label className="block font-bold text-slate-700 mb-1">مستوى الأولوية *</label>
-                    <select
-                      value={urgency}
-                      onChange={(e: any) => setUrgency(e.target.value)}
-                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-bold"
-                    >
-                      <option value="low">🟢 عادي / روتيني</option>
-                      <option value="medium">🟡 متوسط الأهمية</option>
-                      <option value="high">🔴 عاجل وهام جداً</option>
-                    </select>
-                  </div>
                 </div>
 
-                {/* Expense Payment Details */}
-                <div className="bg-rose-50/60 p-4 rounded-2xl border border-rose-200/80 space-y-3">
+                {/* 5. Expense Recipient Payment Details */}
+                <div className={`p-4 rounded-2xl border space-y-3 transition-all ${
+                  fieldHighlight === 'paymentDetails'
+                    ? 'bg-rose-50 border-rose-500 ring-2 ring-rose-500/20'
+                    : 'bg-rose-50/60 border-rose-200/80'
+                }`}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2 font-bold text-rose-950 text-xs">
                       <CreditCard className="h-4 w-4 text-rose-600" />
-                      <span>بيانات تحويل المبلغ للمستفيد (- OUT)</span>
+                      <span>بيانات تحويل المبلغ للمستفيد (- OUT) *</span>
                     </div>
                     <span className="text-[10px] font-bold text-rose-800 bg-rose-100 px-2 py-0.5 rounded-md">
                       صرف خارج (- OUT)
@@ -1027,6 +1161,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         onChange={(e: any) => {
                           setPreferredPaymentMethod(e.target.value);
                           setPaymentAccountDetails('');
+                          if (formError) setFormError(null);
+                          if (fieldHighlight === 'paymentDetails') setFieldHighlight(null);
                         }}
                         className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-bold text-xs"
                       >
@@ -1039,13 +1175,13 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                     <div>
                       <label className="block font-bold text-slate-700 mb-1">
-                        {preferredPaymentMethod === 'instapay' ? 'عنوان انستاباي (IPA / رقم الهاتف)' :
-                         preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية (أرقام فقط)' :
-                         preferredPaymentMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN)' : 'جهة الاستلام'}
+                        {preferredPaymentMethod === 'instapay' ? 'عنوان انستاباي (IPA / رقم الهاتف) *' :
+                         preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية (أرقام فقط) *' :
+                         preferredPaymentMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN) *' : 'جهة الاستلام'}
                       </label>
                       <input
+                        ref={paymentInputRef}
                         type="text"
-                        required
                         inputMode={preferredPaymentMethod === 'digital_wallet' ? 'numeric' : 'text'}
                         value={paymentAccountDetails}
                         onKeyDown={(e) => {
@@ -1064,19 +1200,23 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                           } else {
                             setPaymentAccountDetails(raw);
                           }
+                          if (formError) setFormError(null);
+                          if (fieldHighlight === 'paymentDetails') setFieldHighlight(null);
                         }}
                         placeholder={
                           preferredPaymentMethod === 'instapay' ? 'user@instapay أو رقم الهاتف' :
                           preferredPaymentMethod === 'digital_wallet' ? '010xxxxxxxx (أرقام فقط)' :
                           preferredPaymentMethod === 'bank_transfer' ? 'EG... / SA... (حروف وأرقام)' : 'الفرع أو الخزينة'
                         }
-                        className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-mono text-xs"
+                        className={`w-full p-2.5 bg-white border rounded-xl font-mono text-xs ${
+                          fieldHighlight === 'paymentDetails' ? 'border-rose-500 ring-2 ring-rose-500/20' : 'border-slate-200'
+                        }`}
                       />
                     </div>
                   </div>
                 </div>
 
-                {/* Items Detail */}
+                {/* 6. Items Detail (Optional) */}
                 <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80">
                   <label className="block font-bold text-slate-800 mb-1">
                     📦 بيانات البضاعة أو الأصناف (اختياري - اسم الصنف، الكمية، سعر الوحدة)
@@ -1085,12 +1225,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                     type="text"
                     value={itemsDetail}
                     onChange={(e) => setItemsDetail(e.target.value)}
-                    placeholder="مثال: 10 كراتين بضاعة x 150 ج.م، كود الصنف #205..."
+                    placeholder="مثال: فطار مجمع وحليب ومستلزمات، أو 10 كراتين بضاعة x 150 ج.م..."
                     className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-medium text-slate-800 text-xs outline-hidden"
                   />
                 </div>
 
-                {/* Justification */}
+                {/* 7. Justification */}
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="font-bold text-slate-700">المبرر المالي للطلب *</label>
@@ -1111,8 +1251,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   {isCustomJustification ? (
                     <textarea
                       rows={2}
-                      required
-                      autoFocus
                       value={customJustification}
                       onChange={(e) => setCustomJustification(e.target.value)}
                       placeholder="اكتب المبرر المالي والتشغيلي للطلب بالتفصيل هنا..."
@@ -1138,7 +1276,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   )}
                 </div>
 
-                {/* Description */}
+                {/* 8. Description */}
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="font-bold text-slate-700">تفاصيل ومواصفات الطلب</label>
@@ -1159,7 +1297,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   {isCustomDescription ? (
                     <textarea
                       rows={2}
-                      autoFocus
                       value={customDescription}
                       onChange={(e) => setCustomDescription(e.target.value)}
                       placeholder="اكتب مواصفات وتفاصيل الخدمة أو السلعة المطلوبة هنا..."
@@ -1189,6 +1326,23 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
           </div>
 
+          {/* Validation & Error Message Banner (Always visible above footer buttons) */}
+          {formError && (
+            <div className="shrink-0 px-5 py-3 bg-rose-50 border-t border-rose-200 flex items-center justify-between text-xs text-rose-800 font-bold animate-in fade-in">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
+                <span>{formError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFormError(null)}
+                className="text-rose-600 hover:text-rose-800 p-1 rounded-lg cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+
           {/* Footer Buttons */}
           <div className="shrink-0 flex items-center justify-between gap-3 p-4 border-t border-slate-100 bg-slate-50/80">
             <div className="text-[11px] font-bold text-slate-500 flex items-center gap-1.5">
@@ -1206,11 +1360,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               </button>
               <button
                 type="submit"
-                disabled={
-                  submitting || 
-                  (!amount || Number(amount) <= 0) ||
-                  (requestType === 'expense' && (!effectiveTitle.trim() || availableServices.length === 0 || availableProviders.length === 0))
-                }
+                disabled={submitting}
                 className={`px-6 py-2.5 text-white font-bold rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${
                   requestType === 'income'
                     ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20'
