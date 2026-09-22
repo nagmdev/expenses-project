@@ -78,6 +78,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   const [urgencyFilter, setUrgencyFilter] = useState<string>('all');
   const [paymentMethodFilter, setPaymentMethodFilter] = useState<string>('all');
   const [datePeriodFilter, setDatePeriodFilter] = useState<string>('all');
+  const [specificDateFilter, setSpecificDateFilter] = useState<string>('');
 
   // Inline Actions States
   const [activeAction, setActiveAction] = useState<'none' | 'approve' | 'reject' | 'clarify' | 'disburse'>('none');
@@ -153,6 +154,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
         if (datePeriodFilter === 'today' && diffHours > 24) return false;
         if (datePeriodFilter === 'week' && diffHours > 24 * 7) return false;
         if (datePeriodFilter === 'month' && diffHours > 24 * 30) return false;
+        if (datePeriodFilter === 'specific' && specificDateFilter) {
+          const reqCreated = String(req.createdAt).startsWith(specificDateFilter);
+          const reqDisbursed = req.disbursement?.disbursedAt ? String(req.disbursement.disbursedAt).startsWith(specificDateFilter) : false;
+          if (!reqCreated && !reqDisbursed) return false;
+        }
       }
 
       // Search (Matches Title, Request Number, Requester, Provider, Justification)
@@ -179,6 +185,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     urgencyFilter, 
     paymentMethodFilter, 
     datePeriodFilter, 
+    specificDateFilter,
     search
   ]);
 
@@ -758,7 +765,18 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                   <option value="today">اليوم (آخر 24 ساعة)</option>
                   <option value="week">آخر 7 أيام</option>
                   <option value="month">هذا الشهر (آخر 30 يوماً)</option>
+                  <option value="specific">📅 تاريخ محدد (اختر يوماً)</option>
                 </select>
+                {datePeriodFilter === 'specific' && (
+                  <div className="mt-1.5">
+                    <input
+                      type="date"
+                      value={specificDateFilter}
+                      onChange={(e) => setSpecificDateFilter(e.target.value)}
+                      className="w-full p-2 bg-indigo-50/50 border border-indigo-200 rounded-xl text-xs font-bold text-indigo-900 outline-none focus:ring-2 focus:ring-indigo-500/20"
+                    />
+                  </div>
+                )}
               </div>
             </div>
 
@@ -776,7 +794,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                   <span>تصدير Excel</span>
                 </button>
               </div>
-              {(statusFilter !== 'all' || categoryFilter !== 'all' || providerFilter !== 'all' || departmentFilter !== 'all' || urgencyFilter !== 'all' || paymentMethodFilter !== 'all' || datePeriodFilter !== 'all' || search) && (
+              {(statusFilter !== 'all' || categoryFilter !== 'all' || providerFilter !== 'all' || departmentFilter !== 'all' || urgencyFilter !== 'all' || paymentMethodFilter !== 'all' || datePeriodFilter !== 'all' || specificDateFilter || search) && (
                 <button
                   type="button"
                   onClick={() => {
@@ -787,6 +805,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                     setUrgencyFilter('all');
                     setPaymentMethodFilter('all');
                     setDatePeriodFilter('all');
+                    setSpecificDateFilter('');
                     setSearch('');
                   }}
                   className="text-indigo-600 hover:text-indigo-800 font-bold cursor-pointer"

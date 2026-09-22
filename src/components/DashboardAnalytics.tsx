@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
   DollarSign, 
@@ -11,7 +11,12 @@ import {
   FileSpreadsheet, 
   ArrowUpRight,
   Filter,
-  CreditCard
+  CreditCard,
+  Calendar,
+  ChevronDown,
+  X,
+  RotateCcw,
+  CalendarRange
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -32,6 +37,35 @@ interface DashboardAnalyticsProps {
   onOpenNewRequest: () => void;
 }
 
+const getNormalizedDateStr = (dateVal: string | undefined): string | null => {
+  if (!dateVal) return null;
+  const match = String(dateVal).match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1];
+  const d = new Date(dateVal);
+  if (isNaN(d.getTime())) return null;
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const formatDateArabic = (dateStr: string) => {
+  if (!dateStr) return '';
+  try {
+    const parts = dateStr.split('-');
+    if (parts.length < 3) return dateStr;
+    const [y, m, d] = parts;
+    const months = [
+      'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',
+      'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
+    ];
+    const monthName = months[parseInt(m, 10) - 1] || m;
+    return `${parseInt(d, 10)} ${monthName} ${y}`;
+  } catch {
+    return dateStr;
+  }
+};
+
 export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({ 
   onSelectRequest, 
   onOpenNewRequest 
@@ -46,10 +80,84 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
     currentRole 
   } = useApp();
 
-  const [timeFilter, setTimeFilter] = useState<'all' | 'q3' | 'month'>('all');
+  const [timeFilter, setTimeFilter] = useState<'all' | 'today' | 'month' | 'q3' | 'specific' | 'range'>('all');
+  const [specificDate, setSpecificDate] = useState<string>(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  });
+  const [startDate, setStartDate] = useState<string>('');
+  const [endDate, setEndDate] = useState<string>('');
+  const [customMode, setCustomMode] = useState<'single' | 'range'>('single');
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
+  const datePickerRef = useRef<HTMLDivElement>(null);
 
-  // Scoped data already verified and isolated by AppContext
-  const orgRequests = requests;
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (datePickerRef.current && !datePickerRef.current.contains(event.target as Node)) {
+        setIsDatePickerOpen(false);
+      }
+    };
+    if (isDatePickerOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isDatePickerOpen]);
+
+  const todayStr = useMemo(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }, []);
+
+  // Filter requests reactively according to selected time frame or specific date
+  const orgRequests = useMemo(() => {
+    if (timeFilter === 'all') return requests;
+
+    return requests.filter(req => {
+      const reqCreated = getNormalizedDateStr(req.createdAt);
+      const reqDisbursed = getNormalizedDateStr(req.disbursement?.disbursedAt);
+
+      if (timeFilter === 'today') {
+        return reqCreated === todayStr || reqDisbursed === todayStr;
+      }
+
+      if (timeFilter === 'month') {
+        const curMonthPrefix = todayStr.slice(0, 7); // e.g. "2026-09"
+        return (reqCreated && reqCreated.startsWith(curMonthPrefix)) ||
+               (reqDisbursed && reqDisbursed.startsWith(curMonthPrefix));
+      }
+
+      if (timeFilter === 'q3') {
+        const isQ3 = (s: string | null) => {
+          if (!s) return false;
+          return s.startsWith('2026-07') || s.startsWith('2026-08') || s.startsWith('2026-09');
+        };
+        return isQ3(reqCreated) || isQ3(reqDisbursed);
+      }
+
+      if (timeFilter === 'specific') {
+        if (!specificDate) return true;
+        return reqCreated === specificDate || reqDisbursed === specificDate;
+      }
+
+      if (timeFilter === 'range') {
+        const dateToCheck = reqDisbursed || reqCreated;
+        if (!dateToCheck) return false;
+        if (startDate && dateToCheck < startDate) return false;
+        if (endDate && dateToCheck > endDate) return false;
+        return true;
+      }
+
+      return true;
+    });
+  }, [requests, timeFilter, specificDate, startDate, endDate, todayStr]);
   const currentOrgServices = services;
   const currentOrgProviders = providers;
 
@@ -142,31 +250,251 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
         </div>
 
         <div className="flex items-center gap-2.5 flex-wrap">
-          <div className="flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs">
+          <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
             <button
-              onClick={() => setTimeFilter('all')}
-              className={`px-3 py-1.5 rounded-md font-medium transition cursor-pointer ${
-                timeFilter === 'all' ? 'bg-white text-slate-900 shadow-xs font-bold' : 'text-slate-600'
+              type="button"
+              onClick={() => { setTimeFilter('all'); setIsDatePickerOpen(false); }}
+              className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer ${
+                timeFilter === 'all' ? 'bg-white text-slate-900 shadow-xs font-bold' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               كافة الفترات
             </button>
             <button
-              onClick={() => setTimeFilter('q3')}
-              className={`px-3 py-1.5 rounded-md font-medium transition cursor-pointer ${
-                timeFilter === 'q3' ? 'bg-white text-slate-900 shadow-xs font-bold' : 'text-slate-600'
+              type="button"
+              onClick={() => { setTimeFilter('today'); setIsDatePickerOpen(false); }}
+              className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer ${
+                timeFilter === 'today' ? 'bg-white text-slate-900 shadow-xs font-bold' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              الربع الثالث 2026
+              اليوم
             </button>
             <button
-              onClick={() => setTimeFilter('month')}
-              className={`px-3 py-1.5 rounded-md font-medium transition cursor-pointer ${
-                timeFilter === 'month' ? 'bg-white text-slate-900 shadow-xs font-bold' : 'text-slate-600'
+              type="button"
+              onClick={() => { setTimeFilter('month'); setIsDatePickerOpen(false); }}
+              className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer ${
+                timeFilter === 'month' ? 'bg-white text-slate-900 shadow-xs font-bold' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               هذا الشهر
             </button>
+            <button
+              type="button"
+              onClick={() => { setTimeFilter('q3'); setIsDatePickerOpen(false); }}
+              className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer ${
+                timeFilter === 'q3' ? 'bg-white text-slate-900 shadow-xs font-bold' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              الربع الثالث 2026
+            </button>
+
+            {/* Specific Date / Range Selector Button */}
+            <div className="relative" ref={datePickerRef}>
+              <button
+                type="button"
+                onClick={() => setIsDatePickerOpen(!isDatePickerOpen)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition cursor-pointer ${
+                  timeFilter === 'specific' || timeFilter === 'range'
+                    ? 'bg-indigo-600 text-white shadow-xs font-bold'
+                    : 'text-slate-700 hover:bg-white hover:text-slate-900'
+                }`}
+                title="تحديد تاريخ معين أو فترة زمنية مخصصة"
+              >
+                <Calendar className="h-3.5 w-3.5" />
+                <span>
+                  {timeFilter === 'specific' && specificDate
+                    ? formatDateArabic(specificDate)
+                    : timeFilter === 'range' && startDate && endDate
+                    ? `${startDate} ~ ${endDate}`
+                    : 'تاريخ محدد 📅'}
+                </span>
+                <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${isDatePickerOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {/* Popover Card */}
+              {isDatePickerOpen && (
+                <div className="absolute left-0 top-full mt-2 w-72 sm:w-80 bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 z-50 text-right">
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                    <span className="font-bold text-slate-900 text-xs flex items-center gap-1.5">
+                      <Calendar className="h-4 w-4 text-indigo-600" />
+                      <span>تحديد التاريخ أو الفترة الزمنية</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsDatePickerOpen(false)}
+                      className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {/* Mode tabs: يوم محدد vs فترة زمنية */}
+                  <div className="flex bg-slate-100 p-1 rounded-xl my-3 text-[11px] font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => setCustomMode('single')}
+                      className={`flex-1 py-1.5 rounded-lg transition ${
+                        customMode === 'single' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                      }`}
+                    >
+                      يوم محدد (تاريخ معين)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCustomMode('range')}
+                      className={`flex-1 py-1.5 rounded-lg transition ${
+                        customMode === 'range' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                      }`}
+                    >
+                      فترة (من - إلى)
+                    </button>
+                  </div>
+
+                  {customMode === 'single' ? (
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                          اختر اليوم المطلوب:
+                        </label>
+                        <input
+                          type="date"
+                          value={specificDate}
+                          onChange={(e) => {
+                            setSpecificDate(e.target.value);
+                            if (e.target.value) {
+                              setTimeFilter('specific');
+                            }
+                          }}
+                          className="w-full px-3 py-2 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 text-slate-800"
+                        />
+                      </div>
+
+                      {/* Quick shortcuts */}
+                      <div>
+                        <span className="text-[10px] text-slate-400 font-bold block mb-1.5">اختصارات سريعة:</span>
+                        <div className="flex flex-wrap gap-1 text-[11px]">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSpecificDate(todayStr);
+                              setTimeFilter('specific');
+                              setIsDatePickerOpen(false);
+                            }}
+                            className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium cursor-pointer"
+                          >
+                            اليوم
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const y = new Date();
+                              y.setDate(y.getDate() - 1);
+                              const yStr = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, '0')}-${String(y.getDate()).padStart(2, '0')}`;
+                              setSpecificDate(yStr);
+                              setTimeFilter('specific');
+                              setIsDatePickerOpen(false);
+                            }}
+                            className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium cursor-pointer"
+                          >
+                            أمس
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const firstDay = `${todayStr.slice(0, 7)}-01`;
+                              setSpecificDate(firstDay);
+                              setTimeFilter('specific');
+                              setIsDatePickerOpen(false);
+                            }}
+                            className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium cursor-pointer"
+                          >
+                            أول الشهر
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="pt-2 flex items-center justify-between border-t border-slate-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTimeFilter('all');
+                            setIsDatePickerOpen(false);
+                          }}
+                          className="text-[11px] text-slate-500 hover:text-slate-800 font-medium cursor-pointer"
+                        >
+                          إلغاء التحديد
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (specificDate) {
+                              setTimeFilter('specific');
+                            }
+                            setIsDatePickerOpen(false);
+                          }}
+                          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer"
+                        >
+                          تطبيق العرض
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                            من تاريخ:
+                          </label>
+                          <input
+                            type="date"
+                            value={startDate}
+                            onChange={(e) => setStartDate(e.target.value)}
+                            className="w-full px-2 py-2 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-800"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                            إلى تاريخ:
+                          </label>
+                          <input
+                            type="date"
+                            value={endDate}
+                            onChange={(e) => setEndDate(e.target.value)}
+                            className="w-full px-2 py-2 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-800"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="pt-2 flex items-center justify-between border-t border-slate-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTimeFilter('all');
+                            setIsDatePickerOpen(false);
+                          }}
+                          className="text-[11px] text-slate-500 hover:text-slate-800 font-medium cursor-pointer"
+                        >
+                          إلغاء التحديد
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!startDate && !endDate}
+                          onClick={() => {
+                            if (startDate || endDate) {
+                              setTimeFilter('range');
+                            }
+                            setIsDatePickerOpen(false);
+                          }}
+                          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer"
+                        >
+                          تطبيق الفترة
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           <button
@@ -180,7 +508,62 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
         </div>
       </div>
 
-      {/* KPI Cards Grid */}
+      {/* Active Filter Notification Banner */}
+      {timeFilter !== 'all' && (
+        <div className="flex items-center justify-between bg-indigo-50/80 border border-indigo-200/80 px-4 py-2.5 rounded-2xl text-xs">
+          <div className="flex items-center gap-2 text-indigo-900 font-bold flex-wrap">
+            <Filter className="h-3.5 w-3.5 text-indigo-600 shrink-0" />
+            <span>
+              {timeFilter === 'specific' && specificDate
+                ? `تصفية نشطة حسب التاريخ المحدد: ${formatDateArabic(specificDate)} (${specificDate})`
+                : timeFilter === 'range'
+                ? `تصفية نشطة للفترة من ${startDate || 'البداية'} إلى ${endDate || 'اليوم'}`
+                : timeFilter === 'today'
+                ? `تصفية نشطة: اليوم (${formatDateArabic(todayStr)})`
+                : timeFilter === 'month'
+                ? 'تصفية نشطة: مصروفات هذا الشهر'
+                : 'تصفية نشطة: الربع الثالث 2026'}
+            </span>
+            <span className="text-indigo-600 font-semibold">
+              • تم العثور على {orgRequests.length} طلب
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setTimeFilter('all')}
+            className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-indigo-700 hover:text-indigo-900 hover:bg-indigo-100 rounded-lg transition cursor-pointer shrink-0"
+          >
+            <RotateCcw className="h-3 w-3" />
+            <span>عرض كافة الفترات</span>
+          </button>
+        </div>
+      )}
+
+      {/* Empty State Banner if 0 requests for this specific date */}
+      {orgRequests.length === 0 && timeFilter !== 'all' && (
+        <div className="bg-white border border-slate-200 p-8 rounded-2xl text-center space-y-3 shadow-xs">
+          <div className="h-12 w-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto border border-amber-200">
+            <Calendar className="h-6 w-6" />
+          </div>
+          <h3 className="text-base font-bold text-slate-800">
+            لا توجد طلبات أو حركات مسجلة في هذا التاريخ المحدد
+          </h3>
+          <p className="text-xs text-slate-500 max-w-md mx-auto">
+            {timeFilter === 'specific' && specificDate 
+              ? `لم يتم تسجيل أي طلبات صرف أو عمليات دفع في يوم ${formatDateArabic(specificDate)} (${specificDate}).`
+              : 'لم يتم العثور على أي طلبات خلال الفترة المحددة.'}
+          </p>
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => setTimeFilter('all')}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
+            >
+              عرض كافة الفترات والطلبات
+            </button>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         
         {/* Card 1: Total Disbursed */}
