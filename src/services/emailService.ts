@@ -37,6 +37,19 @@ export interface EmailDispatchDetails {
 }
 
 /**
+ * Sanitize strings against HTML/Script injection attacks in email templates
+ */
+export function escapeHtml(str: any): string {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+/**
  * Generate formatted, responsive HTML email content with Arabic RTL layout
  */
 export function generateEmailContent(
@@ -44,9 +57,9 @@ export function generateEmailContent(
   details: EmailDispatchDetails
 ): { subject: string; html: string; text: string; snippet: string } {
   const req = details.request;
-  const orgName = details.org?.name || 'الشركة';
-  const reqNumber = req?.requestNumber || 'طلب صرف';
-  const amountStr = req ? `${req.amount.toLocaleString()} ${req.currency}` : '';
+  const orgName = escapeHtml(details.org?.name || 'الشركة');
+  const reqNumber = escapeHtml(req?.requestNumber || 'طلب صرف');
+  const amountStr = req ? `${req.amount.toLocaleString()} ${escapeHtml(req.currency)}` : '';
 
   let subject = '';
   let badgeTitle = '';
@@ -55,14 +68,18 @@ export function generateEmailContent(
   let messageIntro = '';
   let highlightNote = '';
 
+  const safeRequesterName = escapeHtml(req?.requesterName || 'أحد الموظفين');
+  const safeActorName = escapeHtml(details.actorName || 'الإدارة');
+  const safeNote = escapeHtml(details.note || '');
+
   switch (eventType) {
     case 'new_request':
       subject = `🔔 طلب صرف جديد بانتظار الاعتماد (${reqNumber}) - ${amountStr}`;
       badgeTitle = 'طلب صرف جديد للاعتماد';
       badgeColor = '#d97706';
       badgeBg = '#fffbeb';
-      messageIntro = `قام الموظف <strong>${req?.requesterName || 'أحد الموظفين'}</strong> بتقديم طلب صرف جديد بحاجة إلى المراجعة والاعتماد المالي.`;
-      if (details.note) highlightNote = details.note;
+      messageIntro = `قام الموظف <strong>${safeRequesterName}</strong> بتقديم طلب صرف جديد بحاجة إلى المراجعة والاعتماد المالي.`;
+      if (details.note) highlightNote = safeNote;
       break;
 
     case 'request_approved':
@@ -70,8 +87,8 @@ export function generateEmailContent(
       badgeTitle = 'تم الاعتماد المالي بنجاح';
       badgeColor = '#059669';
       badgeBg = '#ecfdf5';
-      messageIntro = `يسرنا إبلاغك بأنه تمت الموافقة والاعتماد المالي على طلب الصرف الخاص بك من قبل <strong>${details.actorName || 'الإدارة'}</strong>، وتم تحويله للخزينة للصرف.`;
-      if (details.note) highlightNote = `ملاحظات الاعتماد: ${details.note}`;
+      messageIntro = `يسرنا إبلاغك بأنه تمت الموافقة والاعتماد المالي على طلب الصرف الخاص بك من قبل <strong>${safeActorName}</strong>، وتم تحويله للخزينة للصرف.`;
+      if (details.note) highlightNote = `ملاحظات الاعتماد: ${safeNote}`;
       break;
 
     case 'request_paid':
@@ -81,9 +98,9 @@ export function generateEmailContent(
       badgeBg = '#f0f9ff';
       messageIntro = `تم تحويل وصرف مبلغ طلب الصرف بالكامل عبر <strong>${req?.preferredPaymentMethod === 'instapay' ? 'إنستاباي' : req?.preferredPaymentMethod === 'bank_transfer' ? 'تحويل بنكي' : 'الخزينة النقدية'}</strong>.`;
       highlightNote = [
-        details.disbursedVaultName ? `الخزينة / الحساب المصدر: ${details.disbursedVaultName}` : '',
-        details.transactionRef ? `رقم الإيصال / المعاملة: ${details.transactionRef}` : '',
-        details.note ? `ملاحظات الصرف: ${details.note}` : ''
+        details.disbursedVaultName ? `الخزينة / الحساب المصدر: ${escapeHtml(details.disbursedVaultName)}` : '',
+        details.transactionRef ? `رقم الإيصال / المعاملة: ${escapeHtml(details.transactionRef)}` : '',
+        details.note ? `ملاحظات الصرف: ${safeNote}` : ''
       ].filter(Boolean).join('<br/>');
       break;
 
@@ -92,8 +109,8 @@ export function generateEmailContent(
       badgeTitle = 'مطلوب توضيح ومراجعة';
       badgeColor = '#4f46e5';
       badgeBg = '#eef2ff';
-      messageIntro = `تمت مراجعة طلبك من قبل <strong>${details.actorName || 'مدير المؤسسة'}</strong> ويرجى الرد على الاستفسار أدناه لاستكمال الإجراءات:`;
-      highlightNote = details.clarificationQuestion || details.note || 'يرجى مراجعة تفاصيل الفاتورة أو المستندات المرفقة.';
+      messageIntro = `تمت مراجعة طلبك من قبل <strong>${safeActorName}</strong> ويرجى الرد على الاستفسار أدناه لاستكمال الإجراءات:`;
+      highlightNote = escapeHtml(details.clarificationQuestion || details.note || 'يرجى مراجعة تفاصيل الفاتورة أو المستندات المرفقة.');
       break;
 
     case 'clarification_replied':
@@ -101,8 +118,8 @@ export function generateEmailContent(
       badgeTitle = 'تم تقديم إيضاح جديد';
       badgeColor = '#0d9488';
       badgeBg = '#f0fdfa';
-      messageIntro = `قام الموظف <strong>${req?.requesterName || 'مقدم الطلب'}</strong> بالرد على استفسار المراجعة. الطلب جاهز لإعادة الفحص.`;
-      if (details.note) highlightNote = details.note;
+      messageIntro = `قام الموظف <strong>${safeRequesterName}</strong> بالرد على استفسار المراجعة. الطلب جاهز لإعادة الفحص.`;
+      if (details.note) highlightNote = safeNote;
       break;
 
     case 'request_rejected':
@@ -111,16 +128,16 @@ export function generateEmailContent(
       badgeColor = '#e11d48';
       badgeBg = '#fff1f2';
       messageIntro = `نحيطك علماً بأنه تم رفض طلب الصرف المقدم من قبلك.`;
-      highlightNote = details.rejectionReason || details.note ? `سبب الرفض: ${details.rejectionReason || details.note}` : 'لم يتم توضيح سبب الرفض.';
+      highlightNote = details.rejectionReason || details.note ? `سبب الرفض: ${escapeHtml(details.rejectionReason || details.note)}` : 'لم يتم توضيح سبب الرفض.';
       break;
 
     case 'test_email':
     default:
-      subject = details.customSubject || `🧪 رسالة اختبار إشعارات نظام مصروفي`;
+      subject = escapeHtml(details.customSubject || `🧪 رسالة اختبار إشعارات نظام مصروفي`);
       badgeTitle = 'بريد اختباري ناجح';
       badgeColor = '#7c3aed';
       badgeBg = '#f5f3ff';
-      messageIntro = details.customMessage || `هذه رسالة اختبارية لتأكيد عمل محرك الإشعارات البريدية وتوافقه مع منصة مصروفي وFirebase بنجاح تام.`;
+      messageIntro = escapeHtml(details.customMessage || `هذه رسالة اختبارية لتأكيد عمل محرك الإشعارات البريدية وتوافقه مع منصة مصروفي وFirebase بنجاح تام.`);
       highlightNote = `تم إرسال هذا البريد التجريبي في: ${new Date().toLocaleString('ar-EG')}`;
       break;
   }
@@ -131,7 +148,7 @@ export function generateEmailContent(
     <table style="width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 13px; text-align: right;">
       <tr style="border-bottom: 1px solid #f1f5f9;">
         <td style="padding: 8px 12px; color: #64748b; font-weight: bold; width: 35%;">رقم الطلب:</td>
-        <td style="padding: 8px 12px; color: #0f172a; font-family: monospace; font-weight: bold;">${req.requestNumber}</td>
+        <td style="padding: 8px 12px; color: #0f172a; font-family: monospace; font-weight: bold;">${escapeHtml(req.requestNumber)}</td>
       </tr>
       <tr style="border-bottom: 1px solid #f1f5f9;">
         <td style="padding: 8px 12px; color: #64748b; font-weight: bold;">المؤسسة / الشركة:</td>
@@ -139,11 +156,11 @@ export function generateEmailContent(
       </tr>
       <tr style="border-bottom: 1px solid #f1f5f9;">
         <td style="padding: 8px 12px; color: #64748b; font-weight: bold;">مقدم الطلب:</td>
-        <td style="padding: 8px 12px; color: #0f172a;">${req.requesterName} (${req.requesterEmail || 'بدون إيميل'})</td>
+        <td style="padding: 8px 12px; color: #0f172a;">${escapeHtml(req.requesterName)} (${escapeHtml(req.requesterEmail || 'بدون إيميل')})</td>
       </tr>
       <tr style="border-bottom: 1px solid #f1f5f9;">
         <td style="padding: 8px 12px; color: #64748b; font-weight: bold;">بند الصرف والخدمة:</td>
-        <td style="padding: 8px 12px; color: #0f172a;">${req.serviceCategoryName || 'عام'} - ${req.title}</td>
+        <td style="padding: 8px 12px; color: #0f172a;">${escapeHtml(req.serviceCategoryName || 'عام')} - ${escapeHtml(req.title)}</td>
       </tr>
       <tr style="border-bottom: 1px solid #f1f5f9;">
         <td style="padding: 8px 12px; color: #64748b; font-weight: bold;">المبلغ المطلوب:</td>
@@ -154,7 +171,7 @@ export function generateEmailContent(
         <td style="padding: 8px 12px; color: #64748b; font-weight: bold;">بيانات التحويل المفضلة:</td>
         <td style="padding: 8px 12px; color: #334155;">
           ${req.preferredPaymentMethod === 'instapay' ? 'إنستاباي' : req.preferredPaymentMethod === 'bank_transfer' ? 'بنكي' : 'نقدي'} 
-          ${req.paymentAccountDetails ? `(${req.paymentAccountDetails})` : ''}
+          ${req.paymentAccountDetails ? `(${escapeHtml(req.paymentAccountDetails)})` : ''}
         </td>
       </tr>` : ''}
     </table>

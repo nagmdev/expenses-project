@@ -47,7 +47,9 @@ import {
   sendPasswordReset,
   adminCreateUserAccount,
   subscribeToAuth,
-  purgeSampleDataFromFirestore
+  purgeSampleDataFromFirestore,
+  runFirestoreTransaction,
+  getFirestoreDocRef
 } from '../lib/firebase';
 import { User as FirebaseUser } from 'firebase/auth';
 
@@ -480,13 +482,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
-  // Super admin emails list (loaded from default, env, local storage, and Firestore 'super_admins' collection)
+  // Super admin emails list (loaded strictly from system defaults, environment, and Firestore 'super_admins' collection - NEVER client localStorage)
   const [superAdminEmails, setSuperAdminEmails] = useState<string[]>(() => {
     const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com'];
     const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
     const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
-    const localAdmins = safeGetLocal<string[]>(SUPER_ADMINS_STORAGE_KEY, []);
-    return Array.from(new Set([...defaultAdmins, ...envList, ...localAdmins])).filter(e => e.toLowerCase().trim() !== 'marwanagib813@gmail.com');
+    return Array.from(new Set([...defaultAdmins, ...envList])).filter(e => e.toLowerCase().trim() !== 'marwanagib813@gmail.com');
   });
 
   // =========================================================================
@@ -508,16 +509,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const isSuperAdmin = useMemo(() => {
     if (!userEmail) return false;
     if (userEmail === 'marwanagib813@gmail.com') return false; // Explicitly ensure this email is never admin
-    if (userEmail === 'mahmoud@tieapps.com') return true;
-    if (superAdminEmails.some(e => e.trim().toLowerCase() === userEmail && e.trim().toLowerCase() !== 'marwanagib813@gmail.com')) return true;
-    if (userMemberRecord?.role === 'super_admin' && userEmail !== 'marwanagib813@gmail.com') return true;
+    // Super Admin status is strictly system-level; normal member role field cannot grant super admin
+    if (superAdminEmails.some(e => e.trim().toLowerCase() === userEmail)) return true;
     return false;
-  }, [userEmail, superAdminEmails, userMemberRecord]);
+  }, [userEmail, superAdminEmails]);
 
-  // Determine active role
+  // Determine active role (super_admin strictly reserved for verified system administrators)
   const resolvedRole: Role = useMemo(() => {
     if (isSuperAdmin) return 'super_admin';
-    if (userMemberRecord) return userMemberRecord.role;
+    if (userMemberRecord && userMemberRecord.role !== 'super_admin') return userMemberRecord.role;
     return 'employee';
   }, [isSuperAdmin, userMemberRecord]);
 
@@ -806,12 +806,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           seenIds.add(org.id);
           seenIdentity.add(normKey);
           dedupedList.push(org);
-        } else {
-          // Automatic Self-Healing: Purge duplicate document permanently from Firestore
-          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate company doc: "${org.name}" (${org.id})`);
-          if (isFirebaseConfigured() && getDb()) {
-            deleteFirestoreDoc('organizations', org.id).catch(() => {});
-          }
         }
       }
 
@@ -827,7 +821,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
-    // 2. Members Listener with Self-Healing Deduplication
+    // 2. Members Listener (In-memory Deduplication)
     const unsubMembers = onSnapshot(collection(db, 'members'), (snapshot) => {
       const list = snapshot.docs
         .map(d => {
@@ -849,11 +843,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           seenIds.add(mem.id);
           if (mem.userEmail) seenEmailOrg.add(emailKey);
           dedupedList.push(mem);
-        } else {
-          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate member doc: "${mem.userName}" (${mem.id})`);
-          if (isFirebaseConfigured() && getDb()) {
-            deleteFirestoreDoc('members', mem.id).catch(() => {});
-          }
         }
       }
 
@@ -863,7 +852,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[Firebase] Members onSnapshot error:', err);
     });
 
-    // 3. Services Listener with Self-Healing Deduplication
+    // 3. Services Listener (In-memory Deduplication)
     const unsubServices = onSnapshot(collection(db, 'services'), (snapshot) => {
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as ServiceCategory))
@@ -879,11 +868,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           seenIds.add(s.id);
           seenIdentity.add(key);
           dedupedList.push(s);
-        } else {
-          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate service doc: "${s.name}" (${s.id})`);
-          if (isFirebaseConfigured() && getDb()) {
-            deleteFirestoreDoc('services', s.id).catch(() => {});
-          }
         }
       }
 
@@ -893,7 +877,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[Firebase] Services onSnapshot error:', err);
     });
 
-    // 4. Providers Listener with Self-Healing Deduplication
+    // 4. Providers Listener (In-memory Deduplication)
     const unsubProviders = onSnapshot(collection(db, 'providers'), (snapshot) => {
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as ServiceProvider))
@@ -909,11 +893,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           seenIds.add(p.id);
           seenIdentity.add(key);
           dedupedList.push(p);
-        } else {
-          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate provider doc: "${p.name}" (${p.id})`);
-          if (isFirebaseConfigured() && getDb()) {
-            deleteFirestoreDoc('providers', p.id).catch(() => {});
-          }
         }
       }
 
@@ -923,7 +902,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[Firebase] Providers onSnapshot error:', err);
     });
 
-    // 5. Requests Listener with Real-Time Self-Healing Deduplication & Attachment Cleanup
+    // 5. Requests Listener with Attachment Cleanup (In-memory Deduplication)
     const unsubRequests = onSnapshot(collection(db, 'requests'), (snapshot) => {
       const list = snapshot.docs
         .map(d => {
@@ -959,12 +938,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           seenIds.add(req.id);
           if (numKey) seenReqNumbers.add(numKey);
           dedupedList.push(req);
-        } else {
-          // Automatic Self-Healing: Purge duplicate document permanently from Firestore
-          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate request doc: "${req.requestNumber}" (${req.id})`);
-          if (isFirebaseConfigured() && getDb()) {
-            deleteFirestoreDoc('requests', req.id).catch(() => {});
-          }
         }
       }
 
@@ -976,31 +949,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // 6. Super Admins Listener
     const unsubSuperAdmins = onSnapshot(collection(db, 'super_admins'), (snapshot) => {
-      // Self-healing: if marwanagib813 is in Firestore super_admins collection, purge it immediately
-      snapshot.docs.forEach(docSnap => {
-        const email = (docSnap.data().email || docSnap.id || '').toLowerCase().trim();
-        if (email === 'marwanagib813@gmail.com' || docSnap.id.toLowerCase().includes('marwanagib813')) {
-          console.warn('[Firestore Self-Healing] Auto-removing marwanagib813 from super_admins collection in Firestore');
-          if (isFirebaseConfigured() && getDb()) {
-            deleteFirestoreDoc('super_admins', docSnap.id).catch(() => {});
-          }
-        }
-      });
-
       const dbAdmins = snapshot.docs
         .map(d => (d.data().email || d.id || '').toLowerCase().trim())
         .filter(e => e && e !== 'marwanagib813@gmail.com');
-      const defaultAdmins = ['mahmoud@tieapps.com'];
+      const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com'];
       const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
       const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
       const merged = Array.from(new Set([...defaultAdmins, ...envList, ...dbAdmins])).filter(e => e !== 'marwanagib813@gmail.com');
       setSuperAdminEmails(merged);
-      safeSetLocal(SUPER_ADMINS_STORAGE_KEY, merged);
     }, (err) => {
       console.warn('[Firebase] Super admins onSnapshot error:', err);
     });
 
-    // 7. Payment Accounts Listener with Self-Healing Deduplication
+    // 7. Payment Accounts Listener (In-memory Deduplication)
     const unsubPaymentAccounts = onSnapshot(collection(db, 'paymentAccounts'), (snapshot) => {
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as PaymentAccount))
@@ -1016,11 +977,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           seenIds.add(p.id);
           seenIdentity.add(key);
           dedupedList.push(p);
-        } else {
-          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate payment account doc: "${p.name}" (${p.id})`);
-          if (isFirebaseConfigured() && getDb()) {
-            deleteFirestoreDoc('paymentAccounts', p.id).catch(() => {});
-          }
         }
       }
 
@@ -1030,7 +986,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('[Firebase] PaymentAccounts onSnapshot error:', err);
     });
 
-    // 8. Departments Listener with Self-Healing Deduplication
+    // 8. Departments Listener (In-memory Deduplication)
     const unsubDepartments = onSnapshot(collection(db, 'departments'), (snapshot) => {
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as Department))
@@ -1046,11 +1002,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           seenIds.add(d.id);
           seenIdentity.add(key);
           dedupedList.push(d);
-        } else {
-          console.warn(`[Firestore Self-Healing] Auto-deleting duplicate department doc: "${d.name}" (${d.id})`);
-          if (isFirebaseConfigured() && getDb()) {
-            deleteFirestoreDoc('departments', d.id).catch(() => {});
-          }
         }
       }
 
@@ -1673,10 +1624,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: 'يرجى تحديد المؤسسة أولاً لإضافة الموظف إليها.' };
       }
 
-      const effectiveEmail = data.email?.trim().toLowerCase() || `emp_${Date.now().toString().slice(-6)}@company.local`;
-      const effectivePassword = data.password?.trim() || '123456';
+      const generateSecurePassword = (): string => {
+        const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz';
+        const digits = '23456789';
+        const specials = '!@#$%';
+        const pool = letters + digits + specials;
+        const arr = new Uint8Array(10);
+        crypto.getRandomValues(arr);
+        return Array.from(arr).map(b => pool[b % pool.length]).join('');
+      };
 
-      let createdUid = `user-${Date.now()}`;
+      const effectiveEmail = data.email?.trim().toLowerCase() || `emp_${crypto.randomUUID().slice(0, 8)}@company.local`;
+      const effectivePassword = data.password?.trim() || generateSecurePassword();
+
+      let createdUid = `user-${crypto.randomUUID()}`;
       if (isFirebaseConfigured()) {
         try {
           const res = await adminCreateUserAccount(effectiveEmail, effectivePassword, data.name);
@@ -1701,8 +1662,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? 'مدخل بيانات' 
         : 'موظف';
 
+      const memberId = `mem-${crypto.randomUUID()}`;
       const newMember: OrganizationMember = {
-        id: `mem-${Date.now()}`,
+        id: memberId,
         orgId: targetOrgId,
         userId: createdUid,
         userName: data.name.trim(),
@@ -1717,6 +1679,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (isFirebaseConfigured() && getDb()) {
         await setFirestoreDoc('members', newMember.id, newMember);
+        // Persist user security profile for Firestore Security Rules verification
+        await setFirestoreDoc('users', createdUid, {
+          uid: createdUid,
+          email: effectiveEmail,
+          name: data.name.trim(),
+          role: data.role,
+          orgId: targetOrgId,
+          active: true,
+          updatedAt: new Date().toISOString(),
+        });
       }
 
       setRawMembers(prev => {
@@ -1873,6 +1845,55 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const deleteOrganization = async (orgId: string): Promise<{ success: boolean; message?: string }> => {
     const orgToDelete = rawOrganizations.find(o => o.id === orgId);
+    
+    // Check if the organization holds any financial records (requests, transactions, or vaults)
+    const hasFinancialRecords = 
+      rawRequests.some(r => r.orgId === orgId) || 
+      rawTransactions.some(t => t.orgId === orgId) || 
+      rawPaymentAccounts.some(a => a.orgId === orgId);
+
+    if (hasFinancialRecords) {
+      // Soft-Delete (Archive) to preserve financial ledger and historical referential integrity
+      if (isFirebaseConfigured() && getDb()) {
+        try {
+          await updateFirestoreDoc('organizations', orgId, {
+            archived: true,
+            status: 'archived',
+            archivedAt: new Date().toISOString()
+          });
+        } catch (err: any) {
+          console.error('[Firebase] Error archiving organization:', err);
+          return { success: false, message: err?.message || 'تعذر أرشفة الشركة في قاعدة البيانات' };
+        }
+      }
+
+      setRawOrganizations(prev => {
+        const updated = prev.map(o => o.id === orgId ? { ...o, archived: true, status: 'archived' as const } : o);
+        safeSetLocal(STORAGE_KEYS.ORGS, updated);
+        return updated;
+      });
+
+      if (activeOrgId === orgId) {
+        const remaining = rawOrganizations.filter(o => o.id !== orgId && !o.archived);
+        setActiveOrgId(remaining[0]?.id || '');
+      }
+
+      if (orgToDelete) {
+        await logAuditAction({
+          actionType: 'delete',
+          entityType: 'organization',
+          entityId: orgId,
+          entityName: orgToDelete.name,
+          orgId,
+          orgName: orgToDelete.name,
+          details: `تمت أرشفة وتعطيل الشركة "${orgToDelete.name}" (${orgToDelete.code}) مع الحفاظ على سجلاتها المالية.`,
+        });
+      }
+
+      return { success: true, message: 'تم أرشفة الشركة بنجاح والاحتفاظ ببياناتها المالية التاريخية.' };
+    }
+
+    // Clean hard delete for newly created organizations without any financial activity
     if (isFirebaseConfigured() && getDb()) {
       try {
         await deleteFirestoreDoc('organizations', orgId);
@@ -2170,6 +2191,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const deleteService = async (serviceId: string) => {
     const srv = rawServices.find(s => s.id === serviceId);
 
+    // Referential integrity check: if requests already reference this service category, deactivate it
+    const isUsedInRequests = rawRequests.some(r => r.serviceCategoryId === serviceId);
+    if (isUsedInRequests) {
+      if (isFirebaseConfigured() && getDb()) {
+        try {
+          await updateFirestoreDoc('services', serviceId, { active: false });
+        } catch (err) {
+          console.error('[Firebase] Error deactivating service:', err);
+        }
+      }
+      setRawServices(prev => {
+        const updated = prev.map(s => s.id === serviceId ? { ...s, active: false } : s);
+        safeSetLocal(STORAGE_KEYS.SERVICES, updated);
+        return updated;
+      });
+      if (srv) {
+        await logAuditAction({
+          actionType: 'update',
+          entityType: 'service',
+          entityId: serviceId,
+          entityName: srv.name,
+          orgId: srv.orgId,
+          details: `تم تعطيل بند الصرف "${srv.name}" (${srv.code}) لوجود طلبات صرف سابقة مرتبطة به.`,
+        });
+      }
+      return;
+    }
+
     if (isFirebaseConfigured() && getDb()) {
       try {
         await deleteFirestoreDoc('services', serviceId);
@@ -2202,7 +2251,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // 4. PROVIDERS
   const addProvider = async (providerData: Omit<ServiceProvider, 'id' | 'totalPaid'>) => {
-    const id = `prov-${Date.now()}`;
+    const id = `prov-${crypto.randomUUID()}`;
     const newProvider: ServiceProvider = {
       ...providerData,
       id,
@@ -2287,6 +2336,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const deleteProvider = async (providerId: string) => {
     const prov = rawProviders.find(p => p.id === providerId);
+
+    // Referential integrity check: if requests already reference this provider, deactivate it
+    const isUsedInRequests = rawRequests.some(r => r.providerId === providerId);
+    if (isUsedInRequests) {
+      if (isFirebaseConfigured() && getDb()) {
+        try {
+          await updateFirestoreDoc('providers', providerId, { active: false });
+        } catch (err) {
+          console.error('[Firebase] Error deactivating provider:', err);
+        }
+      }
+      setRawProviders(prev => {
+        const updated = prev.map(p => p.id === providerId ? { ...p, active: false } : p);
+        safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
+        return updated;
+      });
+      if (prov) {
+        await logAuditAction({
+          actionType: 'update',
+          entityType: 'provider',
+          entityId: providerId,
+          entityName: prov.name,
+          orgId: prov.orgId,
+          details: `تم تعطيل المورد "${prov.name}" لوجود طلبات صرف سابقة مرتبطة به.`,
+        });
+      }
+      return;
+    }
 
     if (isFirebaseConfigured() && getDb()) {
       try {
@@ -3115,43 +3192,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const service = rawServices.find(s => s.id === data.serviceCategoryId);
     const provider = rawProviders.find(p => p.id === data.providerId);
     
-    // Resolve organization ID rigorously
+    // Resolve organization ID rigorously (prevent cross-company data contamination)
     let targetOrgId = data.orgId || (effectiveOrgId && effectiveOrgId !== 'all' ? effectiveOrgId : '');
+    if (!targetOrgId && userMemberRecord?.orgId) {
+      targetOrgId = userMemberRecord.orgId;
+    }
     if (!targetOrgId) {
-      if (userMemberRecord?.orgId) {
-        targetOrgId = userMemberRecord.orgId;
-      } else if (rawOrganizations.length > 0) {
-        targetOrgId = rawOrganizations[0].id;
-      } else {
-        // Auto-provision default organization so no order is ever orphaned
-        const defaultOrgId = `org-${Date.now()}`;
-        const defaultOrg: Organization = {
-          id: defaultOrgId,
-          name: 'المؤسسة الرئيسية',
-          code: 'MAIN',
-          currency: data.currency || 'SAR',
-          budget: 500000,
-          description: 'المؤسسة الرئيسية المعتمدة للنظام',
-          createdAt: new Date().toISOString(),
-        };
-        targetOrgId = defaultOrgId;
-        if (isFirebaseConfigured() && getDb()) {
-          try {
-            await setFirestoreDoc('organizations', defaultOrgId, defaultOrg);
-          } catch (e) {
-            console.error('[Firebase] Auto create default org error:', e);
-          }
-        }
-        setRawOrganizations([defaultOrg]);
-        safeSetLocal(STORAGE_KEYS.ORGS, [defaultOrg]);
-      }
+      alert('يرجى تحديد الشركة أو المؤسسة التابع لها الموظف لتقديم طلب الصرف.');
+      return;
     }
 
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-    const attachments: RequestAttachment[] = (data.attachmentNames || []).map((name, i) => ({
-      id: `att-${Date.now()}-${i}`,
+    const attachments: RequestAttachment[] = (data.attachmentNames || []).map((name) => ({
+      id: `att-${crypto.randomUUID()}`,
       name,
       size: '1.2 MB',
       type: 'pdf',
@@ -3185,7 +3240,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const defaultProvName = isIncome ? (provider?.name || data.providerName || (data.paymentAccountDetails ? `المودع: ${data.paymentAccountDetails}` : 'توريد مباشر / عميل')) : (provider?.name || data.providerName || 'مورد عام');
 
     const newRequest: ExpenseRequest = {
-      id: `req-${Date.now()}`,
+      id: `req-${crypto.randomUUID()}`,
       requestNumber: `REQ-${Math.floor(10000 + Math.random() * 90000)}`,
       orgId: targetOrgId,
       requesterId: currentUser.id,
@@ -3651,6 +3706,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
+    const initialReq = rawRequests.find(r => r.id === requestId);
+    if (!initialReq) {
+      alert('عفواً، لم يتم العثور على طلب الصرف.');
+      return;
+    }
+
+    // State Guard: only approved requests can be disbursed
+    if (initialReq.status === 'disbursed') {
+      alert('تنبيه: تم صرف هذا الطلب مسبقاً ولا يمكن تكرار صرفه.');
+      return;
+    }
+    if (initialReq.status !== 'approved') {
+      alert('عفواً، لا يمكن صرف طلب غير معتمد رسمياً من الإدارة.');
+      return;
+    }
+
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
@@ -3660,34 +3731,255 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       details.paymentMethod === 'digital_wallet' ? 'محفظة إلكترونية' :
       details.paymentMethod === 'cash' ? 'نقداً / خزينة' : 'شيك مصرفي';
 
-    let disbursedAmount = 0;
-    let targetServiceId = '';
-    let targetProviderId = '';
-    let targetUpdated: ExpenseRequest | null = null;
+    const isIncome = initialReq.requestType === 'income';
+    const disbursedAmount = initialReq.amount;
 
+    // Resolve Target Payment Account
+    let targetAccountId = details.accountId || initialReq.targetAccountId;
+    if (!targetAccountId && details.bankName) {
+      const matching = rawPaymentAccounts.find(a => 
+        a.orgId === initialReq.orgId && 
+        (details.bankName?.includes(a.name) || details.bankName?.includes(a.accountIdentifier))
+      );
+      if (matching) targetAccountId = matching.id;
+    }
+    if (!targetAccountId) {
+      const methodKey = details.paymentMethod || initialReq.preferredPaymentMethod || (isIncome ? 'cash' : 'instapay');
+      const expectedType = 
+        methodKey === 'instapay' ? 'instapay' :
+        methodKey === 'digital_wallet' ? 'wallet' :
+        methodKey === 'bank_transfer' ? 'bank' : 'cash';
+      const matching = rawPaymentAccounts.find(a => a.orgId === initialReq.orgId && a.type === expectedType);
+      if (matching) targetAccountId = matching.id;
+    }
+
+    // If still no account and in local fallback, provide default
+    let localTargetAccount = targetAccountId ? rawPaymentAccounts.find(a => a.id === targetAccountId) : null;
+    if (!localTargetAccount) {
+      localTargetAccount = rawPaymentAccounts[0] || null;
+      if (localTargetAccount) targetAccountId = localTargetAccount.id;
+    }
+
+    // --- ATOMIC CLOUD FIRESTORE TRANSACTION ---
+    if (isFirebaseConfigured() && getDb() && targetAccountId) {
+      try {
+        await runFirestoreTransaction(async (transaction) => {
+          const reqRef = getFirestoreDocRef('requests', requestId);
+          const reqSnap = await transaction.get(reqRef);
+          if (!reqSnap.exists()) {
+            throw new Error('طلب الصرف غير موجود في قاعدة بيانات السيرفر.');
+          }
+          const dbReq = reqSnap.data() as ExpenseRequest;
+
+          // 1. Strict State Guard (Double-disbursement lock)
+          if (dbReq.status === 'disbursed') {
+            throw new Error('تم صرف هذا الطلب مسبقاً (حماية ضد الصرف المزدوج).');
+          }
+          if (dbReq.status !== 'approved') {
+            throw new Error('لا يمكن صرف طلب غير معتمد رسمياً من الإدارة.');
+          }
+
+          // 2. Target Payment Account Verification
+          const accountRef = getFirestoreDocRef('paymentAccounts', targetAccountId!);
+          const accountSnap = await transaction.get(accountRef);
+          if (!accountSnap.exists()) {
+            throw new Error('حساب الخزينة المحدد غير موجود في قاعدة البيانات.');
+          }
+          const dbAccount = accountSnap.data() as PaymentAccount;
+
+          // 3. Currency Check
+          const reqCurrency = (dbReq.currency || 'EGP').trim().toUpperCase();
+          const accCurrency = (dbAccount.currency || 'EGP').trim().toUpperCase();
+          if (reqCurrency !== accCurrency) {
+            throw new Error(`تعارض في العملات: عملة الطلب (${reqCurrency}) لا تطابق عملة الحساب (${accCurrency}).`);
+          }
+
+          // 4. Overdraft Check (Balance Policy)
+          const currentBal = Number(dbAccount.currentBalance ?? dbAccount.balance ?? 0);
+          if (!isIncome && currentBal < disbursedAmount) {
+            throw new Error(`رصيد الحساب غير كافٍ لإتمام الصرف: الرصيد المتوفر (${currentBal.toLocaleString()} ${accCurrency}) أقل من المبلغ المطلوب (${disbursedAmount.toLocaleString()}).`);
+          }
+
+          // 5. Parent Account Verification (Linked Bank Deduction)
+          const parentAccount = resolveParentBankAccount(dbAccount, rawPaymentAccounts);
+          let parentRef: any = null;
+          let dbParent: PaymentAccount | null = null;
+          if (parentAccount) {
+            parentRef = getFirestoreDocRef('paymentAccounts', parentAccount.id);
+            const parentSnap = await transaction.get(parentRef);
+            if (parentSnap.exists()) {
+              dbParent = parentSnap.data() as PaymentAccount;
+              const parentBal = Number(dbParent.currentBalance ?? dbParent.balance ?? 0);
+              if (!isIncome && parentBal < disbursedAmount) {
+                throw new Error(`رصيد الحساب البنكي الأم (${dbParent.name}) غير كافٍ لإتمام الخصم المرتبط.`);
+              }
+            }
+          }
+
+          // 6. Service & Provider verification
+          let serviceRef: any = null;
+          let dbService: ServiceCategory | null = null;
+          if (dbReq.serviceCategoryId) {
+            serviceRef = getFirestoreDocRef('services', dbReq.serviceCategoryId);
+            const sSnap = await transaction.get(serviceRef);
+            if (sSnap.exists()) dbService = sSnap.data() as ServiceCategory;
+          }
+
+          let providerRef: any = null;
+          let dbProvider: ServiceProvider | null = null;
+          if (dbReq.providerId) {
+            providerRef = getFirestoreDocRef('providers', dbReq.providerId);
+            const pSnap = await transaction.get(providerRef);
+            if (pSnap.exists()) dbProvider = pSnap.data() as ServiceProvider;
+          }
+
+          // --- EXECUTE ATOMIC COMMIT ---
+          const balAfter = isIncome ? currentBal + disbursedAmount : currentBal - disbursedAmount;
+          const newTotalIn = isIncome ? Number(dbAccount.totalIn || 0) + disbursedAmount : Number(dbAccount.totalIn || 0);
+          const newTotalOut = !isIncome ? Number(dbAccount.totalOut || 0) + disbursedAmount : Number(dbAccount.totalOut || 0);
+
+          const txId = `tx-${crypto.randomUUID()}`;
+          const newTx: AccountTransaction = {
+            id: txId,
+            orgId: dbAccount.orgId,
+            accountId: dbAccount.id,
+            accountName: dbAccount.name,
+            type: isIncome ? 'in' : 'out',
+            amount: disbursedAmount,
+            balanceBefore: currentBal,
+            balanceAfter: balAfter,
+            referenceType: 'request',
+            referenceId: dbReq.id,
+            referenceNumber: dbReq.requestNumber,
+            description: isIncome
+              ? `توريد وتحصيل للطلب رقم (${dbReq.requestNumber}) - ${dbReq.title}`
+              : `صرف وتحويل للطلب رقم (${dbReq.requestNumber}) - ${dbReq.title} - المستلم: ${dbReq.requesterName}`,
+            actorName: currentUser.name,
+            actorId: currentUser.id,
+            createdAt: now.toISOString(),
+          };
+
+          const disbursementObj: DisbursementDetails = {
+            paymentMethod: details.paymentMethod,
+            referenceNumber: details.referenceNumber,
+            bankName: details.bankName || dbAccount.name,
+            receiptUrl: details.receiptUrl,
+            notes: details.notes,
+            disbursedAt: dateFormatted,
+            disbursedBy: currentUser.name,
+          };
+
+          const updatedReqData = {
+            ...dbReq,
+            status: 'disbursed',
+            disbursement: disbursementObj,
+            timeline: [
+              ...(dbReq.timeline || []),
+              {
+                id: `tl-${crypto.randomUUID()}`,
+                status: 'disbursed',
+                title: isIncome ? 'تم تأكيد واستلام توريد المبلغ بنجاح' : 'تم تحويل وصرف المبلغ بنجاح',
+                description: `${isIncome ? 'طريقة الاستلام' : 'طريقة الصرف'}: ${methodLabel} | رقم العملية/المرجع: ${details.referenceNumber}`,
+                actorName: currentUser.name,
+                timestamp: dateFormatted,
+              }
+            ],
+            updatedAt: now.toISOString(),
+          };
+
+          // Commit Request update
+          transaction.update(reqRef, updatedReqData);
+
+          // Commit Account balance update
+          transaction.update(accountRef, {
+            currentBalance: balAfter,
+            balance: balAfter,
+            totalIn: newTotalIn,
+            totalOut: newTotalOut,
+            updatedAt: now.toISOString(),
+          });
+
+          // Commit Ledger Transaction
+          const txRef = getFirestoreDocRef('accountTransactions', txId);
+          transaction.set(txRef, newTx);
+
+          // Commit Linked Parent Bank Account (Dual Deduction)
+          if (parentRef && dbParent) {
+            const pBal = Number(dbParent.currentBalance ?? dbParent.balance ?? 0);
+            const pBalAfter = isIncome ? pBal + disbursedAmount : pBal - disbursedAmount;
+            const pTxId = `tx-parent-${crypto.randomUUID()}`;
+            const parentTx: AccountTransaction = {
+              id: pTxId,
+              orgId: dbParent.orgId,
+              accountId: dbParent.id,
+              accountName: dbParent.name,
+              type: isIncome ? 'in' : 'out',
+              amount: disbursedAmount,
+              balanceBefore: pBal,
+              balanceAfter: pBalAfter,
+              referenceType: 'request',
+              referenceId: dbReq.id,
+              referenceNumber: dbReq.requestNumber,
+              description: isIncome
+                ? `توريد وإيداع بنكي مرتبط تلقائياً عبر (${dbAccount.name}) للطلب رقم (${dbReq.requestNumber})`
+                : `خصم وتحويل بنكي مرتبط تلقائياً عبر (${dbAccount.name}) لصرف الطلب رقم (${dbReq.requestNumber})`,
+              actorName: currentUser.name,
+              actorId: currentUser.id,
+              createdAt: now.toISOString(),
+            };
+            transaction.update(parentRef, {
+              currentBalance: pBalAfter,
+              balance: pBalAfter,
+              totalIn: isIncome ? Number(dbParent.totalIn || 0) + disbursedAmount : Number(dbParent.totalIn || 0),
+              totalOut: !isIncome ? Number(dbParent.totalOut || 0) + disbursedAmount : Number(dbParent.totalOut || 0),
+              updatedAt: now.toISOString(),
+            });
+            const pTxRef = getFirestoreDocRef('accountTransactions', pTxId);
+            transaction.set(pTxRef, parentTx);
+          }
+
+          // Commit Service Category spentAmount
+          if (serviceRef && dbService && !isIncome) {
+            transaction.update(serviceRef, {
+              spentAmount: (Number(dbService.spentAmount) || 0) + disbursedAmount,
+              updatedAt: now.toISOString(),
+            });
+          }
+
+          // Commit Provider totalPaid
+          if (providerRef && dbProvider && !isIncome) {
+            transaction.update(providerRef, {
+              totalPaid: (Number(dbProvider.totalPaid) || 0) + disbursedAmount,
+              updatedAt: now.toISOString(),
+            });
+          }
+        });
+      } catch (txErr: any) {
+        console.error('[Atomic Financial Transaction Failed]', txErr);
+        alert(`فشلت المعاملة المالية الذرية: ${txErr?.message || 'حدث خطأ أثناء الصرف'}`);
+        return;
+      }
+    }
+
+    // Update In-Memory React State & Local Preferences
+    const disbursement: DisbursementDetails = {
+      paymentMethod: details.paymentMethod,
+      referenceNumber: details.referenceNumber,
+      bankName: details.bankName || localTargetAccount?.name || 'الخزينة المعتمدة',
+      receiptUrl: details.receiptUrl,
+      notes: details.notes,
+      disbursedAt: dateFormatted,
+      disbursedBy: currentUser.name,
+    };
+
+    let targetUpdated: ExpenseRequest | null = null;
     setRawRequests(prev => {
       const list = prev.map(req => {
         if (req.id !== requestId) return req;
-        disbursedAmount = req.amount;
-        targetServiceId = req.serviceCategoryId;
-        targetProviderId = req.providerId;
-
-        const disbursement: DisbursementDetails = {
-          paymentMethod: details.paymentMethod,
-          referenceNumber: details.referenceNumber,
-          bankName: details.bankName || 'انستاباي / المصرف الرئيسي',
-          receiptUrl: details.receiptUrl,
-          notes: details.notes,
-          disbursedAt: dateFormatted,
-          disbursedBy: currentUser.name,
-        };
-
-        const isIncome = req.requestType === 'income';
-
         const timeline = [
           ...req.timeline,
           {
-            id: `tl-${Date.now()}`,
+            id: `tl-${crypto.randomUUID()}`,
             status: 'disbursed' as const,
             title: isIncome ? 'تم تأكيد واستلام توريد المبلغ بنجاح' : 'تم تحويل وصرف المبلغ بنجاح',
             description: `${isIncome ? 'طريقة الاستلام' : 'طريقة الصرف'}: ${methodLabel} | رقم العملية/المرجع: ${details.referenceNumber}`,
@@ -3695,7 +3987,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             timestamp: dateFormatted,
           }
         ];
-
         const updated: ExpenseRequest = {
           ...req,
           status: 'disbursed' as const,
@@ -3710,202 +4001,121 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return list;
     });
 
-    // 1. Automatic Treasury / Payment Account Balance & Ledger Integration
-    if (disbursedAmount > 0 && targetUpdated) {
-      const reqObj = targetUpdated as ExpenseRequest;
-      const isIncome = reqObj.requestType === 'income';
+    if (localTargetAccount) {
+      const balanceBefore = Number(localTargetAccount.currentBalance ?? localTargetAccount.balance ?? 0);
+      const balanceAfter = isIncome ? balanceBefore + disbursedAmount : balanceBefore - disbursedAmount;
+      const newTotalIn = isIncome ? Number(localTargetAccount.totalIn || 0) + disbursedAmount : Number(localTargetAccount.totalIn || 0);
+      const newTotalOut = !isIncome ? Number(localTargetAccount.totalOut || 0) + disbursedAmount : Number(localTargetAccount.totalOut || 0);
 
-      let targetAccount = details.accountId ? rawPaymentAccounts.find(a => a.id === details.accountId) : null;
-      if (!targetAccount && reqObj.targetAccountId) {
-        targetAccount = rawPaymentAccounts.find(a => a.id === reqObj.targetAccountId) || null;
-      }
-      if (!targetAccount && details.bankName) {
-        targetAccount = rawPaymentAccounts.find(a => 
-          (a.orgId === reqObj.orgId) && 
-          (details.bankName?.includes(a.name) || details.bankName?.includes(a.accountIdentifier))
-        ) || null;
-      }
-      if (!targetAccount) {
-        const methodKey = details.paymentMethod || reqObj.preferredPaymentMethod || (isIncome ? 'cash' : 'instapay');
-        const expectedType = 
-          methodKey === 'instapay' ? 'instapay' :
-          methodKey === 'digital_wallet' ? 'wallet' :
-          methodKey === 'bank_transfer' ? 'bank' : 'cash';
-        targetAccount = rawPaymentAccounts.find(a => 
-          a.orgId === reqObj.orgId && a.type === expectedType
-        ) || null;
-      }
+      const updatedAccount: PaymentAccount = {
+        ...localTargetAccount,
+        currentBalance: balanceAfter,
+        balance: balanceAfter,
+        totalIn: newTotalIn,
+        totalOut: newTotalOut,
+        updatedAt: now.toISOString(),
+      };
 
-      if (!targetAccount && isIncome) {
-        const methodKey = details.paymentMethod || reqObj.preferredPaymentMethod || 'cash';
-        const expectedType = 
-          methodKey === 'instapay' ? 'instapay' :
-          methodKey === 'digital_wallet' ? 'wallet' :
-          methodKey === 'bank_transfer' ? 'bank' : 'cash';
-        const autoId = `vault-${expectedType}-${reqObj.orgId || Date.now()}`;
-        targetAccount = {
-          id: autoId,
-          orgId: reqObj.orgId,
-          name: expectedType === 'instapay' ? 'إنستاباي' : expectedType === 'wallet' ? 'محفظة إلكترونية' : expectedType === 'bank' ? 'حساب بنكي' : 'خزينة نقدية',
-          type: expectedType,
-          accountIdentifier: expectedType === 'instapay' ? 'main@instapay' : expectedType === 'wallet' ? '01000000000' : expectedType === 'bank' ? 'EG000000000000' : 'CASH',
-          initialBalance: 0,
-          currentBalance: 0,
-          balance: 0,
-          totalIn: 0,
-          totalOut: 0,
-          currency: reqObj.currency || 'EGP',
-          active: true,
-          createdAt: now.toISOString(),
-        };
-      }
+      const txId = `tx-${crypto.randomUUID()}`;
+      const newTx: AccountTransaction = {
+        id: txId,
+        orgId: localTargetAccount.orgId,
+        accountId: localTargetAccount.id,
+        accountName: localTargetAccount.name,
+        type: isIncome ? 'in' : 'out',
+        amount: disbursedAmount,
+        balanceBefore,
+        balanceAfter,
+        referenceType: 'request',
+        referenceId: initialReq.id,
+        referenceNumber: initialReq.requestNumber,
+        description: isIncome 
+          ? `توريد وتحصيل للطلب رقم (${initialReq.requestNumber}) - ${initialReq.title}`
+          : `صرف وتحويل للطلب رقم (${initialReq.requestNumber}) - ${initialReq.title} - المستلم: ${initialReq.requesterName}`,
+        actorName: currentUser.name,
+        actorId: currentUser.id,
+        createdAt: now.toISOString(),
+      };
 
-      if (targetAccount) {
-        const balanceBefore = Number(targetAccount.currentBalance ?? targetAccount.balance ?? 0);
-        const balanceAfter = isIncome ? balanceBefore + disbursedAmount : balanceBefore - disbursedAmount;
-        const newTotalIn = isIncome ? Number(targetAccount.totalIn || 0) + disbursedAmount : Number(targetAccount.totalIn || 0);
-        const newTotalOut = !isIncome ? Number(targetAccount.totalOut || 0) + disbursedAmount : Number(targetAccount.totalOut || 0);
+      const parentAccount = resolveParentBankAccount(localTargetAccount, rawPaymentAccounts);
+      let updatedParentAccount: PaymentAccount | null = null;
+      let parentTx: AccountTransaction | null = null;
 
-        const updatedAccount: PaymentAccount = {
-          ...targetAccount,
-          currentBalance: balanceAfter,
-          balance: balanceAfter,
-          totalIn: newTotalIn,
-          totalOut: newTotalOut,
+      if (parentAccount) {
+        const parentBalBefore = Number(parentAccount.currentBalance ?? parentAccount.balance ?? 0);
+        const parentBalAfter = isIncome ? parentBalBefore + disbursedAmount : parentBalBefore - disbursedAmount;
+        const parentNewIn = isIncome ? Number(parentAccount.totalIn || 0) + disbursedAmount : Number(parentAccount.totalIn || 0);
+        const parentNewOut = !isIncome ? Number(parentAccount.totalOut || 0) + disbursedAmount : Number(parentAccount.totalOut || 0);
+
+        updatedParentAccount = {
+          ...parentAccount,
+          currentBalance: parentBalAfter,
+          balance: parentBalAfter,
+          totalIn: parentNewIn,
+          totalOut: parentNewOut,
           updatedAt: now.toISOString(),
         };
 
-        const txId = `tx-${Date.now()}`;
-        const newTx: AccountTransaction = {
-          id: txId,
-          orgId: targetAccount.orgId,
-          accountId: targetAccount.id,
-          accountName: targetAccount.name,
+        const parentTxId = `tx-parent-${crypto.randomUUID()}`;
+        parentTx = {
+          id: parentTxId,
+          orgId: parentAccount.orgId,
+          accountId: parentAccount.id,
+          accountName: parentAccount.name,
           type: isIncome ? 'in' : 'out',
           amount: disbursedAmount,
-          balanceBefore,
-          balanceAfter,
+          balanceBefore: parentBalBefore,
+          balanceAfter: parentBalAfter,
           referenceType: 'request',
-          referenceId: reqObj.id,
-          referenceNumber: reqObj.requestNumber,
-          description: isIncome 
-            ? `توريد وتحصيل للطلب رقم (${reqObj.requestNumber}) - ${reqObj.title} - المودع: ${reqObj.paymentAccountDetails || reqObj.requesterName}`
-            : `صرف وتحويل للطلب رقم (${reqObj.requestNumber}) - ${reqObj.title} - المستلم: ${reqObj.requesterName}`,
+          referenceId: initialReq.id,
+          referenceNumber: initialReq.requestNumber,
+          description: isIncome
+            ? `توريد وإيداع بنكي مرتبط تلقائياً عبر (${localTargetAccount.name}) للطلب رقم (${initialReq.requestNumber})`
+            : `خصم وتحويل بنكي مرتبط تلقائياً عبر (${localTargetAccount.name}) لصرف الطلب رقم (${initialReq.requestNumber})`,
           actorName: currentUser.name,
           actorId: currentUser.id,
           createdAt: now.toISOString(),
         };
-
-        // Dual Bank Deduction / Credit if targetAccount is linked to a parent Bank
-        const parentAccount = resolveParentBankAccount(targetAccount, rawPaymentAccounts);
-        let updatedParentAccount: PaymentAccount | null = null;
-        let parentTx: AccountTransaction | null = null;
-
-        if (parentAccount) {
-          const parentBalBefore = Number(parentAccount.currentBalance ?? parentAccount.balance ?? 0);
-          const parentBalAfter = isIncome ? parentBalBefore + disbursedAmount : parentBalBefore - disbursedAmount;
-          const parentNewIn = isIncome ? Number(parentAccount.totalIn || 0) + disbursedAmount : Number(parentAccount.totalIn || 0);
-          const parentNewOut = !isIncome ? Number(parentAccount.totalOut || 0) + disbursedAmount : Number(parentAccount.totalOut || 0);
-
-          updatedParentAccount = {
-            ...parentAccount,
-            currentBalance: parentBalAfter,
-            balance: parentBalAfter,
-            totalIn: parentNewIn,
-            totalOut: parentNewOut,
-            updatedAt: now.toISOString(),
-          };
-
-          const parentTxId = `tx-parent-${Date.now()}`;
-          parentTx = {
-            id: parentTxId,
-            orgId: parentAccount.orgId,
-            accountId: parentAccount.id,
-            accountName: parentAccount.name,
-            type: isIncome ? 'in' : 'out',
-            amount: disbursedAmount,
-            balanceBefore: parentBalBefore,
-            balanceAfter: parentBalAfter,
-            referenceType: 'request',
-            referenceId: reqObj.id,
-            referenceNumber: reqObj.requestNumber,
-            description: isIncome
-              ? `توريد وإيداع بنكي مرتبط تلقائياً عبر (${targetAccount.name}) للطلب رقم (${reqObj.requestNumber}) - ${reqObj.title}`
-              : `خصم وتحويل بنكي مرتبط تلقائياً عبر (${targetAccount.name}) لصرف الطلب رقم (${reqObj.requestNumber}) - ${reqObj.title}`,
-            actorName: currentUser.name,
-            actorId: currentUser.id,
-            createdAt: now.toISOString(),
-          };
-        }
-
-        if (isFirebaseConfigured() && getDb()) {
-          setFirestoreDoc('paymentAccounts', targetAccount.id, updatedAccount).catch(console.error);
-          setFirestoreDoc('accountTransactions', txId, newTx).catch(console.error);
-          if (updatedParentAccount && parentTx) {
-            setFirestoreDoc('paymentAccounts', updatedParentAccount.id, updatedParentAccount).catch(console.error);
-            setFirestoreDoc('accountTransactions', parentTx.id, parentTx).catch(console.error);
-          }
-        }
-
-        setRawPaymentAccounts(prev => {
-          let list = prev.some(a => a.id === targetAccount!.id)
-            ? prev.map(a => a.id === targetAccount!.id ? updatedAccount : a)
-            : [updatedAccount, ...prev];
-          if (updatedParentAccount) {
-            list = list.map(a => a.id === updatedParentAccount!.id ? updatedParentAccount! : a);
-          }
-          safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, list);
-          return list;
-        });
-
-        setRawTransactions(prev => {
-          const newItems = parentTx ? [parentTx, newTx] : [newTx];
-          const updated = [...newItems, ...prev];
-          safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
-          return updated;
-        });
       }
+
+      setRawPaymentAccounts(prev => {
+        let list = prev.map(a => a.id === localTargetAccount!.id ? updatedAccount : a);
+        if (updatedParentAccount) {
+          list = list.map(a => a.id === updatedParentAccount!.id ? updatedParentAccount! : a);
+        }
+        safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, list);
+        return list;
+      });
+
+      setRawTransactions(prev => {
+        const newItems = parentTx ? [parentTx, newTx] : [newTx];
+        const updated = [...newItems, ...prev];
+        safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
+        return updated;
+      });
     }
 
-    // 2. Update spentAmount / totalPaid (for expense requests)
-    if (disbursedAmount > 0 && targetUpdated && (targetUpdated as ExpenseRequest).requestType !== 'income') {
-      if (targetServiceId) {
+    // Update Services and Providers totals in memory
+    if (disbursedAmount > 0 && !isIncome) {
+      if (initialReq.serviceCategoryId) {
         setRawServices(prev => {
           const updated = prev.map(s => {
-            if (s.id !== targetServiceId) return s;
-            const newSpent = s.spentAmount + disbursedAmount;
-            const newObj = { ...s, spentAmount: newSpent };
-            if (isFirebaseConfigured() && getDb()) {
-              setFirestoreDoc('services', s.id, newObj).catch(console.error);
-            }
-            return newObj;
+            if (s.id !== initialReq.serviceCategoryId) return s;
+            return { ...s, spentAmount: (Number(s.spentAmount) || 0) + disbursedAmount };
           });
           safeSetLocal(STORAGE_KEYS.SERVICES, updated);
           return updated;
         });
       }
-      if (targetProviderId) {
+      if (initialReq.providerId) {
         setRawProviders(prev => {
           const updated = prev.map(p => {
-            if (p.id !== targetProviderId) return p;
-            const newPaid = p.totalPaid + disbursedAmount;
-            const newObj = { ...p, totalPaid: newPaid };
-            if (isFirebaseConfigured() && getDb()) {
-              setFirestoreDoc('providers', p.id, newObj).catch(console.error);
-            }
-            return newObj;
+            if (p.id !== initialReq.providerId) return p;
+            return { ...p, totalPaid: (Number(p.totalPaid) || 0) + disbursedAmount };
           });
           safeSetLocal(STORAGE_KEYS.PROVIDERS, updated);
           return updated;
         });
-      }
-    }
-
-    if (targetUpdated && isFirebaseConfigured() && getDb()) {
-      try {
-        await setFirestoreDoc('requests', requestId, targetUpdated);
-      } catch (err) {
-        console.error('[Firebase] Error disbursing request in Firestore:', err);
       }
     }
 
@@ -3918,15 +4128,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Automated Email Dispatch: Notify Requester of disbursement
-    if (targetUpdated && (targetUpdated as ExpenseRequest).requesterEmail) {
+    if (initialReq.requesterEmail) {
       try {
-        const reqObj = targetUpdated as ExpenseRequest;
-        const targetOrg = rawOrganizations.find(o => o.id === reqObj.orgId);
-        const vault = rawPaymentAccounts.find(p => p.id === details.paymentMethod || p.accountIdentifier === details.referenceNumber);
-        sendNotificationEmail('request_paid', [reqObj.requesterEmail!], {
-          request: reqObj,
+        const targetOrg = rawOrganizations.find(o => o.id === initialReq.orgId);
+        sendNotificationEmail('request_paid', [initialReq.requesterEmail], {
+          request: targetUpdated || initialReq,
           org: targetOrg,
-          disbursedVaultName: vault?.name || details.bankName,
+          disbursedVaultName: localTargetAccount?.name || details.bankName,
           transactionRef: details.referenceNumber,
           note: details.notes,
           actorName: currentUser.name,

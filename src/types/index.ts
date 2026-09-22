@@ -9,6 +9,8 @@ export interface Organization {
   createdAt: string;
   updatedAt?: string;
   status?: 'active' | 'archived';
+  archived?: boolean;
+  archivedAt?: string;
 }
 
 export type Role = 'super_admin' | 'org_admin' | 'finance' | 'employee' | 'data_entry';

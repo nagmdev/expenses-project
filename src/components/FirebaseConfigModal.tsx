@@ -463,28 +463,71 @@ export const FirebaseConfigModal: React.FC<FirebaseConfigModalProps> = ({
                   </a>
                 </div>
                 <p className="text-amber-800 leading-relaxed text-xs mb-3">
-                  افتراضياً، ينشئ Firebase قواعد حظر تمنع أي قراءة أو كتابة (Permission Denied). لتفعيل الاتصال والمزامنة الفورية، انسخ الكود التالي وضعه في صفحة القواعد:
+                  تعتمد المنظومة قواعد أمان مؤسسية صارمة لعزل بيانات الشركات (Multi-Tenancy) وحماية السجلات المالية والتحقق من الصلاحيات (RBAC). انسخ القواعد المؤسسية أدناه وضعها في محرر القواعد:
                 </p>
 
                 <div className="relative">
-                  <pre className="p-4 bg-slate-900 text-emerald-400 font-mono text-xs rounded-xl overflow-x-auto text-left dir-ltr leading-relaxed shadow-inner">
+                  <pre className="p-4 bg-slate-900 text-emerald-400 font-mono text-xs rounded-xl overflow-x-auto text-left dir-ltr leading-relaxed shadow-inner max-h-60">
 {`rules_version = '2';
-
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isAuthenticated() { return request.auth != null; }
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        exists(/databases/$(database)/documents/super_admins/$(request.auth.uid)) ||
+        (request.auth.token.email != null && (
+          request.auth.token.email == 'mahmoud@tieapps.com' ||
+          request.auth.token.email == 'awadhsaudi2030@gmail.com'
+        ))
+      );
+    }
+    function getUserRecord() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function isOrgMember(orgId) {
+      return isSuperAdmin() || (isAuthenticated() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRecord().orgId == orgId) ||
+        exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId))
+      ));
+    }
+    function isOrgAdmin(orgId) { return isSuperAdmin() || (isOrgMember(orgId) && getUserRecord().role == 'org_admin'); }
+    function isFinance(orgId) { return isSuperAdmin() || (isOrgMember(orgId) && (getUserRecord().role == 'finance' || getUserRecord().role == 'org_admin')); }
+
+    match /users/{userId} {
+      allow read, create: if isAuthenticated() && (request.auth.uid == userId || isSuperAdmin());
+      allow update: if isSuperAdmin() || (isAuthenticated() && request.auth.uid == userId && request.resource.data.role == resource.data.role);
+    }
+    match /organizations/{orgId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isOrgMember(orgId));
+      allow write: if isSuperAdmin() || isOrgAdmin(orgId);
+    }
+    match /members/{memberId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
+      allow write: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+    }
+    match /requests/{requestId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId) || resource.data.requesterId == request.auth.uid);
+      allow create: if isAuthenticated() && isOrgMember(request.resource.data.orgId) && request.resource.data.status == 'pending';
+      allow update: if isSuperAdmin() || isOrgAdmin(resource.data.orgId) || (isFinance(resource.data.orgId) && request.resource.data.status == 'disbursed' && resource.data.status == 'approved');
+      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+    }
+    match /paymentAccounts/{accountId} {
+      allow read, write: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId));
+    }
+    match /accountTransactions/{txId} {
+      allow read, create: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId));
+    }
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if isSuperAdmin();
     }
   }
 }`}
                   </pre>
                   <button
                     type="button"
-                    onClick={() => copyToClipboard(`rules_version = '2';\n\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /{document=**} {\n      allow read, write: if true;\n    }\n  }\n}`, 'rules_main')}
+                    onClick={() => copyToClipboard(`rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    function isAuthenticated() { return request.auth != null; }\n    function isSuperAdmin() { return isAuthenticated() && (exists(/databases/$(database)/documents/super_admins/$(request.auth.uid)) || (request.auth.token.email != null && (request.auth.token.email == 'mahmoud@tieapps.com' || request.auth.token.email == 'awadhsaudi2030@gmail.com'))); }\n    function getUserRecord() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }\n    function isOrgMember(orgId) { return isSuperAdmin() || (isAuthenticated() && ((exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRecord().orgId == orgId) || exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId)))); }\n    function isOrgAdmin(orgId) { return isSuperAdmin() || (isOrgMember(orgId) && getUserRecord().role == 'org_admin'); }\n    function isFinance(orgId) { return isSuperAdmin() || (isOrgMember(orgId) && (getUserRecord().role == 'finance' || getUserRecord().role == 'org_admin')); }\n    match /users/{userId} { allow read, create: if isAuthenticated() && (request.auth.uid == userId || isSuperAdmin()); allow update: if isSuperAdmin() || (isAuthenticated() && request.auth.uid == userId && request.resource.data.role == resource.data.role); }\n    match /organizations/{orgId} { allow read: if isAuthenticated() && (isSuperAdmin() || isOrgMember(orgId)); allow write: if isSuperAdmin() || isOrgAdmin(orgId); }\n    match /members/{memberId} { allow read: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId)); allow write: if isSuperAdmin() || isOrgAdmin(resource.data.orgId); }\n    match /requests/{requestId} { allow read: if isAuthenticated() && (isSuperAdmin() || isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId) || resource.data.requesterId == request.auth.uid); allow create: if isAuthenticated() && isOrgMember(request.resource.data.orgId) && request.resource.data.status == 'pending'; allow update: if isSuperAdmin() || isOrgAdmin(resource.data.orgId) || (isFinance(resource.data.orgId) && request.resource.data.status == 'disbursed' && resource.data.status == 'approved'); allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId); }\n    match /paymentAccounts/{accountId} { allow read, write: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId)); }\n    match /accountTransactions/{txId} { allow read, create: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId)); }\n    match /{document=**} { allow read, write: if isSuperAdmin(); }\n  }\n}`, 'rules_main')}
                     className="absolute top-3 right-3 bg-slate-800/90 hover:bg-slate-700 text-white text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition cursor-pointer shadow-xs"
                   >
                     {copiedVar === 'rules_main' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-                    <span>{copiedVar === 'rules_main' ? 'تم النسخ!' : 'نسخ القواعد'}</span>
+                    <span>{copiedVar === 'rules_main' ? 'تم النسخ!' : 'نسخ القواعد المؤسسية'}</span>
                   </button>
                 </div>
 

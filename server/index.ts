@@ -5,7 +5,26 @@ import { initDB, dbAll, dbRun, dbGet } from './db.js';
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-app.use(cors());
+const allowedOrigins = [
+  'https://expenses-project-xi.vercel.app',
+  'https://expenses-project-ce1f9.firebaseapp.com',
+  'https://expenses-project-ce1f9.web.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:4173',
+];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+      callback(null, true);
+    } else {
+      callback(new Error('Blocked by CORS policy'));
+    }
+  },
+  credentials: true,
+}));
+
 app.use(express.json());
 
 // Initialize database
@@ -49,7 +68,13 @@ app.post('/api/organizations', async (req, res) => {
 // ======================= MEMBERS =======================
 app.get('/api/members', async (req, res) => {
   try {
-    const members = await dbAll('SELECT * FROM members ORDER BY joinedAt DESC');
+    const { orgId } = req.query;
+    let members;
+    if (orgId && orgId !== 'all') {
+      members = await dbAll('SELECT * FROM members WHERE orgId = ? ORDER BY joinedAt DESC', [String(orgId)]);
+    } else {
+      members = await dbAll('SELECT * FROM members ORDER BY joinedAt DESC');
+    }
     res.json(members.map(m => ({ ...m, active: Boolean(m.active) })));
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -86,7 +111,13 @@ app.delete('/api/members/:id', async (req, res) => {
 // ======================= SERVICES =======================
 app.get('/api/services', async (req, res) => {
   try {
-    const services = await dbAll('SELECT * FROM services');
+    const { orgId } = req.query;
+    let services;
+    if (orgId && orgId !== 'all') {
+      services = await dbAll('SELECT * FROM services WHERE orgId = ?', [String(orgId)]);
+    } else {
+      services = await dbAll('SELECT * FROM services');
+    }
     res.json(services);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -136,7 +167,13 @@ app.delete('/api/services/:id', async (req, res) => {
 // ======================= PROVIDERS =======================
 app.get('/api/providers', async (req, res) => {
   try {
-    const rows = await dbAll('SELECT * FROM providers');
+    const { orgId } = req.query;
+    let rows;
+    if (orgId && orgId !== 'all') {
+      rows = await dbAll('SELECT * FROM providers WHERE orgId = ?', [String(orgId)]);
+    } else {
+      rows = await dbAll('SELECT * FROM providers');
+    }
     const providers = rows.map(r => ({
       ...r,
       serviceCategoryIds: JSON.parse(r.serviceCategoryIds || '[]'),
@@ -240,7 +277,13 @@ const parseRequest = (row: any) => {
 
 app.get('/api/requests', async (req, res) => {
   try {
-    const rows = await dbAll('SELECT * FROM requests ORDER BY createdAt DESC');
+    const { orgId } = req.query;
+    let rows;
+    if (orgId && orgId !== 'all') {
+      rows = await dbAll('SELECT * FROM requests WHERE orgId = ? ORDER BY createdAt DESC', [String(orgId)]);
+    } else {
+      rows = await dbAll('SELECT * FROM requests ORDER BY createdAt DESC');
+    }
     res.json(rows.map(parseRequest));
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -495,6 +538,9 @@ app.put('/api/requests/:id/disburse', async (req, res) => {
     if (!reqRow) return res.status(404).json({ error: 'Request not found' });
 
     const current = parseRequest(reqRow);
+    if (current.status !== 'approved') {
+      return res.status(400).json({ error: `Cannot disburse request with status '${current.status}'. Must be approved.` });
+    }
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 

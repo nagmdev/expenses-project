@@ -27,8 +27,11 @@ import {
   onSnapshot,
   query,
   limit,
+  runTransaction,
   type Firestore,
   type DocumentData,
+  type DocumentReference,
+  type Transaction,
   type Unsubscribe,
   type CollectionReference,
 } from 'firebase/firestore';
@@ -501,6 +504,30 @@ export async function deleteFirestoreDoc(
 
   const docRef = doc(database, collectionName, docId);
   await deleteDoc(docRef);
+}
+
+/**
+ * Get a typed DocumentReference for use in Firestore transactions or direct queries
+ */
+export function getFirestoreDocRef(
+  collectionName: string,
+  docId: string
+): DocumentReference {
+  const database = getDb();
+  if (!database) throw new Error('Firestore not initialized');
+  return doc(database, collectionName, docId);
+}
+
+/**
+ * Execute an atomic transaction against Cloud Firestore.
+ * Guarantees serializable isolation, rollback on conflict/failure, and prevents race conditions.
+ */
+export async function runFirestoreTransaction<T>(
+  updateFunction: (transaction: Transaction) => Promise<T>
+): Promise<T> {
+  const database = getDb();
+  if (!database) throw new Error('Firestore not initialized');
+  return runTransaction(database, updateFunction);
 }
 
 /**

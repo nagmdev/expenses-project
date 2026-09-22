@@ -1,10 +1,227 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Bank-grade multi-tenant expense system
-    // Allows read and write for authenticated users (logged in via Email/Password or Google)
+
+    // =========================================================================
+    // HELPER FUNCTIONS & RBAC ENFORCEMENT
+    // =========================================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        exists(/databases/$(database)/documents/super_admins/$(request.auth.uid)) ||
+        (request.auth.token.email != null && (
+          request.auth.token.email == 'mahmoud@tieapps.com' ||
+          request.auth.token.email == 'awadhsaudi2030@gmail.com'
+        ))
+      );
+    }
+
+    function getUserRecord() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isOrgMember(orgId) {
+      return isSuperAdmin() || (
+        isAuthenticated() && (
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRecord().orgId == orgId) ||
+          exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId))
+        )
+      );
+    }
+
+    function isOrgAdmin(orgId) {
+      return isSuperAdmin() || (
+        isOrgMember(orgId) &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        getUserRecord().role == 'org_admin'
+      );
+    }
+
+    function isFinance(orgId) {
+      return isSuperAdmin() || (
+        isOrgMember(orgId) &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        (getUserRecord().role == 'finance' || getUserRecord().role == 'org_admin')
+      );
+    }
+
+    // Default deny for unhandled collections
     match /{document=**} {
-      allow read, write: if request.auth != null;
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // 1. SUPER ADMINS (System Management)
+    // =========================================================================
+    match /super_admins/{adminId} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 2. USERS (Profiles & Security Metadata)
+    // =========================================================================
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isSuperAdmin());
+      allow create: if isAuthenticated() && (request.auth.uid == userId || isSuperAdmin());
+      // Self-update permitted ONLY for display preferences, never for role/orgId escalation
+      allow update: if isSuperAdmin() || (
+        isAuthenticated() && request.auth.uid == userId &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.orgId == resource.data.orgId
+      );
+      allow delete: if isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 3. ORGANIZATIONS (Tenant Isolation)
+    // =========================================================================
+    match /organizations/{orgId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isOrgMember(orgId));
+      allow create: if isSuperAdmin();
+      allow update: if isSuperAdmin() || isOrgAdmin(orgId);
+      allow delete: if isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 4. MEMBERS (Company Users & RBAC)
+    // =========================================================================
+    match /members/{memberId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
+      allow create: if isSuperAdmin() || (isOrgAdmin(request.resource.data.orgId) && request.resource.data.role != 'super_admin');
+      allow update: if isSuperAdmin() || (
+        isOrgAdmin(resource.data.orgId) &&
+        request.resource.data.role != 'super_admin' &&
+        request.resource.data.orgId == resource.data.orgId
+      );
+      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+    }
+
+    // =========================================================================
+    // 5. SERVICES & CATEGORIES
+    // =========================================================================
+    match /services/{serviceId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
+      allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
+      allow update: if isSuperAdmin() || isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId);
+      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+    }
+
+    // =========================================================================
+    // 6. PROVIDERS & VENDORS
+    // =========================================================================
+    match /providers/{providerId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
+      allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
+      allow update: if isSuperAdmin() || isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId);
+      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+    }
+
+    // =========================================================================
+    // 7. DEPARTMENTS
+    // =========================================================================
+    match /departments/{deptId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
+      allow create, update, delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+    }
+
+    // =========================================================================
+    // 8. EXPENSE REQUESTS (Strict State Machine)
+    // =========================================================================
+    match /requests/{requestId} {
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() ||
+        isOrgAdmin(resource.data.orgId) ||
+        isFinance(resource.data.orgId) ||
+        resource.data.requesterId == request.auth.uid ||
+        resource.data.requesterEmail == request.auth.token.email
+      );
+
+      // Create: strictly pending, authenticated member of the organization
+      allow create: if isAuthenticated() &&
+        isOrgMember(request.resource.data.orgId) &&
+        request.resource.data.status == 'pending' &&
+        (request.resource.data.requesterId == request.auth.uid || isSuperAdmin() || isOrgAdmin(request.resource.data.orgId));
+
+      // Update: strictly guarded transitions
+      allow update: if isAuthenticated() && (
+        isSuperAdmin() ||
+        // Org Admin: can approve, reject, or request clarification
+        (isOrgAdmin(resource.data.orgId) && (
+          request.resource.data.status in ['approved', 'rejected', 'clarification_requested', 'pending']
+        )) ||
+        // Finance: can disburse ONLY IF status is currently approved
+        (isFinance(resource.data.orgId) && (
+          (request.resource.data.status == 'disbursed' && resource.data.status == 'approved') ||
+          (request.resource.data.status == resource.data.status)
+        )) ||
+        // Requester: can reply to clarification ONLY IF previously clarification_requested
+        ((resource.data.requesterId == request.auth.uid || resource.data.requesterEmail == request.auth.token.email) &&
+          resource.data.status == 'clarification_requested' &&
+          request.resource.data.status == 'pending' &&
+          request.resource.data.amount == resource.data.amount
+        )
+      );
+
+      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+    }
+
+    // =========================================================================
+    // 9. PAYMENT ACCOUNTS & TREASURY VAULTS
+    // =========================================================================
+    match /paymentAccounts/{accountId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId));
+      allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
+      allow update: if isSuperAdmin() || isFinance(resource.data.orgId);
+      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+    }
+
+    // =========================================================================
+    // 10. ACCOUNT TRANSACTIONS (Financial Ledger - Immutable)
+    // =========================================================================
+    match /accountTransactions/{txId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId));
+      allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
+      allow update, delete: if isSuperAdmin(); // Financial ledgers cannot be modified by standard users
+    }
+
+    // =========================================================================
+    // 11. PETTY CASH & CUSTODIES
+    // =========================================================================
+    match /custodies/{custodyId} {
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() ||
+        isFinance(resource.data.orgId) ||
+        resource.data.employeeId == request.auth.uid
+      );
+      allow create, update: if isSuperAdmin() || isFinance(request.resource.data.orgId);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /custodySettlements/{settlementId} {
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() ||
+        isFinance(resource.data.orgId) ||
+        resource.data.employeeId == request.auth.uid
+      );
+      allow create: if isAuthenticated() && (
+        isSuperAdmin() ||
+        isFinance(request.resource.data.orgId) ||
+        request.resource.data.employeeId == request.auth.uid
+      );
+      allow update, delete: if isSuperAdmin() || isFinance(resource.data.orgId);
+    }
+
+    // =========================================================================
+    // 12. AUDIT LOGS (Append-Only)
+    // =========================================================================
+    match /auditLogs/{logId} {
+      allow read: if isAuthenticated() && (isSuperAdmin() || isOrgAdmin(resource.data.orgId));
+      allow create: if isAuthenticated();
+      allow update, delete: if isSuperAdmin();
     }
   }
 }

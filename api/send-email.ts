@@ -6,9 +6,20 @@
  * 3. Fallback and direct health check
  */
 export default async function handler(req: any, res: any) {
-  // CORS configuration
+  // Production-grade CORS configuration
+  const origin = req.headers.origin || '';
+  const allowedOrigins = [
+    'https://expenses-project-xi.vercel.app',
+    'https://expenses-project-ce1f9.firebaseapp.com',
+    'https://expenses-project-ce1f9.web.app',
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://localhost:4173',
+  ];
+  const isOriginAllowed = !origin || allowedOrigins.includes(origin) || origin.endsWith('.vercel.app');
+
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Origin', isOriginAllowed ? (origin || '*') : 'https://expenses-project-xi.vercel.app');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
   res.setHeader(
     'Access-Control-Allow-Headers',
@@ -21,9 +32,9 @@ export default async function handler(req: any, res: any) {
 
   // Health check endpoint
   if (req.method === 'GET') {
-    const hasEnvResend = Boolean(process.env.Resend_API_KEY || process.env.RESEND_API_KEY || process.env.resend_api_key || process.env.VITE_RESEND_API_KEY);
-    const hasEnvBrevo = Boolean(process.env.BREVO_API_KEY || process.env.Brevo_API_KEY || process.env.brevo_api_key || process.env.VITE_BREVO_API_KEY);
-    const hasEnvGmail = Boolean(process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD || process.env.VITE_GMAIL_APP_PASSWORD);
+    const hasEnvResend = Boolean(process.env.Resend_API_KEY || process.env.RESEND_API_KEY);
+    const hasEnvBrevo = Boolean(process.env.BREVO_API_KEY || process.env.Brevo_API_KEY);
+    const hasEnvGmail = Boolean(process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASSWORD);
 
     return res.status(200).json({
       status: 'ok',
@@ -51,7 +62,6 @@ export default async function handler(req: any, res: any) {
       senderEmail = 'awadhsaudi2030@gmail.com',
       replyTo = 'awadhsaudi2030@gmail.com',
       provider = 'auto',
-      apiKey,
     } = parsedBody;
 
     if (!to || (Array.isArray(to) && to.length === 0)) {
@@ -70,37 +80,29 @@ export default async function handler(req: any, res: any) {
       return res.status(400).json({ error: 'No valid recipient email address provided.' });
     }
 
-    // Determine API Key and Provider
-    const activeGmailAppPass = (apiKey && !apiKey.startsWith('re_') && !apiKey.startsWith('xkeysib-') && apiKey.replace(/\s+/g, '').length === 16 ? apiKey : null)
-      || process.env.GMAIL_APP_PASSWORD 
-      || process.env.GMAIL_PASSWORD
-      || process.env.VITE_GMAIL_APP_PASSWORD;
+    // Determine API Key strictly from server-side environment secrets (never trust client payload)
+    const activeGmailAppPass = process.env.GMAIL_APP_PASSWORD 
+      || process.env.GMAIL_PASSWORD;
 
-    const activeBrevoKey = (apiKey && apiKey.startsWith('xkeysib-') ? apiKey : null) 
-      || process.env.BREVO_API_KEY 
-      || process.env.Brevo_API_KEY 
-      || process.env.brevo_api_key 
-      || process.env.VITE_BREVO_API_KEY;
+    const activeBrevoKey = process.env.BREVO_API_KEY 
+      || process.env.Brevo_API_KEY;
 
-    const activeResendKey = (apiKey && apiKey.startsWith('re_') ? apiKey : null) 
-      || process.env.Resend_API_KEY 
-      || process.env.RESEND_API_KEY 
-      || process.env.resend_api_key 
-      || process.env.VITE_RESEND_API_KEY;
+    const activeResendKey = process.env.Resend_API_KEY 
+      || process.env.RESEND_API_KEY;
 
     let targetProvider = provider;
     if (targetProvider === 'auto') {
       if (activeGmailAppPass) targetProvider = 'gmail';
       else if (activeBrevoKey) targetProvider = 'brevo';
       else if (activeResendKey) targetProvider = 'resend';
-      else if (apiKey) targetProvider = 'resend'; // Default guess
+      else targetProvider = 'gmail';
     }
 
     // -------------------------------------------------------------
     // Provider 0: Official Gmail SMTP (Direct from awadhsaudi2030@gmail.com)
     // -------------------------------------------------------------
     if (targetProvider === 'gmail') {
-      const passToUse = activeGmailAppPass || apiKey;
+      const passToUse = activeGmailAppPass;
       if (!passToUse) {
         return res.status(200).json({
           success: false,
