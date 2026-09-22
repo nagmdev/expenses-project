@@ -244,6 +244,8 @@ export interface PaymentAccount {
   type: PaymentAccountType;
   accountIdentifier: string; // IBAN, IPA (name@instapay), Mobile #, or Account #
   bankName?: string;
+  parentAccountId?: string; // معرف الحساب البنكي الرئيسي التابع له (للخصم المزدوج التلقائي)
+  parentAccountName?: string; // اسم الحساب البنكي الرئيسي
   balance?: number; // legacy alias
   initialBalance?: number;
   currentBalance?: number;

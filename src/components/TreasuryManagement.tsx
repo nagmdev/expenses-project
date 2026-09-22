@@ -48,7 +48,8 @@ export const TreasuryManagement: React.FC = () => {
     addPaymentAccount,
     updatePaymentAccount,
     deletePaymentAccount,
-    recordManualAccountAdjustment
+    recordManualAccountAdjustment,
+    resolveParentBankAccount
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
@@ -70,6 +71,7 @@ export const TreasuryManagement: React.FC = () => {
   const [accType, setAccType] = useState<PaymentAccountType>('instapay');
   const [accIdentifier, setAccIdentifier] = useState('');
   const [accBankName, setAccBankName] = useState('');
+  const [accParentAccountId, setAccParentAccountId] = useState('');
   const [accCurrency, setAccCurrency] = useState('EGP');
   const [accInitialBalance, setAccInitialBalance] = useState('');
   const [accDescription, setAccDescription] = useState('');
@@ -199,14 +201,15 @@ export const TreasuryManagement: React.FC = () => {
     setAccType('instapay');
     setAccIdentifier('');
     setAccBankName('');
+    const targetOrg = selectedOrgFilter !== 'all' 
+      ? selectedOrgFilter 
+      : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (orgList[0]?.id || ''));
+    const defaultBank = targetAccounts.find(a => a.orgId === targetOrg && a.type === 'bank');
+    setAccParentAccountId(defaultBank?.id || '');
     setAccCurrency(activeOrg?.currency || 'EGP');
     setAccInitialBalance('0');
     setAccDescription('');
-    setAccOrgId(
-      selectedOrgFilter !== 'all' 
-        ? selectedOrgFilter 
-        : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (orgList[0]?.id || ''))
-    );
+    setAccOrgId(targetOrg);
     setIsAccountModalOpen(true);
   };
 
@@ -216,6 +219,7 @@ export const TreasuryManagement: React.FC = () => {
     setAccType(acc.type);
     setAccIdentifier(acc.accountIdentifier);
     setAccBankName(acc.bankName || '');
+    setAccParentAccountId(acc.parentAccountId || '');
     setAccCurrency(acc.currency || 'EGP');
     setAccInitialBalance(String(acc.initialBalance ?? acc.currentBalance ?? 0));
     setAccDescription(acc.description || '');
@@ -229,6 +233,10 @@ export const TreasuryManagement: React.FC = () => {
 
     const initialNum = parseFloat(accInitialBalance) || 0;
     const finalOrgId = accOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || orgList[0]?.id || '';
+    
+    const parentBank = (accType === 'instapay' || accType === 'wallet') && accParentAccountId
+      ? targetAccounts.find(a => a.id === accParentAccountId)
+      : undefined;
 
     if (editingAccount) {
       await updatePaymentAccount(editingAccount.id, {
@@ -236,6 +244,8 @@ export const TreasuryManagement: React.FC = () => {
         type: accType,
         accountIdentifier: accIdentifier.trim(),
         bankName: accBankName.trim() || undefined,
+        parentAccountId: parentBank ? parentBank.id : undefined,
+        parentAccountName: parentBank ? parentBank.name : undefined,
         currency: accCurrency,
         description: accDescription.trim() || undefined,
       });
@@ -246,6 +256,8 @@ export const TreasuryManagement: React.FC = () => {
         type: accType,
         accountIdentifier: accIdentifier.trim(),
         bankName: accBankName.trim() || undefined,
+        parentAccountId: parentBank ? parentBank.id : undefined,
+        parentAccountName: parentBank ? parentBank.name : undefined,
         initialBalance: initialNum,
         currentBalance: initialNum,
         totalIn: 0,
@@ -557,6 +569,17 @@ export const TreasuryManagement: React.FC = () => {
                             <span className="font-bold text-emerald-800">{accOrg.name} ({accOrg.code})</span>
                           </div>
                         )}
+                        {(acc.type === 'instapay' || acc.type === 'wallet') && (
+                          <div className="flex items-center justify-between text-[10.5px] pt-1.5 border-t border-blue-100 bg-blue-50/70 -mx-3 px-3 py-1 rounded-b-xl">
+                            <span className="text-blue-700 flex items-center gap-1 font-bold">
+                              <Landmark className="h-3 w-3 text-blue-600 shrink-0" />
+                              خصم/إيداع مزدوج بـ:
+                            </span>
+                            <span className="font-black text-blue-950 truncate max-w-[140px]" title={acc.parentAccountName || resolveParentBankAccount(acc)?.name || 'الحساب البنكي الرئيسي'}>
+                              {acc.parentAccountName || resolveParentBankAccount(acc)?.name || 'الحساب البنكي الرئيسي'}
+                            </span>
+                          </div>
+                        )}
                       </div>
 
                       {/* Current Balance Display */}
@@ -847,6 +870,35 @@ export const TreasuryManagement: React.FC = () => {
                     placeholder="مثال: البنك التجاري الدولي CIB، بنك مصر، البنك الأهلي..."
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                   />
+                </div>
+              )}
+
+              {/* Linked Parent Bank Account for InstaPay / Digital Wallet (Dual Deduction) */}
+              {(accType === 'instapay' || accType === 'wallet') && (
+                <div className="bg-blue-50/80 border border-blue-200/90 rounded-2xl p-3.5 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Landmark className="h-4 w-4 text-blue-600 shrink-0" />
+                    <label className="block font-bold text-blue-950 text-xs">
+                      الحساب البنكي الرئيسي المرتبط به (للخصم والإيداع المزدوج التلقائي)
+                    </label>
+                  </div>
+                  <p className="text-[11px] text-blue-800 leading-relaxed">
+                    💡 حساب الإنستاباي والمحافظ الإلكترونية تكون مغذاة أو مربوطة بحساب بنكي رئيسي. عند اختيار الحساب البنكي، سيتم تلقائياً خصم أو إيداع نفس المبلغ في البنك مع كل حركة صرف أو توريد.
+                  </p>
+                  <select
+                    value={accParentAccountId}
+                    onChange={(e) => setAccParentAccountId(e.target.value)}
+                    className="w-full p-2.5 bg-white border border-blue-300 rounded-xl font-bold text-slate-800 text-xs"
+                  >
+                    <option value="">-- بدون ربط بنكي مباشر --</option>
+                    {targetAccounts
+                      .filter(a => a.orgId === (accOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || orgList[0]?.id) && a.type === 'bank' && (!editingAccount || a.id !== editingAccount.id))
+                      .map(bank => (
+                        <option key={bank.id} value={bank.id}>
+                          🏦 {bank.name} ({bank.accountIdentifier}) — الرصيد: {Number(bank.currentBalance ?? bank.balance ?? 0).toLocaleString()} {bank.currency}
+                        </option>
+                      ))}
+                  </select>
                 </div>
               )}
 

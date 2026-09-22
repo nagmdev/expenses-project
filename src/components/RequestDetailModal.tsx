@@ -36,7 +36,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     requestClarification, 
     replyClarification, 
     disburseRequest,
-    paymentAccounts
+    paymentAccounts,
+    resolveParentBankAccount
   } = useApp();
 
   const [activeAction, setActiveAction] = useState<'none' | 'approve' | 'reject' | 'clarify' | 'reply' | 'disburse'>('none');
@@ -688,6 +689,22 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                               </option>
                             ))}
                           </select>
+                          {(() => {
+                            const acc = companyAccounts.find(a => a.id === disburseAccountId) || companyAccounts[0];
+                            const parentBank = resolveParentBankAccount(acc);
+                            if (!parentBank) return null;
+                            return (
+                              <div className="mt-1.5 p-2 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 text-[11px] flex items-start gap-1.5">
+                                <Landmark className="h-3.5 w-3.5 text-blue-600 shrink-0 mt-0.5" />
+                                <div>
+                                  <span className="font-bold block">إيداع بنكي مزدوج تلقائي:</span>
+                                  <span className="text-[10.5px] text-blue-800 leading-relaxed">
+                                    حساب ({acc?.name}) مربوط بالحساب البنكي (<strong>{parentBank.name}</strong>). سيتم إضافة المبلغ في الحسابين تلقائياً.
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
 
                         <div>
@@ -738,13 +755,54 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                   ) : (
                     /* Expense disburse form */
                     <>
+                      {/* Account selection for expense */}
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          حساب / خزينة الصرف المحول منه (- OUT):
+                        </label>
+                        <select
+                          value={disburseAccountId}
+                          onChange={(e) => {
+                            setDisburseAccountId(e.target.value);
+                            const acc = companyAccounts.find(a => a.id === e.target.value);
+                            if (acc) {
+                              setBankName(`${acc.name} (${acc.accountIdentifier})`);
+                              setPaymentMethod(mapAccountTypeToPaymentMethod(acc.type));
+                            }
+                          }}
+                          className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-xs font-bold"
+                        >
+                          {companyAccounts.map(acc => (
+                            <option key={acc.id} value={acc.id}>
+                              {acc.name} — {acc.type === 'bank' ? 'حساب بنكي' : acc.type === 'instapay' ? 'انستاباي' : 'خزينة'} ({acc.accountIdentifier}) - الرصيد: {(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency || 'EGP'}
+                            </option>
+                          ))}
+                        </select>
+                        {(() => {
+                          const acc = companyAccounts.find(a => a.id === disburseAccountId) || companyAccounts[0];
+                          const parentBank = resolveParentBankAccount(acc);
+                          if (!parentBank) return null;
+                          return (
+                            <div className="mt-1.5 p-2 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 text-[11px] flex items-start gap-1.5">
+                              <Landmark className="h-3.5 w-3.5 text-blue-600 shrink-0 mt-0.5" />
+                              <div>
+                                <span className="font-bold block">خصم بنكي مزدوج تلقائي:</span>
+                                <span className="text-[10.5px] text-blue-800 leading-relaxed">
+                                  حساب ({acc?.name}) مربوط بالحساب البنكي (<strong>{parentBank.name}</strong>). سيتم خصم مبلغ الصرف تلقائياً من هذا الحساب ومن الحساب البنكي الرئيسي معاً.
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <div>
                           <label className="block text-[11px] font-bold text-slate-600 mb-1">طريقة الدفع:</label>
                           <select
                             value={paymentMethod}
                             onChange={(e: any) => setPaymentMethod(e.target.value)}
-                            className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs"
+                            className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold"
                           >
                             <option value="bank_transfer">تحويل بنكي</option>
                             <option value="instapay">إنستاباي</option>
@@ -761,7 +819,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                             required
                             value={referenceNumber}
                             onChange={(e) => setReferenceNumber(e.target.value)}
-                            className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-mono"
+                            className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-mono font-bold"
                           />
                         </div>
 

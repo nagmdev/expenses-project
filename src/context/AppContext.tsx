@@ -61,6 +61,27 @@ export {
 
 export const SUPER_ADMINS_STORAGE_KEY = 'expenses_super_admin_emails_v3';
 
+/**
+ * Intelligent helper to resolve the underlying linked parent bank account for an InstaPay or Wallet account.
+ * Follows Egyptian banking practices: InstaPay and electronic wallets are directly linked to / debited from bank accounts.
+ */
+export const resolveParentBankAccount = (
+  account: PaymentAccount | null | undefined, 
+  allAccounts: PaymentAccount[]
+): PaymentAccount | null => {
+  if (!account || (account.type !== 'instapay' && account.type !== 'wallet')) {
+    return null;
+  }
+  // 1. Explicit parent account ID if set
+  if (account.parentAccountId) {
+    const parent = allAccounts.find(a => a.id === account.parentAccountId);
+    if (parent && parent.id !== account.id) return parent;
+  }
+  // 2. Intelligent fallback: find the primary active bank account of the same organization
+  const orgBank = allAccounts.find(a => a.orgId === account.orgId && a.type === 'bank' && a.id !== account.id);
+  return orgBank || null;
+};
+
 const STORAGE_KEYS = {
   ORGS: 'expenses_organizations_v3',
   MEMBERS: 'expenses_members_v3',
@@ -284,6 +305,7 @@ interface AppContextType {
   deletePaymentAccount: (accountId: string) => Promise<void>;
   togglePaymentAccountStatus: (accountId: string, active: boolean) => Promise<void>;
   recordManualAccountAdjustment: (accountId: string, type: TransactionType, amount: number, description: string) => Promise<void>;
+  resolveParentBankAccount: (account: PaymentAccount | null | undefined) => PaymentAccount | null;
 
   // Petty Cash & Custodies (العهد النقدية وتصفيتها)
   custodies: PettyCashCustody[];
@@ -1268,6 +1290,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const hasWallet = orgAccounts.some(a => a.type === 'wallet');
       const hasBank = orgAccounts.some(a => a.type === 'bank');
 
+      const existingBank = orgAccounts.find(a => a.type === 'bank');
+      const bankId = existingBank ? existingBank.id : `vault-bank-${org.id}`;
+      const bankName = existingBank ? existingBank.name : `حساب بنكي رئيسي (${org.name})`;
+
+      if (!hasBank) {
+        newAccountsToAppend.push({
+          id: bankId,
+          orgId: org.id,
+          name: bankName,
+          type: 'bank',
+          accountIdentifier: `EG00${orgCode}00000000000000`,
+          bankName: 'البنك التجاري الدولي CIB / البنك الأهلي',
+          balance: 0,
+          initialBalance: 0,
+          currentBalance: 0,
+          totalIn: 0,
+          totalOut: 0,
+          currency: org.currency || 'EGP',
+          active: true,
+          description: `الحساب المصرفي البنكي الرئيسي لـ ${org.name}`,
+          createdAt: now,
+        });
+      }
+
       if (!hasCash) {
         newAccountsToAppend.push({
           id: `vault-cash-${org.id}`,
@@ -1294,6 +1340,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           name: `إنستاباي (${org.name})`,
           type: 'instapay',
           accountIdentifier: `${orgCode.toLowerCase()}@instapay`,
+          parentAccountId: bankId,
+          parentAccountName: bankName,
           balance: 0,
           initialBalance: 0,
           currentBalance: 0,
@@ -1301,7 +1349,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           totalOut: 0,
           currency: org.currency || 'EGP',
           active: true,
-          description: `حساب استقبال وتحويلات إنستاباي لـ ${org.name}`,
+          description: `حساب استقبال وتحويلات إنستاباي لـ ${org.name} (مربوط بالبنك)`,
           createdAt: now,
         });
       }
@@ -1313,6 +1361,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           name: `محفظة إلكترونية (${org.name})`,
           type: 'wallet',
           accountIdentifier: `01000000000`,
+          parentAccountId: bankId,
+          parentAccountName: bankName,
           balance: 0,
           initialBalance: 0,
           currentBalance: 0,
@@ -1320,27 +1370,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           totalOut: 0,
           currency: org.currency || 'EGP',
           active: true,
-          description: `محفظة كاش إلكترونية (فودافون/أورانج/اتصالات/وي) لـ ${org.name}`,
-          createdAt: now,
-        });
-      }
-
-      if (!hasBank) {
-        newAccountsToAppend.push({
-          id: `vault-bank-${org.id}`,
-          orgId: org.id,
-          name: `حساب بنكي رئيسي (${org.name})`,
-          type: 'bank',
-          accountIdentifier: `EG00${orgCode}00000000000000`,
-          bankName: 'البنك التجاري الدولي CIB / البنك الأهلي',
-          balance: 0,
-          initialBalance: 0,
-          currentBalance: 0,
-          totalIn: 0,
-          totalOut: 0,
-          currency: org.currency || 'EGP',
-          active: true,
-          description: `الحساب المصرفي البنكي الرئيسي لـ ${org.name}`,
+          description: `محفظة كاش إلكترونية (فودافون/أورانج/اتصالات/وي) لـ ${org.name} (مربوطة بالبنك)`,
           createdAt: now,
         });
       }
@@ -1363,6 +1393,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
   }, [rawOrganizations, rawPaymentAccounts.length]);
+
+  // Self-Healing: Automatically ensure existing orphan InstaPay/Wallet accounts are linked to their organization's Bank
+  useEffect(() => {
+    let hasUpdates = false;
+    const updatedAccounts = rawPaymentAccounts.map(acc => {
+      if ((acc.type === 'instapay' || acc.type === 'wallet') && !acc.parentAccountId) {
+        const orgBank = rawPaymentAccounts.find(a => a.orgId === acc.orgId && a.type === 'bank' && a.id !== acc.id);
+        if (orgBank) {
+          hasUpdates = true;
+          return {
+            ...acc,
+            parentAccountId: orgBank.id,
+            parentAccountName: orgBank.name,
+          };
+        }
+      }
+      return acc;
+    });
+
+    if (hasUpdates) {
+      console.info('[Self-Healing] Linked orphan InstaPay/Wallet accounts to their parent Bank account.');
+      setRawPaymentAccounts(updatedAccounts);
+      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updatedAccounts);
+      if (isFirebaseConfigured() && getDb()) {
+        updatedAccounts.forEach(acc => {
+          if (acc.parentAccountId) {
+            updateFirestoreDoc('paymentAccounts', acc.id, {
+              parentAccountId: acc.parentAccountId,
+              parentAccountName: acc.parentAccountName,
+            }).catch(() => {});
+          }
+        });
+      }
+    }
+  }, [rawPaymentAccounts.length]);
 
   // Refresh data: sync with local Express API if present and Firebase is not active
   const refreshData = useCallback(async () => {
@@ -2445,23 +2510,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString(),
     };
 
+    // Dual Bank Deduction / Credit if this account is linked to a parent Bank
+    const parentAccount = resolveParentBankAccount(account, rawPaymentAccounts);
+    let updatedParentAccount: PaymentAccount | null = null;
+    let parentTx: AccountTransaction | null = null;
+
+    if (parentAccount) {
+      const parentBalBefore = Number(parentAccount.currentBalance ?? parentAccount.balance ?? 0);
+      const parentBalAfter = type === 'in' ? parentBalBefore + numAmount : parentBalBefore - numAmount;
+      const parentNewIn = type === 'in' ? Number(parentAccount.totalIn || 0) + numAmount : Number(parentAccount.totalIn || 0);
+      const parentNewOut = type === 'out' ? Number(parentAccount.totalOut || 0) + numAmount : Number(parentAccount.totalOut || 0);
+
+      updatedParentAccount = {
+        ...parentAccount,
+        currentBalance: parentBalAfter,
+        balance: parentBalAfter,
+        totalIn: parentNewIn,
+        totalOut: parentNewOut,
+        updatedAt: new Date().toISOString(),
+      };
+
+      const parentTxId = `tx-parent-${Date.now()}`;
+      parentTx = {
+        id: parentTxId,
+        orgId: parentAccount.orgId,
+        accountId: parentAccount.id,
+        accountName: parentAccount.name,
+        type,
+        amount: numAmount,
+        balanceBefore: parentBalBefore,
+        balanceAfter: parentBalAfter,
+        referenceType: 'manual_adjustment',
+        description: `تسوية وتعديل رصيد تلقائي بالحساب البنكي مرتبط بـ (${account.name}): ${description.trim() || (type === 'in' ? 'إيداع نقدي' : 'سحب نقدي')}`,
+        actorName: currentUser.name,
+        actorId: currentUser.id,
+        createdAt: new Date().toISOString(),
+      };
+    }
+
     if (isFirebaseConfigured() && getDb()) {
       try {
         await updateFirestoreDoc('paymentAccounts', accountId, updatedAccount);
         await setFirestoreDoc('accountTransactions', transId, newTransaction);
+        if (updatedParentAccount && parentTx) {
+          await updateFirestoreDoc('paymentAccounts', updatedParentAccount.id, updatedParentAccount);
+          await setFirestoreDoc('accountTransactions', parentTx.id, parentTx);
+        }
       } catch (err) {
         console.error('[Firebase] Error recording manual adjustment:', err);
       }
     }
 
     setRawPaymentAccounts(prev => {
-      const updated = prev.map(a => a.id === accountId ? updatedAccount : a);
+      let updated = prev.map(a => a.id === accountId ? updatedAccount : a);
+      if (updatedParentAccount) {
+        updated = updated.map(a => a.id === updatedParentAccount!.id ? updatedParentAccount! : a);
+      }
       safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
       return updated;
     });
 
     setRawTransactions(prev => {
-      const updated = [newTransaction, ...prev];
+      const newItems = parentTx ? [parentTx, newTransaction] : [newTransaction];
+      const updated = [...newItems, ...prev];
       safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
       return updated;
     });
@@ -2532,6 +2643,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString(),
     };
 
+    // Dual Bank Deduction if sourceAccount is linked to a parent Bank
+    const parentAccount = resolveParentBankAccount(sourceAccount, rawPaymentAccounts);
+    let updatedParentAccount: PaymentAccount | null = null;
+    let parentTx: AccountTransaction | null = null;
+
+    if (parentAccount) {
+      const parentBalBefore = Number(parentAccount.currentBalance ?? parentAccount.balance ?? 0);
+      const parentBalAfter = parentBalBefore - numAmount;
+      const parentNewOut = Number(parentAccount.totalOut || 0) + numAmount;
+
+      updatedParentAccount = {
+        ...parentAccount,
+        currentBalance: parentBalAfter,
+        balance: parentBalAfter,
+        totalOut: parentNewOut,
+        updatedAt: new Date().toISOString(),
+      };
+
+      const parentTxId = `tx-parent-${Date.now()}`;
+      parentTx = {
+        id: parentTxId,
+        orgId: parentAccount.orgId || orgId,
+        accountId: parentAccount.id,
+        accountName: parentAccount.name,
+        type: 'out',
+        amount: numAmount,
+        balanceBefore: parentBalBefore,
+        balanceAfter: parentBalAfter,
+        referenceType: 'custody',
+        referenceId: custodyId,
+        referenceNumber: custodyNumber,
+        description: `خصم تلقائي من الحساب البنكي مقابل صرف عهدة نقدية عبر (${sourceAccount.name}) للموظف ${employeeName}`,
+        actorName: currentUser.name || 'مدير النظام',
+        actorId: currentUser.id,
+        createdAt: new Date().toISOString(),
+      };
+    }
+
     const newCustody: PettyCashCustody = {
       id: custodyId,
       orgId,
@@ -2557,6 +2706,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         await setFirestoreDoc('pettyCashCustodies', custodyId, newCustody);
         await updateFirestoreDoc('paymentAccounts', sourceAccountId, updatedAccount);
         await setFirestoreDoc('accountTransactions', txId, newTransaction);
+        if (updatedParentAccount && parentTx) {
+          await updateFirestoreDoc('paymentAccounts', updatedParentAccount.id, updatedParentAccount);
+          await setFirestoreDoc('accountTransactions', parentTx.id, parentTx);
+        }
       } catch (err) {
         console.error('[Firebase] Error issuing custody:', err);
       }
@@ -2569,13 +2722,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     setRawPaymentAccounts(prev => {
-      const updated = prev.map(a => a.id === sourceAccountId ? updatedAccount : a);
+      let updated = prev.map(a => a.id === sourceAccountId ? updatedAccount : a);
+      if (updatedParentAccount) {
+        updated = updated.map(a => a.id === updatedParentAccount!.id ? updatedParentAccount! : a);
+      }
       safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
       return updated;
     });
 
     setRawTransactions(prev => {
-      const updated = [newTransaction, ...prev];
+      const newItems = parentTx ? [parentTx, newTransaction] : [newTransaction];
+      const updated = [...newItems, ...prev];
       safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
       return updated;
     });
@@ -2737,6 +2894,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString(),
     };
 
+    // Dual Bank Deduction if sourceAccount is linked to a parent Bank
+    const parentAccount = resolveParentBankAccount(sourceAccount, rawPaymentAccounts);
+    let updatedParentAccount: PaymentAccount | null = null;
+    let parentTx: AccountTransaction | null = null;
+
+    if (parentAccount) {
+      const parentBalBefore = Number(parentAccount.currentBalance ?? parentAccount.balance ?? 0);
+      const parentBalAfter = parentBalBefore - numAmount;
+      const parentNewOut = Number(parentAccount.totalOut || 0) + numAmount;
+
+      updatedParentAccount = {
+        ...parentAccount,
+        currentBalance: parentBalAfter,
+        balance: parentBalAfter,
+        totalOut: parentNewOut,
+        updatedAt: new Date().toISOString(),
+      };
+
+      const parentTxId = `tx-parent-${Date.now()}`;
+      parentTx = {
+        id: parentTxId,
+        orgId: parentAccount.orgId || custody.orgId,
+        accountId: parentAccount.id,
+        accountName: parentAccount.name,
+        type: 'out',
+        amount: numAmount,
+        balanceBefore: parentBalBefore,
+        balanceAfter: parentBalAfter,
+        referenceType: 'custody',
+        referenceId: custodyId,
+        referenceNumber: custody.custodyNumber,
+        description: `خصم تلقائي من الحساب البنكي مقابل استعاضة عهدة نقدية عبر (${sourceAccount.name}) للموظف ${custody.employeeName} (${custody.custodyNumber})`,
+        actorName: currentUser.name || 'مدير النظام',
+        actorId: currentUser.id,
+        createdAt: new Date().toISOString(),
+      };
+    }
+
     const updatedCustody: PettyCashCustody = {
       ...custody,
       totalAmount: custody.totalAmount + numAmount,
@@ -2751,6 +2946,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         await updateFirestoreDoc('pettyCashCustodies', custodyId, updatedCustody);
         await updateFirestoreDoc('paymentAccounts', sourceAccountId, updatedAccount);
         await setFirestoreDoc('accountTransactions', txId, newTransaction);
+        if (updatedParentAccount && parentTx) {
+          await updateFirestoreDoc('paymentAccounts', updatedParentAccount.id, updatedParentAccount);
+          await setFirestoreDoc('accountTransactions', parentTx.id, parentTx);
+        }
       } catch (err) {
         console.error('[Firebase] Error replenishing custody:', err);
       }
@@ -2763,13 +2962,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     setRawPaymentAccounts(prev => {
-      const updated = prev.map(a => a.id === sourceAccountId ? updatedAccount : a);
+      let updated = prev.map(a => a.id === sourceAccountId ? updatedAccount : a);
+      if (updatedParentAccount) {
+        updated = updated.map(a => a.id === updatedParentAccount!.id ? updatedParentAccount! : a);
+      }
       safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
       return updated;
     });
 
     setRawTransactions(prev => {
-      const updated = [newTransaction, ...prev];
+      const newItems = parentTx ? [parentTx, newTransaction] : [newTransaction];
+      const updated = [...newItems, ...prev];
       safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
       return updated;
     });
@@ -3593,22 +3796,71 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           createdAt: now.toISOString(),
         };
 
+        // Dual Bank Deduction / Credit if targetAccount is linked to a parent Bank
+        const parentAccount = resolveParentBankAccount(targetAccount, rawPaymentAccounts);
+        let updatedParentAccount: PaymentAccount | null = null;
+        let parentTx: AccountTransaction | null = null;
+
+        if (parentAccount) {
+          const parentBalBefore = Number(parentAccount.currentBalance ?? parentAccount.balance ?? 0);
+          const parentBalAfter = isIncome ? parentBalBefore + disbursedAmount : parentBalBefore - disbursedAmount;
+          const parentNewIn = isIncome ? Number(parentAccount.totalIn || 0) + disbursedAmount : Number(parentAccount.totalIn || 0);
+          const parentNewOut = !isIncome ? Number(parentAccount.totalOut || 0) + disbursedAmount : Number(parentAccount.totalOut || 0);
+
+          updatedParentAccount = {
+            ...parentAccount,
+            currentBalance: parentBalAfter,
+            balance: parentBalAfter,
+            totalIn: parentNewIn,
+            totalOut: parentNewOut,
+            updatedAt: now.toISOString(),
+          };
+
+          const parentTxId = `tx-parent-${Date.now()}`;
+          parentTx = {
+            id: parentTxId,
+            orgId: parentAccount.orgId,
+            accountId: parentAccount.id,
+            accountName: parentAccount.name,
+            type: isIncome ? 'in' : 'out',
+            amount: disbursedAmount,
+            balanceBefore: parentBalBefore,
+            balanceAfter: parentBalAfter,
+            referenceType: 'request',
+            referenceId: reqObj.id,
+            referenceNumber: reqObj.requestNumber,
+            description: isIncome
+              ? `توريد وإيداع بنكي مرتبط تلقائياً عبر (${targetAccount.name}) للطلب رقم (${reqObj.requestNumber}) - ${reqObj.title}`
+              : `خصم وتحويل بنكي مرتبط تلقائياً عبر (${targetAccount.name}) لصرف الطلب رقم (${reqObj.requestNumber}) - ${reqObj.title}`,
+            actorName: currentUser.name,
+            actorId: currentUser.id,
+            createdAt: now.toISOString(),
+          };
+        }
+
         if (isFirebaseConfigured() && getDb()) {
           setFirestoreDoc('paymentAccounts', targetAccount.id, updatedAccount).catch(console.error);
           setFirestoreDoc('accountTransactions', txId, newTx).catch(console.error);
+          if (updatedParentAccount && parentTx) {
+            setFirestoreDoc('paymentAccounts', updatedParentAccount.id, updatedParentAccount).catch(console.error);
+            setFirestoreDoc('accountTransactions', parentTx.id, parentTx).catch(console.error);
+          }
         }
 
         setRawPaymentAccounts(prev => {
-          const exists = prev.some(a => a.id === targetAccount!.id);
-          const updated = exists 
+          let list = prev.some(a => a.id === targetAccount!.id)
             ? prev.map(a => a.id === targetAccount!.id ? updatedAccount : a)
             : [updatedAccount, ...prev];
-          safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, updated);
-          return updated;
+          if (updatedParentAccount) {
+            list = list.map(a => a.id === updatedParentAccount!.id ? updatedParentAccount! : a);
+          }
+          safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, list);
+          return list;
         });
 
         setRawTransactions(prev => {
-          const updated = [newTx, ...prev];
+          const newItems = parentTx ? [parentTx, newTx] : [newTx];
+          const updated = [...newItems, ...prev];
           safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
           return updated;
         });
@@ -3843,6 +4095,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const resolveParentAccount = useCallback((account: PaymentAccount | null | undefined): PaymentAccount | null => {
+    return resolveParentBankAccount(account, rawPaymentAccounts);
+  }, [rawPaymentAccounts]);
+
   return (
     <AppContext.Provider
       value={{
@@ -3915,6 +4171,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deletePaymentAccount,
         togglePaymentAccountStatus,
         recordManualAccountAdjustment,
+        resolveParentBankAccount: resolveParentAccount,
         custodies: scopedCustodies,
         allCustodies: rawCustodies,
         custodySettlements: scopedCustodySettlements,

@@ -59,7 +59,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     approveRequest,
     rejectRequest,
     requestClarification,
-    disburseRequest
+    disburseRequest,
+    resolveParentBankAccount
   } = useApp();
 
   const canApprove = currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance';
@@ -1342,6 +1343,22 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                                   </option>
                                 ))}
                               </select>
+                              {(() => {
+                                const acc = paymentAccounts.find(a => a.id === disburseAccountId) || paymentAccounts[0];
+                                const parentBank = resolveParentBankAccount(acc);
+                                if (!parentBank) return null;
+                                return (
+                                  <div className="mt-2 p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 text-xs flex items-start gap-2">
+                                    <Landmark className="h-4 w-4 text-blue-600 shrink-0 mt-0.5" />
+                                    <div>
+                                      <span className="font-bold block">إيداع بنكي مزدوج تلقائي:</span>
+                                      <span className="text-[11px] text-blue-800 leading-relaxed">
+                                        حساب ({acc?.name}) مربوط بالحساب البنكي (<strong>{parentBank.name}</strong>). سيتم إضافة التوريد تلقائياً في هذا الحساب وفي الحساب البنكي الرئيسي معاً.
+                                      </span>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                             </div>
 
                             <div>
@@ -1668,6 +1685,22 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                                 </>
                               )}
                             </select>
+                            {(() => {
+                              const acc = paymentAccounts.find(a => a.id === disburseAccountId) || paymentAccounts[0];
+                              const parentBank = resolveParentBankAccount(acc);
+                              if (!parentBank) return null;
+                              return (
+                                <div className="mt-2 p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 text-xs flex items-start gap-2">
+                                  <Landmark className="h-4 w-4 text-blue-600 shrink-0 mt-0.5" />
+                                  <div>
+                                    <span className="font-bold block">خصم بنكي مزدوج تلقائي:</span>
+                                    <span className="text-[11px] text-blue-800 leading-relaxed">
+                                      حساب ({acc?.name}) مربوط بالحساب البنكي (<strong>{parentBank.name}</strong>). سيتم خصم مبلغ الصرف تلقائياً من هذا الحساب ومن الحساب البنكي الرئيسي معاً.
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })()}
                           </div>
 
                           {/* Payment Method */}
@@ -1905,6 +1938,22 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                     );
                   }
                   return null;
+                })()}
+                {(() => {
+                  const currentAcc = paymentAccounts.find(a => a.id === batchAccountId);
+                  const parentBank = resolveParentBankAccount(currentAcc);
+                  if (!parentBank) return null;
+                  return (
+                    <div className="mt-2 p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 text-xs flex items-start gap-2">
+                      <Landmark className="h-4 w-4 text-blue-600 shrink-0 mt-0.5" />
+                      <div>
+                        <span className="font-bold block">خصم مزدوج للدفعة المجمعة:</span>
+                        <span className="text-[11px] text-blue-800 leading-relaxed">
+                          حساب الصرف المختار ({currentAcc?.name}) مربوط بالحساب البنكي (<strong>{parentBank.name}</strong>). سيتم خصم إجمالي الدفعة تلقائياً من هذا الحساب ومن البنك الرئيسي أيضاً.
+                        </span>
+                      </div>
+                    </div>
+                  );
                 })()}
               </div>
 
