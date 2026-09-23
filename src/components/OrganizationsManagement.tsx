@@ -134,7 +134,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     removeSuperAdminEmail,
     updateSuperAdminRole,
     currentRole,
-    requests
+    requests,
+    allRequests,
+    custodySettlements,
+    allCustodySettlements
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
@@ -1284,14 +1287,20 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           {/* Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             {filteredOrgs.map((org) => {
-              const orgMembersCount = members.filter(m => m.orgId === org.id).length;
-              const orgTotalDisbursed = requests
+              const targetReqs = isSuperAdmin ? allRequests : requests;
+              const targetStls = isSuperAdmin ? allCustodySettlements : custodySettlements;
+              const orgReqsDisbursed = targetReqs
                 .filter(r => r.orgId === org.id && r.status === 'disbursed')
                 .reduce((sum, r) => sum + r.amount, 0);
+              const orgStlsDisbursed = targetStls
+                .filter(s => s.orgId === org.id)
+                .reduce((sum, s) => sum + Number(s.amount || 0), 0);
+              const orgTotalDisbursed = orgReqsDisbursed + orgStlsDisbursed;
 
               const isCurrentActive = activeOrgId === org.id;
               const remainingBudget = Math.max(0, org.budget - orgTotalDisbursed);
               const percentageSpent = org.budget > 0 ? Math.min(100, Math.round((orgTotalDisbursed / org.budget) * 100)) : 0;
+              const orgMembersCount = (isSuperAdmin ? allMembers : members).filter(m => m.orgId === org.id).length;
 
               return (
                 <div 

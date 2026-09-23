@@ -16,7 +16,8 @@ import {
   ChevronDown,
   X,
   RotateCcw,
-  CalendarRange
+  CalendarRange,
+  Wallet
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -74,11 +75,33 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
     activeOrg, 
     activeOrgId, 
     organizations, 
+    allOrganizations,
     requests, 
+    allRequests,
     services, 
+    allServices,
     providers, 
+    allProviders,
+    custodies,
+    allCustodies,
+    custodySettlements,
+    allCustodySettlements,
     currentRole 
   } = useApp();
+
+  const isSuperAdmin = currentRole === 'super_admin';
+  const orgList = isSuperAdmin ? (allOrganizations.length > 0 ? allOrganizations : organizations) : organizations;
+  const targetRequests = isSuperAdmin 
+    ? (activeOrgId === 'all' ? allRequests : allRequests.filter(r => r.orgId === activeOrgId)) 
+    : requests;
+  const targetCustodies = isSuperAdmin 
+    ? (activeOrgId === 'all' ? allCustodies : allCustodies.filter(c => c.orgId === activeOrgId)) 
+    : custodies;
+  const targetSettlements = isSuperAdmin 
+    ? (activeOrgId === 'all' ? allCustodySettlements : allCustodySettlements.filter(s => s.orgId === activeOrgId)) 
+    : custodySettlements;
+  const currentOrgServices = isSuperAdmin ? (activeOrgId === 'all' ? allServices : allServices.filter(s => !s.orgIds || s.orgIds.includes(activeOrgId))) : services;
+  const currentOrgProviders = isSuperAdmin ? (activeOrgId === 'all' ? allProviders : allProviders.filter(p => !p.orgId || p.orgId === activeOrgId)) : providers;
 
   const [timeFilter, setTimeFilter] = useState<'all' | 'today' | 'month' | 'q3' | 'specific' | 'range'>('all');
   const [specificDate, setSpecificDate] = useState<string>(() => {
@@ -116,115 +139,171 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
     return `${year}-${month}-${day}`;
   }, []);
 
-  // Filter requests reactively according to selected time frame or specific date
-  const orgRequests = useMemo(() => {
-    if (timeFilter === 'all') return requests;
+  const isDateInTimeFilter = (dateStr: string | undefined): boolean => {
+    if (timeFilter === 'all') return true;
+    const normalized = getNormalizedDateStr(dateStr);
+    if (!normalized) return false;
 
-    return requests.filter(req => {
-      const reqCreated = getNormalizedDateStr(req.createdAt);
-      const reqDisbursed = getNormalizedDateStr(req.disbursement?.disbursedAt);
-
-      if (timeFilter === 'today') {
-        return reqCreated === todayStr || reqDisbursed === todayStr;
-      }
-
-      if (timeFilter === 'month') {
-        const curMonthPrefix = todayStr.slice(0, 7); // e.g. "2026-09"
-        return (reqCreated && reqCreated.startsWith(curMonthPrefix)) ||
-               (reqDisbursed && reqDisbursed.startsWith(curMonthPrefix));
-      }
-
-      if (timeFilter === 'q3') {
-        const isQ3 = (s: string | null) => {
-          if (!s) return false;
-          return s.startsWith('2026-07') || s.startsWith('2026-08') || s.startsWith('2026-09');
-        };
-        return isQ3(reqCreated) || isQ3(reqDisbursed);
-      }
-
-      if (timeFilter === 'specific') {
-        if (!specificDate) return true;
-        return reqCreated === specificDate || reqDisbursed === specificDate;
-      }
-
-      if (timeFilter === 'range') {
-        const dateToCheck = reqDisbursed || reqCreated;
-        if (!dateToCheck) return false;
-        if (startDate && dateToCheck < startDate) return false;
-        if (endDate && dateToCheck > endDate) return false;
-        return true;
-      }
-
+    if (timeFilter === 'today') {
+      return normalized === todayStr;
+    }
+    if (timeFilter === 'month') {
+      return normalized.startsWith(todayStr.slice(0, 7));
+    }
+    if (timeFilter === 'q3') {
+      return normalized.startsWith('2026-07') || normalized.startsWith('2026-08') || normalized.startsWith('2026-09');
+    }
+    if (timeFilter === 'specific') {
+      return !specificDate || normalized === specificDate;
+    }
+    if (timeFilter === 'range') {
+      if (startDate && normalized < startDate) return false;
+      if (endDate && normalized > endDate) return false;
       return true;
+    }
+    return true;
+  };
+
+  // Filter requests reactively according to selected time frame or specific date
+  const filteredRequests = useMemo(() => {
+    return targetRequests.filter(req => {
+      if (timeFilter === 'all') return true;
+      const dateToCheck = req.disbursement?.disbursedAt || req.createdAt;
+      return isDateInTimeFilter(dateToCheck);
     });
-  }, [requests, timeFilter, specificDate, startDate, endDate, todayStr]);
-  const currentOrgServices = services;
-  const currentOrgProviders = providers;
+  }, [targetRequests, timeFilter, specificDate, startDate, endDate, todayStr]);
+
+  // Filter custody settlements reactively according to selected time frame or specific date
+  const filteredSettlements = useMemo(() => {
+    return targetSettlements.filter(stl => {
+      if (timeFilter === 'all') return true;
+      const dateToCheck = stl.invoiceDate || stl.createdAt;
+      return isDateInTimeFilter(dateToCheck);
+    });
+  }, [targetSettlements, timeFilter, specificDate, startDate, endDate, todayStr]);
+
+  // Filter issued custodies reactively according to selected time frame or specific date
+  const filteredCustodies = useMemo(() => {
+    return targetCustodies.filter(cus => {
+      if (timeFilter === 'all') return true;
+      const dateToCheck = cus.issuedAt || cus.createdAt;
+      return isDateInTimeFilter(dateToCheck);
+    });
+  }, [targetCustodies, timeFilter, specificDate, startDate, endDate, todayStr]);
 
   // Financial Metrics
-  const disbursedRequests = orgRequests.filter(r => r.status === 'disbursed');
-  const totalDisbursed = disbursedRequests.reduce((sum, r) => sum + r.amount, 0);
+  const disbursedRequests = filteredRequests.filter(r => r.status === 'disbursed');
+  const totalDisbursedRequests = disbursedRequests.reduce((sum, r) => sum + r.amount, 0);
 
-  const approvedRequests = orgRequests.filter(r => r.status === 'approved');
+  // Settled Custodies (مصروفات فواتير تسوية العهد النقدية الفعلية)
+  const totalSettledCustodies = filteredSettlements.reduce((sum, s) => sum + Number(s.amount || 0), 0);
+
+  // إجمالي المصروف الفعلي الحقيقي = طلبات الصرف المنفذة + فواتير تسوية العهد
+  const totalActualExpenses = totalDisbursedRequests + totalSettledCustodies;
+
+  // Requests Pending & Approved
+  const approvedRequests = filteredRequests.filter(r => r.status === 'approved');
   const totalApprovedAwaitingDisbursement = approvedRequests.reduce((sum, r) => sum + r.amount, 0);
 
-  const pendingRequests = orgRequests.filter(r => r.status === 'pending');
+  const pendingRequests = filteredRequests.filter(r => r.status === 'pending');
   const totalPending = pendingRequests.reduce((sum, r) => sum + r.amount, 0);
 
-  const clarificationRequests = orgRequests.filter(r => r.status === 'clarification_requested');
-  const rejectedRequests = orgRequests.filter(r => r.status === 'rejected');
+  const clarificationRequests = filteredRequests.filter(r => r.status === 'clarification_requested');
+  const rejectedRequests = filteredRequests.filter(r => r.status === 'rejected');
+
+  // Custodies Breakdown
+  const activeCustodies = filteredCustodies.filter(c => c.status === 'active');
+  const totalActiveCustodiesRemaining = activeCustodies.reduce((sum, c) => sum + Number(c.remainingAmount || 0), 0);
+  const totalCustodiesIssued = filteredCustodies.reduce((sum, c) => sum + Number(c.totalAmount || 0), 0);
 
   // Total budget
   const totalBudget = activeOrgId === 'all' 
-    ? organizations.reduce((sum, o) => sum + o.budget, 0)
+    ? orgList.reduce((sum, o) => sum + o.budget, 0)
     : (activeOrg?.budget || 0);
 
-  const remainingBudget = totalBudget - totalDisbursed;
-  const budgetUtilization = totalBudget > 0 ? Math.min(100, Math.round((totalDisbursed / totalBudget) * 100)) : 0;
-  const currency = activeOrg?.currency || 'SAR';
+  const remainingBudget = Math.max(0, totalBudget - totalActualExpenses);
+  const budgetUtilization = totalBudget > 0 ? Math.min(100, Math.round((totalActualExpenses / totalBudget) * 100)) : 0;
+  const currency = activeOrg?.currency || 'EGP';
 
-  // Chart 1: Expenses by Service Category
+  // Chart 1: Expenses by Service Category (Combines Requests + Custody Settlements)
   const serviceChartData = currentOrgServices.map(srv => {
-    // calculate actual disbursed for this service
-    const spent = orgRequests
+    const requestsSpent = filteredRequests
       .filter(r => r.serviceCategoryId === srv.id && r.status === 'disbursed')
       .reduce((sum, r) => sum + r.amount, 0);
+
+    const custodySpent = filteredSettlements
+      .filter(s => s.serviceCategoryId === srv.id)
+      .reduce((sum, s) => sum + Number(s.amount || 0), 0);
+
+    const totalSpent = requestsSpent + custodySpent;
+
     return {
       name: srv.name.length > 18 ? srv.name.slice(0, 18) + '...' : srv.name,
       fullName: srv.name,
-      spent,
-      budget: srv.budgetLimit,
+      spent: totalSpent,
+      requestsSpent,
+      custodySpent,
+      budget: srv.budgetLimit || 0,
     };
   }).filter(item => item.spent > 0 || item.budget > 0);
 
-  // Chart 2: Status Distribution
+  // Chart 2: Status Distribution (All financial operations)
   const statusColors: Record<string, string> = {
-    'تم الصرف': '#10b981',
+    'طلبات تم صرفها': '#10b981',
+    'فواتير عُهد مسواة': '#059669',
     'معتمد للصرف': '#3b82f6',
     'قيد المراجعة': '#f59e0b',
+    'عُهد جارية مع الموظفين': '#8b5cf6',
     'طلب توضيح': '#ef4444',
     'مرفوض': '#94a3b8',
   };
 
   const statusData = [
-    { name: 'تم الصرف', count: disbursedRequests.length, amount: totalDisbursed },
+    { name: 'طلبات تم صرفها', count: disbursedRequests.length, amount: totalDisbursedRequests },
+    { name: 'فواتير عُهد مسواة', count: filteredSettlements.length, amount: totalSettledCustodies },
     { name: 'معتمد للصرف', count: approvedRequests.length, amount: totalApprovedAwaitingDisbursement },
     { name: 'قيد المراجعة', count: pendingRequests.length, amount: totalPending },
+    { name: 'عُهد جارية مع الموظفين', count: activeCustodies.length, amount: totalActiveCustodiesRemaining },
     { name: 'طلب توضيح', count: clarificationRequests.length, amount: clarificationRequests.reduce((s, r) => s + r.amount, 0) },
     { name: 'مرفوض', count: rejectedRequests.length, amount: rejectedRequests.reduce((s, r) => s + r.amount, 0) },
-  ].filter(d => d.count > 0);
+  ].filter(d => d.count > 0 || d.amount > 0);
 
-  // Chart 3: Expenses by Top Providers
-  const providerExpenseData = currentOrgProviders.map(prov => {
-    const paid = orgRequests
-      .filter(r => r.providerId === prov.id && r.status === 'disbursed')
-      .reduce((sum, r) => sum + r.amount, 0);
-    return {
-      name: prov.name.length > 16 ? prov.name.slice(0, 16) + '...' : prov.name,
-      fullName: prov.name,
-      paid,
-    };
-  }).sort((a, b) => b.paid - a.paid).slice(0, 5);
+  // Chart 3: Expenses by Top Providers (Aggregating Requests + Custody Settlements)
+  const providerExpenseData = useMemo(() => {
+    const vendorMap = new Map<string, { fullName: string; paid: number }>();
+
+    // 1. From requests
+    currentOrgProviders.forEach(prov => {
+      const paid = filteredRequests
+        .filter(r => (r.providerId === prov.id || r.providerName === prov.name) && r.status === 'disbursed')
+        .reduce((sum, r) => sum + r.amount, 0);
+      if (paid > 0) {
+        vendorMap.set(prov.name, { fullName: prov.name, paid });
+      }
+    });
+
+    // 2. From custody settlements
+    filteredSettlements.forEach(s => {
+      const vName = (s.vendorName || '').trim();
+      if (vName) {
+        const existing = vendorMap.get(vName);
+        if (existing) {
+          existing.paid += Number(s.amount || 0);
+        } else {
+          vendorMap.set(vName, { fullName: vName, paid: Number(s.amount || 0) });
+        }
+      }
+    });
+
+    return Array.from(vendorMap.values())
+      .map(item => ({
+        name: item.fullName.length > 16 ? item.fullName.slice(0, 16) + '...' : item.fullName,
+        fullName: item.fullName,
+        paid: item.paid,
+      }))
+      .sort((a, b) => b.paid - a.paid)
+      .slice(0, 5);
+  }, [currentOrgProviders, filteredRequests, filteredSettlements]);
 
   const exportReport = () => {
     window.print();
@@ -241,7 +320,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
               {activeOrgId === 'all' ? 'لوحة تحليلات كافة المؤسسات' : `لوحة تحليلات ${activeOrg?.name}`}
             </h1>
             <span className="text-xs bg-slate-100 text-slate-700 font-semibold px-2.5 py-0.5 rounded-full border border-slate-200">
-              {orgRequests.length} طلب إجمالي
+              {filteredRequests.length} طلب إجمالي {filteredSettlements.length > 0 ? `(+ ${filteredSettlements.length} تسوية)` : ''}
             </span>
           </div>
           <p className="text-sm text-slate-500 mt-1">
@@ -525,7 +604,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
                 : 'تصفية نشطة: الربع الثالث 2026'}
             </span>
             <span className="text-indigo-600 font-semibold">
-              • تم العثور على {orgRequests.length} طلب
+              • تم العثور على {filteredRequests.length + filteredSettlements.length} حركة مالية
             </span>
           </div>
           <button
@@ -539,8 +618,8 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
         </div>
       )}
 
-      {/* Empty State Banner if 0 requests for this specific date */}
-      {orgRequests.length === 0 && timeFilter !== 'all' && (
+      {/* Empty State Banner if 0 records for this specific date */}
+      {(filteredRequests.length + filteredSettlements.length) === 0 && timeFilter !== 'all' && (
         <div className="bg-white border border-slate-200 p-8 rounded-2xl text-center space-y-3 shadow-xs">
           <div className="h-12 w-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto border border-amber-200">
             <Calendar className="h-6 w-6" />
@@ -550,8 +629,8 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
           </h3>
           <p className="text-xs text-slate-500 max-w-md mx-auto">
             {timeFilter === 'specific' && specificDate 
-              ? `لم يتم تسجيل أي طلبات صرف أو عمليات دفع في يوم ${formatDateArabic(specificDate)} (${specificDate}).`
-              : 'لم يتم العثور على أي طلبات خلال الفترة المحددة.'}
+              ? `لم يتم تسجيل أي طلبات صرف أو عمليات تسوية في يوم ${formatDateArabic(specificDate)} (${specificDate}).`
+              : 'لم يتم العثور على أي طلبات أو تسويات خلال الفترة المحددة.'}
           </p>
           <div className="pt-2">
             <button
@@ -566,7 +645,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
       )}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         
-        {/* Card 1: Total Disbursed */}
+        {/* Card 1: Total Actual Disbursed & Settled Expenses */}
         <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-500">إجمالي المصروف الفعلي</span>
@@ -576,10 +655,15 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
           </div>
           <div className="mt-3">
             <div className="text-2xl font-black text-slate-900">
-              {totalDisbursed.toLocaleString()} <span className="text-sm font-semibold text-slate-500">{currency}</span>
+              {totalActualExpenses.toLocaleString()} <span className="text-sm font-semibold text-slate-500">{currency}</span>
             </div>
-            <div className="text-xs text-emerald-600 font-semibold mt-1 flex items-center gap-1">
-              <span>{disbursedRequests.length} طلبات تم صرفها بنجاح</span>
+            <div className="text-[11px] text-emerald-700 font-semibold mt-1.5 flex items-center gap-1.5 flex-wrap">
+              <span>{disbursedRequests.length} طلبات صرف ({totalDisbursedRequests.toLocaleString()} {currency})</span>
+              {totalSettledCustodies > 0 && (
+                <span className="bg-emerald-100/80 text-emerald-900 px-1.5 py-0.5 rounded-md font-bold">
+                  + {filteredSettlements.length} فواتير تصفية عُهد ({totalSettledCustodies.toLocaleString()} {currency})
+                </span>
+              )}
             </div>
           </div>
           <div className="absolute bottom-0 left-0 right-0 h-1 bg-emerald-500"></div>
@@ -653,6 +737,47 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
 
       </div>
 
+      {/* Petty Cash Custodies Live KPI Strip */}
+      <div className="bg-gradient-to-r from-slate-900 to-indigo-950 text-white p-4.5 rounded-2xl shadow-sm border border-slate-800 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="h-10 w-10 rounded-xl bg-white/10 flex items-center justify-center text-indigo-300 shrink-0">
+            <Wallet className="h-5 w-5" />
+          </div>
+          <div>
+            <h4 className="font-bold text-sm text-white flex items-center gap-2">
+              <span>موقف العهد النقدية وسلف الموظفين</span>
+              <span className="text-[10px] bg-indigo-500/30 text-indigo-200 px-2 py-0.5 rounded-full border border-indigo-400/20">
+                {filteredCustodies.length} عهدة مسجلة
+              </span>
+            </h4>
+            <p className="text-xs text-slate-300 mt-0.5">
+              متابعة مباشرة للعهد المنصرفة، المتبقي قيد التصفية، والمصروفات المسواة فعلياً بالفواتير.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-3 divide-x divide-x-reverse divide-white/10 text-center">
+          <div className="px-2">
+            <span className="text-[10.5px] text-slate-300 block">إجمالي المنصرف كعُهد</span>
+            <span className="text-sm sm:text-base font-black text-white">
+              {totalCustodiesIssued.toLocaleString()} <span className="text-[10px] font-normal text-slate-300">{currency}</span>
+            </span>
+          </div>
+          <div className="px-2">
+            <span className="text-[10.5px] text-amber-300 block">جارية مع الموظفين</span>
+            <span className="text-sm sm:text-base font-black text-amber-400">
+              {totalActiveCustodiesRemaining.toLocaleString()} <span className="text-[10px] font-normal text-amber-200">{currency}</span>
+            </span>
+          </div>
+          <div className="px-2">
+            <span className="text-[10.5px] text-emerald-300 block">مسواة بفواتير (مصروف)</span>
+            <span className="text-sm sm:text-base font-black text-emerald-400">
+              {totalSettledCustodies.toLocaleString()} <span className="text-[10px] font-normal text-emerald-200">{currency}</span>
+            </span>
+          </div>
+        </div>
+      </div>
+
       {/* Action Banner for Clarification Requests */}
       {clarificationRequests.length > 0 && (
         <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200/80 p-4 rounded-2xl flex items-center justify-between gap-4">
@@ -690,7 +815,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
                 <Layers className="h-4 w-4 text-emerald-600" />
                 <span>تحليل المصروفات والميزانيات حسب بنود الخدمات</span>
               </h3>
-              <p className="text-xs text-slate-500">مقارنة المبالغ المصروفة فعلياً بالميزانية المحددة لكل بند</p>
+              <p className="text-xs text-slate-500">مقارنة المبالغ المصروفة فعلياً (طلبات صرف + فواتير تصفية عُهد) بالميزانية المحددة لكل بند</p>
             </div>
           </div>
 
@@ -700,10 +825,17 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
                 <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#64748b' }} />
                 <YAxis tick={{ fontSize: 11, fill: '#64748b' }} />
                 <Tooltip 
-                  formatter={(value: any, name: any) => [
-                    `${Number(value).toLocaleString()} ${currency}`, 
-                    name === 'spent' ? 'المصروف الفعلي' : 'الميزانية التقديرية'
-                  ]}
+                  formatter={(value: any, name: any, item: any) => {
+                    if (name === 'spent') {
+                      const req = item?.payload?.requestsSpent || 0;
+                      const cus = item?.payload?.custodySpent || 0;
+                      return [
+                        `${Number(value).toLocaleString()} ${currency} (طلبات: ${req.toLocaleString()} + عُهد: ${cus.toLocaleString()})`, 
+                        'المصروف الفعلي'
+                      ];
+                    }
+                    return [`${Number(value).toLocaleString()} ${currency}`, 'الميزانية المخصصة'];
+                  }}
                   labelFormatter={(label, payload) => {
                     const item = payload?.[0]?.payload;
                     return item ? item.fullName : label;

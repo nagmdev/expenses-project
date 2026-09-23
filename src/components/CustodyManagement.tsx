@@ -79,7 +79,20 @@ export const CustodyManagement: React.FC = () => {
   );
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'settled'>('all');
+  const [employeeFilter, setEmployeeFilter] = useState<string>('all');
   const [activeMainTab, setActiveMainTab] = useState<'custodies' | 'settlements'>('custodies');
+
+  // Unique Employees list for filter
+  const uniqueEmployees = useMemo(() => {
+    const names = new Set<string>();
+    targetCustodies.forEach(c => {
+      if (c.employeeName) names.add(c.employeeName.trim());
+    });
+    targetSettlements.forEach(s => {
+      if (s.employeeName) names.add(s.employeeName.trim());
+    });
+    return Array.from(names).sort();
+  }, [targetCustodies, targetSettlements]);
 
   // Modals
   const [isIssueModalOpen, setIsIssueModalOpen] = useState(false);
@@ -126,6 +139,10 @@ export const CustodyManagement: React.FC = () => {
       if (selectedOrgFilter !== 'all' && item.orgId !== selectedOrgFilter) {
         return false;
       }
+      // Employee filter
+      if (employeeFilter !== 'all' && item.employeeName !== employeeFilter) {
+        return false;
+      }
       // Status filter
       if (statusFilter !== 'all' && item.status !== statusFilter) {
         return false;
@@ -144,12 +161,15 @@ export const CustodyManagement: React.FC = () => {
       }
       return true;
     });
-  }, [targetCustodies, selectedOrgFilter, statusFilter, searchQuery]);
+  }, [targetCustodies, selectedOrgFilter, employeeFilter, statusFilter, searchQuery]);
 
   // Filtered Settlements
   const filteredSettlements = useMemo(() => {
     return targetSettlements.filter(item => {
       if (selectedOrgFilter !== 'all' && item.orgId !== selectedOrgFilter) {
+        return false;
+      }
+      if (employeeFilter !== 'all' && item.employeeName !== employeeFilter) {
         return false;
       }
       if (searchQuery.trim()) {
@@ -165,7 +185,7 @@ export const CustodyManagement: React.FC = () => {
       }
       return true;
     });
-  }, [targetSettlements, selectedOrgFilter, searchQuery]);
+  }, [targetSettlements, selectedOrgFilter, employeeFilter, searchQuery]);
 
   // KPI Calculations
   const { totalIssued, totalRemaining, totalSettled, activeCount } = useMemo(() => {
@@ -490,6 +510,21 @@ export const CustodyManagement: React.FC = () => {
                 </select>
               </div>
             )}
+
+            {/* Employee Filter */}
+            <div className="relative min-w-[170px]">
+              <User className="h-4 w-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              <select
+                value={employeeFilter}
+                onChange={(e) => setEmployeeFilter(e.target.value)}
+                className="w-full pr-9 pl-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+              >
+                <option value="all">👤 كافة الموظفين والمناديب</option>
+                {uniqueEmployees.map(emp => (
+                  <option key={emp} value={emp}>{emp}</option>
+                ))}
+              </select>
+            </div>
 
             {/* Status Filter Chips */}
             <div className="inline-flex bg-slate-100 p-1 rounded-xl gap-1 text-xs">

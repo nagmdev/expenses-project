@@ -77,6 +77,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   const [departmentFilter, setDepartmentFilter] = useState<string>('all');
   const [urgencyFilter, setUrgencyFilter] = useState<string>('all');
   const [paymentMethodFilter, setPaymentMethodFilter] = useState<string>('all');
+  const [requesterFilter, setRequesterFilter] = useState<string>('all');
   const [datePeriodFilter, setDatePeriodFilter] = useState<string>('all');
   const [specificDateFilter, setSpecificDateFilter] = useState<string>('');
 
@@ -113,6 +114,15 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
       if (r.requesterDepartment) set.add(r.requesterDepartment.trim());
     });
     return Array.from(set);
+  }, [requests]);
+
+  // Derive unique requesters for filter dropdown
+  const uniqueRequesters = useMemo(() => {
+    const set = new Set<string>();
+    requests.forEach(r => {
+      if (r.requesterName) set.add(r.requesterName.trim());
+    });
+    return Array.from(set).sort();
   }, [requests]);
 
   // Strict deduplication & comprehensive multi-filter matching
@@ -161,6 +171,9 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
         }
       }
 
+      // Requester (الموظف مقدم الطلب)
+      if (requesterFilter !== 'all' && req.requesterName !== requesterFilter) return false;
+
       // Search (Matches Title, Request Number, Requester, Provider, Justification)
       if (search.trim()) {
         const q = search.toLowerCase().trim();
@@ -184,6 +197,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     departmentFilter, 
     urgencyFilter, 
     paymentMethodFilter, 
+    requesterFilter,
     datePeriodFilter, 
     specificDateFilter,
     search
@@ -753,6 +767,21 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 </select>
               </div>
 
+              {/* Requester Dropdown */}
+              <div>
+                <label className="block text-[11px] font-bold text-slate-500 mb-1">الموظف / مقدم الطلب:</label>
+                <select
+                  value={requesterFilter}
+                  onChange={(e) => setRequesterFilter(e.target.value)}
+                  className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl outline-none font-semibold text-slate-800"
+                >
+                  <option value="all">كافة الموظفين</option>
+                  {uniqueRequesters.map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+              </div>
+
               {/* Date Period Dropdown */}
               <div>
                 <label className="block text-[11px] font-bold text-slate-500 mb-1">الفترة الزمنية:</label>
@@ -794,7 +823,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                   <span>تصدير Excel</span>
                 </button>
               </div>
-              {(statusFilter !== 'all' || categoryFilter !== 'all' || providerFilter !== 'all' || departmentFilter !== 'all' || urgencyFilter !== 'all' || paymentMethodFilter !== 'all' || datePeriodFilter !== 'all' || specificDateFilter || search) && (
+              {(statusFilter !== 'all' || categoryFilter !== 'all' || providerFilter !== 'all' || departmentFilter !== 'all' || requesterFilter !== 'all' || urgencyFilter !== 'all' || paymentMethodFilter !== 'all' || datePeriodFilter !== 'all' || specificDateFilter || search) && (
                 <button
                   type="button"
                   onClick={() => {
@@ -802,6 +831,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                     setCategoryFilter('all');
                     setProviderFilter('all');
                     setDepartmentFilter('all');
+                    setRequesterFilter('all');
                     setUrgencyFilter('all');
                     setPaymentMethodFilter('all');
                     setDatePeriodFilter('all');
