@@ -2213,7 +2213,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             )}
             <div className="space-y-2">
               {superAdminEmails.map((email) => {
-                const isRootAdmin = email === 'mahmoud@tieapps.com';
+                const isRootAdmin = email === 'mahmoud@tieapps.com' || email === 'h.moubarak@tieapps.com';
                 return (
                   <div key={email} className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 text-xs gap-3">
                     <div className="flex items-center gap-3">

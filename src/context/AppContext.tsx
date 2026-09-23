@@ -484,7 +484,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Super admin emails list (loaded strictly from system defaults, environment, and Firestore 'super_admins' collection - NEVER client localStorage)
   const [superAdminEmails, setSuperAdminEmails] = useState<string[]>(() => {
-    const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com'];
+    const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com', 'h.moubarak@tieapps.com'];
     const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
     const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
     return Array.from(new Set([...defaultAdmins, ...envList])).filter(e => e.toLowerCase().trim() !== 'marwanagib813@gmail.com');
@@ -495,15 +495,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // =========================================================================
   const userEmail = firebaseUser?.email?.toLowerCase().trim() || '';
 
-  // Find membership in organizations
+  // Find membership in organizations (prioritizing records with assigned orgId and highest role)
   const userMemberRecord = useMemo(() => {
     if (!firebaseUser) return null;
     const uid = firebaseUser.uid;
     const email = userEmail.toLowerCase().trim();
-    return rawMembers.find(m => 
+    const matching = rawMembers.filter(m => 
       (Boolean(uid) && m.userId === uid) || 
       (Boolean(email) && m.userEmail?.toLowerCase().trim() === email)
-    ) || null;
+    );
+    if (matching.length === 0) return null;
+
+    // Prioritize member record that has an assigned company orgId
+    const withOrg = matching.filter(m => Boolean(m.orgId && m.orgId.trim()));
+    if (withOrg.length > 0) {
+      const rolePriority: Record<string, number> = {
+        super_admin: 5,
+        org_admin: 4,
+        finance: 3,
+        data_entry: 2,
+        employee: 1,
+      };
+      withOrg.sort((a, b) => (rolePriority[b.role] || 0) - (rolePriority[a.role] || 0));
+      return withOrg[0];
+    }
+
+    return matching[0];
   }, [firebaseUser, userEmail, rawMembers]);
 
   const isSuperAdmin = useMemo(() => {
@@ -559,7 +576,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    const defaultAdminName = userEmail === 'mahmoud@tieapps.com' ? 'محمود' : userEmail.split('@')[0];
+    const defaultAdminName = userEmail === 'mahmoud@tieapps.com' 
+      ? 'محمود' 
+      : userEmail === 'h.moubarak@tieapps.com' 
+      ? 'حسين مبارك' 
+      : userEmail.split('@')[0];
 
     return {
       id: firebaseUser.uid,
@@ -567,7 +588,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       email: firebaseUser.email || '',
       role: resolvedRole,
       avatar: firebaseUser.photoURL || undefined,
-      phone: userMemberRecord?.phone || firebaseUser.phoneNumber || '',
+      phone: userMemberRecord?.phone || (userEmail === 'h.moubarak@tieapps.com' ? '01117333908' : '') || firebaseUser.phoneNumber || '',
       orgId: effectiveOrgId,
     };
   }, [firebaseUser, userMemberRecord, userEmail, resolvedRole, effectiveOrgId]);
@@ -833,15 +854,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         })
         .filter(m => !DUMMY_IDS.has(m.id) && !DUMMY_IDS.has(m.orgId));
 
+      // Sort members so that records with an assigned orgId take precedence over unassigned ones
+      list.sort((a, b) => {
+        const aHasOrg = Boolean(a.orgId && a.orgId.trim()) ? 1 : 0;
+        const bHasOrg = Boolean(b.orgId && b.orgId.trim()) ? 1 : 0;
+        if (aHasOrg !== bHasOrg) return bHasOrg - aHasOrg;
+        return (new Date(b.joinedAt || 0).getTime()) - (new Date(a.joinedAt || 0).getTime());
+      });
+
       const seenIds = new Set<string>();
       const seenEmailOrg = new Set<string>();
+      const assignedEmails = new Set<string>();
+
+      for (const mem of list) {
+        if (mem.userEmail && mem.orgId && mem.orgId.trim()) {
+          assignedEmails.add(mem.userEmail.trim().toLowerCase());
+        }
+      }
+
       const dedupedList: OrganizationMember[] = [];
 
       for (const mem of list) {
-        const emailKey = `${mem.orgId}:::${(mem.userEmail || '').trim().toLowerCase()}`;
-        if (!seenIds.has(mem.id) && (!mem.userEmail || !seenEmailOrg.has(emailKey))) {
+        const email = (mem.userEmail || '').trim().toLowerCase();
+        const hasOrg = Boolean(mem.orgId && mem.orgId.trim());
+        // If this is an unassigned placeholder ('غير محدد') but this user already has an assigned company membership, skip the duplicate!
+        if (!hasOrg && email && assignedEmails.has(email)) {
+          continue;
+        }
+
+        const emailKey = `${mem.orgId || ''}:::${email}`;
+        if (!seenIds.has(mem.id) && (!email || !seenEmailOrg.has(emailKey))) {
           seenIds.add(mem.id);
-          if (mem.userEmail) seenEmailOrg.add(emailKey);
+          if (email) seenEmailOrg.add(emailKey);
           dedupedList.push(mem);
         }
       }
@@ -952,7 +996,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const dbAdmins = snapshot.docs
         .map(d => (d.data().email || d.id || '').toLowerCase().trim())
         .filter(e => e && e !== 'marwanagib813@gmail.com');
-      const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com'];
+      const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com', 'h.moubarak@tieapps.com'];
       const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
       const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
       const merged = Array.from(new Set([...defaultAdmins, ...envList, ...dbAdmins])).filter(e => e !== 'marwanagib813@gmail.com');
@@ -3335,9 +3379,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const approveRequest = async (requestId: string, note?: string) => {
-    if (resolvedRole !== 'super_admin' && resolvedRole !== 'org_admin') {
+    if (resolvedRole !== 'super_admin' && resolvedRole !== 'org_admin' && resolvedRole !== 'finance') {
       console.warn('[RBAC] User does not have permission to approve requests:', resolvedRole);
-      alert('عفواً، صلاحية اعتماد الطلبات مقتصرة على مدراء المؤسسة فقط. مسؤول الصرف يقوم بالصرف المالي فقط بعد الاعتماد.');
+      alert('عفواً، صلاحية اعتماد الطلبات مقتصرة على مدراء المؤسسة ومسؤولي الصرف المعتمدين.');
       return;
     }
 
@@ -3422,9 +3466,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const rejectRequest = async (requestId: string, reason: string) => {
-    if (resolvedRole !== 'super_admin' && resolvedRole !== 'org_admin') {
+    if (resolvedRole !== 'super_admin' && resolvedRole !== 'org_admin' && resolvedRole !== 'finance') {
       console.warn('[RBAC] User does not have permission to reject requests:', resolvedRole);
-      alert('عفواً، صلاحية رفض الطلبات مقتصرة على مدراء المؤسسة فقط.');
+      alert('عفواً، صلاحية رفض الطلبات مقتصرة على مدراء المؤسسة ومسؤولي الصرف المعتمدين.');
       return;
     }
 
