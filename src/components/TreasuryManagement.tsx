@@ -748,9 +748,9 @@ export const TreasuryManagement: React.FC = () => {
           MODAL 1: ADD / EDIT ACCOUNT
           ========================================================================= */}
       {isAccountModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto overscroll-contain">
+          <div className="bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150 my-auto flex flex-col max-h-[90vh] overflow-hidden">
+            <div className="flex items-center justify-between p-5 sm:p-6 pb-3.5 border-b border-slate-100 shrink-0 bg-white">
               <div className="flex items-center gap-2">
                 <div className="h-8 w-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
                   {editingAccount ? <Edit3 className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
@@ -762,13 +762,14 @@ export const TreasuryManagement: React.FC = () => {
               <button 
                 type="button" 
                 onClick={() => setIsAccountModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+                className="text-slate-400 hover:text-slate-600 p-1.5 hover:bg-slate-100 rounded-xl transition cursor-pointer"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveAccount} className="space-y-3.5 text-xs">
+            <form onSubmit={handleSaveAccount} className="flex flex-col flex-1 overflow-hidden min-h-0">
+              <div className="p-5 sm:p-6 overflow-y-auto flex-1 space-y-3.5 text-xs overscroll-contain">
               {/* Org Selector (if super admin) */}
               {isSuperAdmin && (
                 <div>
@@ -942,19 +943,20 @@ export const TreasuryManagement: React.FC = () => {
                   placeholder="بيانات إضافية عن حدود الصرف، الشخص المسؤول عن الحساب..."
                   className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                 />
+                </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-end gap-2.5 p-4 sm:px-6 border-t border-slate-100 shrink-0 bg-slate-50/90 rounded-b-3xl">
                 <button
                   type="button"
                   onClick={() => setIsAccountModalOpen(false)}
-                  className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl font-bold transition"
+                  className="px-4 py-2 text-slate-600 hover:bg-slate-200/60 rounded-xl font-bold transition cursor-pointer"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold shadow-md transition"
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold shadow-md transition cursor-pointer active:scale-98"
                 >
                   {editingAccount ? 'حفظ التعديلات' : 'إنشاء وتفعيل الحساب'}
                 </button>
@@ -968,9 +970,9 @@ export const TreasuryManagement: React.FC = () => {
           MODAL 2: MANUAL ADJUSTMENT (IN / OUT)
           ========================================================================= */}
       {isAdjustmentModalOpen && adjustmentTargetAccount && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto overscroll-contain">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150 my-auto flex flex-col max-h-[90vh] overflow-hidden">
+            <div className="flex items-center justify-between p-5 pb-3.5 border-b border-slate-100 shrink-0 bg-white rounded-t-3xl">
               <div className="flex items-center gap-2">
                 <div className={`h-8 w-8 rounded-lg flex items-center justify-center font-bold ${
                   adjustmentType === 'in' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
@@ -987,69 +989,71 @@ export const TreasuryManagement: React.FC = () => {
               <button 
                 type="button" 
                 onClick={() => setIsAdjustmentModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+                className="text-slate-400 hover:text-slate-600 p-1.5 hover:bg-slate-100 rounded-xl transition cursor-pointer"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveAdjustment} className="space-y-3 text-xs">
-              {/* Current balance reminder */}
-              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
-                <span className="text-slate-500 font-medium">الرصيد الحالي للحساب:</span>
-                <span className="font-bold text-slate-900 font-mono text-sm">
-                  {Number(adjustmentTargetAccount.currentBalance ?? adjustmentTargetAccount.balance ?? 0).toLocaleString()} {adjustmentTargetAccount.currency}
-                </span>
+            <form onSubmit={handleSaveAdjustment} className="flex flex-col flex-1 overflow-hidden min-h-0">
+              <div className="p-5 overflow-y-auto flex-1 space-y-3.5 text-xs overscroll-contain">
+                {/* Current balance reminder */}
+                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
+                  <span className="text-slate-500 font-medium">الرصيد الحالي للحساب:</span>
+                  <span className="font-bold text-slate-900 font-mono text-sm">
+                    {Number(adjustmentTargetAccount.currentBalance ?? adjustmentTargetAccount.balance ?? 0).toLocaleString()} {adjustmentTargetAccount.currency}
+                  </span>
+                </div>
+
+                {/* Amount */}
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    المبلغ المراد {adjustmentType === 'in' ? 'إيداعه' : 'سحبه'} ({adjustmentTargetAccount.currency}) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    inputMode="decimal"
+                    value={adjustmentAmount}
+                    onKeyDown={handleNumericKeyDown}
+                    onChange={(e) => setAdjustmentAmount(sanitizeAmount(e.target.value))}
+                    placeholder="0.00"
+                    className={`w-full p-2.5 bg-slate-50 border rounded-xl font-bold font-mono text-base ${
+                      adjustmentType === 'in' ? 'focus:border-emerald-500 text-emerald-800' : 'focus:border-rose-500 text-rose-800'
+                    }`}
+                  />
+                </div>
+
+                {/* Reason / Notes */}
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">بيان وسبب الحركة *</label>
+                  <textarea
+                    required
+                    rows={3}
+                    value={adjustmentReason}
+                    onChange={(e) => setAdjustmentReason(e.target.value)}
+                    placeholder={
+                      adjustmentType === 'in'
+                        ? 'مثال: توريد نقدي من المندوب فلان، استلام مبيعات يومية، إيداع بنكي...'
+                        : 'مثال: تسليم عهدة كاش للمندوب، سحب نثريات غير مجدولة، مصاريف بنكية...'
+                    }
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                  />
+                </div>
               </div>
 
-              {/* Amount */}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  المبلغ المراد {adjustmentType === 'in' ? 'إيداعه' : 'سحبه'} ({adjustmentTargetAccount.currency}) *
-                </label>
-                <input
-                  type="text"
-                  required
-                  inputMode="decimal"
-                  value={adjustmentAmount}
-                  onKeyDown={handleNumericKeyDown}
-                  onChange={(e) => setAdjustmentAmount(sanitizeAmount(e.target.value))}
-                  placeholder="0.00"
-                  className={`w-full p-2.5 bg-slate-50 border rounded-xl font-bold font-mono text-base ${
-                    adjustmentType === 'in' ? 'focus:border-emerald-500 text-emerald-800' : 'focus:border-rose-500 text-rose-800'
-                  }`}
-                />
-              </div>
-
-              {/* Reason / Notes */}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">بيان وسبب الحركة *</label>
-                <textarea
-                  required
-                  rows={3}
-                  value={adjustmentReason}
-                  onChange={(e) => setAdjustmentReason(e.target.value)}
-                  placeholder={
-                    adjustmentType === 'in'
-                      ? 'مثال: توريد نقدي من المندوب فلان، استلام مبيعات يومية، إيداع بنكي...'
-                      : 'مثال: تسليم عهدة كاش للمندوب، سحب نثريات غير مجدولة، مصاريف بنكية...'
-                  }
-                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-end gap-2.5 p-4 sm:px-6 border-t border-slate-100 shrink-0 bg-slate-50/90 rounded-b-3xl">
                 <button
                   type="button"
                   onClick={() => setIsAdjustmentModalOpen(false)}
-                  className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl font-bold transition"
+                  className="px-4 py-2 text-slate-600 hover:bg-slate-200/60 rounded-xl font-bold transition cursor-pointer"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
                   disabled={isAdjusting || !adjustmentAmount}
-                  className={`px-5 py-2 text-white rounded-xl font-bold shadow-md transition cursor-pointer ${
+                  className={`px-5 py-2.5 text-white rounded-xl font-bold shadow-md transition cursor-pointer active:scale-98 ${
                     adjustmentType === 'in' 
                       ? 'bg-emerald-600 hover:bg-emerald-700' 
                       : 'bg-rose-600 hover:bg-rose-700'
