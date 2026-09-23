@@ -120,20 +120,52 @@ export const TreasuryManagement: React.FC = () => {
     });
   }, [targetTransactions, selectedOrgFilter, inspectingAccount, searchQuery]);
 
-  // Overall Financial Stats
+  // Overall Financial Stats (Aggregated only across primary physical containers to prevent double counting linked channels)
   const stats = useMemo(() => {
     let totalBalance = 0;
     let totalIn = 0;
     let totalOut = 0;
 
-    filteredAccounts.forEach(acc => {
+    // Helper to determine if an account is a child channel (InstaPay or Wallet) linked to a parent Bank account.
+    // In Egyptian financial systems, InstaPay/linked wallets are mirror digital payment channels directly
+    // accessing the funds of a primary bank account. Dual deduction keeps both in sync, but for macro-level
+    // liquidity totals (الرصيد الكلي، إجمالي الوارد، إجمالي المنصرف), child channels must not be double-counted.
+    const isLinkedChildAccount = (acc: PaymentAccount) => {
+      if (acc.type !== 'instapay' && acc.type !== 'wallet') return false;
+      const parent = acc.parentAccountId
+        ? targetAccounts.find(a => a.id === acc.parentAccountId)
+        : resolveParentBankAccount(acc);
+      return Boolean(parent && parent.id !== acc.id);
+    };
+
+    // Filter to primary independent financial accounts (Banks, Cash Safes, standalone unlinked wallets)
+    let accountsToSum = filteredAccounts.filter(acc => !isLinkedChildAccount(acc));
+
+    // Fallback: If user filtered/searched specifically for a child account (e.g. typed "إنستاباي"),
+    // so accountsToSum would be empty, fall back to filteredAccounts so the user sees the numbers for that account.
+    if (accountsToSum.length === 0 && filteredAccounts.length > 0) {
+      accountsToSum = filteredAccounts;
+    }
+
+    accountsToSum.forEach(acc => {
       totalBalance += Number(acc.currentBalance ?? acc.balance ?? 0);
       totalIn += Number(acc.totalIn ?? 0);
       totalOut += Number(acc.totalOut ?? 0);
     });
 
-    return { totalBalance, totalIn, totalOut };
-  }, [filteredAccounts]);
+    const primaryCount = accountsToSum.length;
+    const totalCount = filteredAccounts.length;
+    const linkedCount = totalCount - primaryCount;
+
+    return { 
+      totalBalance, 
+      totalIn, 
+      totalOut, 
+      primaryCount, 
+      totalCount, 
+      linkedCount 
+    };
+  }, [filteredAccounts, targetAccounts, resolveParentBankAccount]);
 
   // Export Filtered Ledger Transactions to Excel / CSV with UTF-8 BOM
   const exportLedgerToExcel = () => {
@@ -372,9 +404,20 @@ export const TreasuryManagement: React.FC = () => {
             <div className="text-2xl sm:text-3xl font-black tracking-tight">
               {stats.totalBalance.toLocaleString()} <span className="text-xs font-normal opacity-80">{activeOrg?.currency || 'EGP'}</span>
             </div>
-            <span className="text-[11px] text-emerald-100/90 mt-2 block">
-              عبر {filteredAccounts.length} حسابات وخزائن نشطة
-            </span>
+            <div className="text-[11px] text-emerald-100/90 mt-2 flex items-center justify-between gap-1 flex-wrap">
+              <span>
+                عبر {stats.primaryCount} أوعية مالية رئيسية
+                {stats.linkedCount > 0 && ` (+ ${stats.linkedCount} قنوات دفع تابعة)`}
+              </span>
+              {stats.linkedCount > 0 && (
+                <span 
+                  className="inline-flex items-center gap-1 bg-emerald-800/60 backdrop-blur-xs px-2 py-0.5 rounded-full text-[10px] text-emerald-200 border border-emerald-400/30"
+                  title="تم استبعاد القنوات التابعة (إنستاباي/محافظ تابعة لحساب بنكي) تلقائياً لمنع ازدواجية احتساب الرصيد"
+                >
+                  بدون تكرار مزدوج ✓
+                </span>
+              )}
+            </div>
           </div>
           <Wallet className="absolute -left-3 -bottom-3 h-24 w-24 text-white/10" />
         </div>
@@ -390,7 +433,7 @@ export const TreasuryManagement: React.FC = () => {
           <div className="text-2xl font-black text-emerald-700">
             +{stats.totalIn.toLocaleString()} <span className="text-xs font-bold text-slate-400">{activeOrg?.currency || 'EGP'}</span>
           </div>
-          <span className="text-[11px] text-slate-400 mt-1 block">توريدات، تحصيلات عملاء، وإيداعات نقدية</span>
+          <span className="text-[11px] text-slate-400 mt-1 block">توريدات، تحصيلات عملاء، وإيداعات نقدية رئيسية</span>
         </div>
 
         {/* Total OUT */}
@@ -404,7 +447,7 @@ export const TreasuryManagement: React.FC = () => {
           <div className="text-2xl font-black text-rose-700">
             -{stats.totalOut.toLocaleString()} <span className="text-xs font-bold text-slate-400">{activeOrg?.currency || 'EGP'}</span>
           </div>
-          <span className="text-[11px] text-slate-400 mt-1 block">طلبات صرف معتمدة، تحويلات لمندوبين، ومصاريف</span>
+          <span className="text-[11px] text-slate-400 mt-1 block">طلبات صرف معتمدة، تحويلات، وعُهد منصرفة (فعلية)</span>
         </div>
       </div>
 
@@ -570,14 +613,19 @@ export const TreasuryManagement: React.FC = () => {
                           </div>
                         )}
                         {(acc.type === 'instapay' || acc.type === 'wallet') && (
-                          <div className="flex items-center justify-between text-[10.5px] pt-1.5 border-t border-blue-100 bg-blue-50/70 -mx-3 px-3 py-1 rounded-b-xl">
+                          <div className="flex items-center justify-between text-[10.5px] pt-1.5 border-t border-blue-100 bg-blue-50/70 -mx-3 px-3 py-1.5 rounded-b-xl">
                             <span className="text-blue-700 flex items-center gap-1 font-bold">
                               <Landmark className="h-3 w-3 text-blue-600 shrink-0" />
                               خصم/إيداع مزدوج بـ:
                             </span>
-                            <span className="font-black text-blue-950 truncate max-w-[140px]" title={acc.parentAccountName || resolveParentBankAccount(acc)?.name || 'الحساب البنكي الرئيسي'}>
-                              {acc.parentAccountName || resolveParentBankAccount(acc)?.name || 'الحساب البنكي الرئيسي'}
-                            </span>
+                            <div className="text-left">
+                              <span className="font-black text-blue-950 truncate max-w-[140px] block" title={acc.parentAccountName || resolveParentBankAccount(acc)?.name || 'الحساب البنكي الرئيسي'}>
+                                {acc.parentAccountName || resolveParentBankAccount(acc)?.name || 'الحساب البنكي الرئيسي'}
+                              </span>
+                              <span className="text-[9.5px] text-blue-600/80 block">
+                                (قناة تابعة - لا تكرر بالرصيد الكلي)
+                              </span>
+                            </div>
                           </div>
                         )}
                       </div>
