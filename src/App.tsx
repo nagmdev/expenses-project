@@ -16,6 +16,7 @@ import { RequestDetailModal } from './components/RequestDetailModal';
 import { FirebaseConfigModal } from './components/FirebaseConfigModal';
 import { UserProfileModal } from './components/UserProfileModal';
 import { SettingsManagement } from './components/SettingsManagement';
+import { ProfileManagement } from './components/ProfileManagement';
 import { ExpenseRequest, SUPPORTED_CURRENCIES } from './types';
 import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
@@ -111,7 +112,7 @@ const MainApp: React.FC = () => {
       <Header 
         onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
         onOpenNewOrg={() => setIsQuickOrgModalOpen(true)}
-        onOpenProfile={() => setIsProfileModalOpen(true)}
+        onOpenProfile={() => setActiveTab('profile')}
       />
 
       {/* Firebase Permission / Connection Alert (Super Admin Only) */}
@@ -187,14 +188,22 @@ const MainApp: React.FC = () => {
             </div>
           </div>
         ) : currentRole === 'employee' ? (
-          /* Employee Experience: Strictly Dedicated Banking Tracker */
-          <RequesterTracker 
-            onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
-            onSelectRequest={setSelectedRequest}
-          />
+          /* Employee Experience: Dedicated Banking Tracker or Full Profile */
+          activeTab === 'profile' ? (
+            <ProfileManagement />
+          ) : (
+            <RequesterTracker 
+              onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+              onSelectRequest={setSelectedRequest}
+            />
+          )
         ) : (
           /* Admin / Super Admin / Data Entry Multi-Tab View */
           <>
+            {activeTab === 'profile' && (
+              <ProfileManagement />
+            )}
+
             {activeTab === 'dashboard' && currentRole !== 'data_entry' && (
               <DashboardAnalytics 
                 onSelectRequest={setSelectedRequest}

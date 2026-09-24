@@ -11,7 +11,8 @@ import {
   Building2,
   Settings,
   Landmark,
-  Briefcase
+  Briefcase,
+  UserCheck
 } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
@@ -241,6 +242,14 @@ export const Navbar: React.FC = () => {
       badge: null,
     });
   }
+
+  // Append Profile & Payout Info tab for ALL roles
+  navItems.push({
+    id: 'profile',
+    label: '👤 حسابي والبيانات المالية',
+    icon: UserCheck,
+    badge: null,
+  });
 
   return (
     <nav className="bg-white border-b border-slate-200">

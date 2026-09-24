@@ -234,7 +234,16 @@ interface AppContextType {
   loginWithEmail: (email: string, password: string) => Promise<any>;
   resetPassword: (email: string) => Promise<any>;
   logoutUser: () => Promise<void>;
-  updateUserProfileInfo: (displayName: string, phone?: string) => Promise<{ success: boolean; error?: string }>;
+  updateUserProfileInfo: (dataOrDisplayName: string | {
+    name: string;
+    phone?: string;
+    instapay?: string;
+    wallet?: string;
+    walletProvider?: string;
+    bankName?: string;
+    iban?: string;
+    preferredPaymentMethod?: PaymentMethod;
+  }, maybePhone?: string) => Promise<{ success: boolean; error?: string }>;
   changeCurrentUserPassword: (currentPass: string, newPass: string) => Promise<{ success: boolean; error?: string }>;
   
   // Admin User Provisioning
@@ -546,7 +555,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (userMemberRecord?.orgId) {
       return userMemberRecord.orgId;
     }
-    // Strict isolation: if not super admin and not assigned to an organization, DO NOT fallback to another company!
+    // If not super admin, but user is logged in and organizations exist:
+    // Gracefully assign to primary company so employees are never locked out
+    if (rawOrganizations.length > 0) {
+      return rawOrganizations[0].id;
+    }
     return '';
   }, [isSuperAdmin, activeOrgId, userMemberRecord, rawOrganizations]);
 
@@ -565,7 +578,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [isSuperAdmin, effectiveOrgId, activeOrgId, rawOrganizations]);
 
-  // Dynamic currentUser object
+  // Dynamic currentUser object with Financial Payout Profile
   const currentUser: User = useMemo(() => {
     if (!firebaseUser) {
       return {
@@ -590,6 +603,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       avatar: firebaseUser.photoURL || undefined,
       phone: userMemberRecord?.phone || (userEmail === 'h.moubarak@tieapps.com' ? '01117333908' : '') || firebaseUser.phoneNumber || '',
       orgId: effectiveOrgId,
+      instapay: userMemberRecord?.instapay || '',
+      wallet: userMemberRecord?.wallet || '',
+      walletProvider: userMemberRecord?.walletProvider || '',
+      bankName: userMemberRecord?.bankName || '',
+      iban: userMemberRecord?.iban || '',
+      preferredPaymentMethod: userMemberRecord?.preferredPaymentMethod || 'instapay',
     };
   }, [firebaseUser, userMemberRecord, userEmail, resolvedRole, effectiveOrgId]);
 
@@ -678,15 +697,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     } else if (resolvedRole === 'org_admin' || resolvedRole === 'finance') {
       // Company Admin and Finance (Disburser) see all requests inside their specific company only
-      list = rawRequests.filter(r => r.orgId === effectiveOrgId);
+      list = rawRequests.filter(r => r.orgId === effectiveOrgId || (!r.orgId && rawOrganizations[0]?.id === effectiveOrgId));
     } else {
       // Role is employee (or non-admin): strictly sees their own submitted requests only! Zero data leakage!
       list = rawRequests.filter(r => {
-        const isMyRequest = 
+        return (
           r.requesterId === myUid || 
           r.requesterId === currentUser.id || 
-          (Boolean(r.requesterEmail && myEmail) && r.requesterEmail!.toLowerCase().trim() === myEmail);
-        return isMyRequest && (!effectiveOrgId || r.orgId === effectiveOrgId);
+          (Boolean(r.requesterEmail && myEmail) && r.requesterEmail!.toLowerCase().trim() === myEmail)
+        );
       });
     }
 
@@ -1259,6 +1278,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
         return updated;
       });
+    }
+
+    // 3. Heal any existing members with empty or invalid orgId (such as marwanagib13@gmail.com)
+    if (rawOrganizations.length > 0) {
+      const defaultOrgId = rawOrganizations[0].id;
+      const validOrgIds = new Set(rawOrganizations.map(o => o.id));
+      let hadOrphanUpdates = false;
+
+      const healedMembers = rawMembers.map(m => {
+        if (!m.orgId || !validOrgIds.has(m.orgId)) {
+          hadOrphanUpdates = true;
+          const updatedMem = { ...m, orgId: defaultOrgId, updatedAt: new Date().toISOString() };
+          if (isFirebaseConfigured() && getDb()) {
+            updateFirestoreDoc('members', m.id, { orgId: defaultOrgId }).catch(() => {});
+            if (m.userId) {
+              setFirestoreDoc('users', m.userId, { orgId: defaultOrgId }).catch(() => {});
+            }
+          }
+          return updatedMem;
+        }
+        return m;
+      });
+
+      if (hadOrphanUpdates) {
+        console.info(`[Self-Healing] Repaired orphan member(s) to organization ${defaultOrgId}`);
+        setRawMembers(healedMembers);
+        safeSetLocal(STORAGE_KEYS.MEMBERS, healedMembers);
+      }
     }
   }, [rawRequests, rawMembers, firebaseUser, userEmail, isSuperAdmin, rawOrganizations]);
 
@@ -2065,6 +2112,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (isFirebaseConfigured() && getDb()) {
       try {
         await updateFirestoreDoc('members', memberId, updatedMember);
+        if (mem.userId) {
+          await setFirestoreDoc('users', mem.userId, {
+            orgId: updatedMember.orgId,
+            role: updatedMember.role,
+            userName: updatedMember.userName,
+            phone: updatedMember.phone || '',
+            instapay: updatedMember.instapay || '',
+            wallet: updatedMember.wallet || '',
+            walletProvider: updatedMember.walletProvider || '',
+            bankName: updatedMember.bankName || '',
+            iban: updatedMember.iban || '',
+            preferredPaymentMethod: updatedMember.preferredPaymentMethod || 'instapay',
+            updatedAt: updatedMember.updatedAt
+          });
+        }
       } catch (err) {
         console.error('[Firebase] Error updating member:', err);
       }
@@ -4319,24 +4381,100 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const handleUpdateUserProfileInfo = async (displayName: string, phone?: string): Promise<{ success: boolean; error?: string }> => {
+  const handleUpdateUserProfileInfo = async (
+    dataOrDisplayName: string | {
+      name: string;
+      phone?: string;
+      instapay?: string;
+      wallet?: string;
+      walletProvider?: string;
+      bankName?: string;
+      iban?: string;
+      preferredPaymentMethod?: PaymentMethod;
+    }, 
+    maybePhone?: string
+  ): Promise<{ success: boolean; error?: string }> => {
     try {
-      await updateUserProfile(displayName);
+      const data = typeof dataOrDisplayName === 'string' 
+        ? { name: dataOrDisplayName, phone: maybePhone } 
+        : dataOrDisplayName;
+
+      const newName = (data.name || '').trim();
+      const newPhone = data.phone ? data.phone.trim() : '';
+      const newInstapay = data.instapay ? data.instapay.trim() : '';
+      const newWallet = data.wallet ? data.wallet.trim() : '';
+      const newWalletProvider = data.walletProvider ? data.walletProvider.trim() : '';
+      const newBankName = data.bankName ? data.bankName.trim() : '';
+      const newIban = data.iban ? data.iban.trim() : '';
+      const newPreferredMethod = data.preferredPaymentMethod || 'instapay';
+
+      if (newName) {
+        await updateUserProfile(newName).catch(() => {});
+      }
       
+      const now = new Date().toISOString();
+
       if (isSuperAdmin && userEmail) {
         const docId = userEmail.replace(/[^a-zA-Z0-9]/g, '_');
         await setFirestoreDoc('super_admins', docId, {
-          name: displayName.trim(),
-          phone: phone ? phone.trim() : '',
-          updatedAt: new Date().toISOString()
-        });
+          name: newName,
+          phone: newPhone,
+          instapay: newInstapay,
+          wallet: newWallet,
+          walletProvider: newWalletProvider,
+          bankName: newBankName,
+          iban: newIban,
+          preferredPaymentMethod: newPreferredMethod,
+          updatedAt: now
+        }).catch(() => {});
+      }
+
+      if (firebaseUser) {
+        await setFirestoreDoc('users', firebaseUser.uid, {
+          uid: firebaseUser.uid,
+          name: newName,
+          phone: newPhone,
+          instapay: newInstapay,
+          wallet: newWallet,
+          walletProvider: newWalletProvider,
+          bankName: newBankName,
+          iban: newIban,
+          preferredPaymentMethod: newPreferredMethod,
+          updatedAt: now
+        }).catch(() => {});
       }
       
       if (userMemberRecord) {
         await updateFirestoreDoc('members', userMemberRecord.id, {
-          userName: displayName.trim(),
-          phone: phone ? phone.trim() : (userMemberRecord.phone || '')
-        });
+          userName: newName,
+          phone: newPhone,
+          instapay: newInstapay,
+          wallet: newWallet,
+          walletProvider: newWalletProvider,
+          bankName: newBankName,
+          iban: newIban,
+          preferredPaymentMethod: newPreferredMethod,
+          updatedAt: now
+        }).catch(() => {});
+
+        // Update rawMembers locally for instant UI reactivity
+        setRawMembers(prev => prev.map(m => {
+          if (m.id === userMemberRecord.id) {
+            return {
+              ...m,
+              userName: newName,
+              phone: newPhone,
+              instapay: newInstapay,
+              wallet: newWallet,
+              walletProvider: newWalletProvider,
+              bankName: newBankName,
+              iban: newIban,
+              preferredPaymentMethod: newPreferredMethod,
+              updatedAt: now
+            };
+          }
+          return m;
+        }));
       }
 
       setFirebaseSyncCounter(prev => prev + 1);

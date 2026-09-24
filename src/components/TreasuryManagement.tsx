@@ -384,15 +384,43 @@ export const TreasuryManagement: React.FC = () => {
           </div>
         </div>
 
-        {/* Action Button */}
-        <button
-          type="button"
-          onClick={handleOpenAddAccount}
-          className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs shadow-md transition cursor-pointer"
-        >
-          <Plus className="h-4 w-4" />
-          <span>إضافة حساب / خزينة جديدة</span>
-        </button>
+        {/* Action Buttons */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => {
+              const defaultAcc = filteredAccounts[0] || targetAccounts[0];
+              if (defaultAcc) {
+                handleOpenAdjustment(defaultAcc, 'in');
+              } else {
+                handleOpenAddAccount();
+              }
+            }}
+            className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl font-bold text-xs shadow-md transition cursor-pointer"
+          >
+            <ArrowDownLeft className="h-4 w-4" />
+            <span>⚡ إيداع وتغذية رصيد خزينة / بنك (+ IN)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={exportLedgerToExcel}
+            className="flex items-center gap-2 px-3.5 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 rounded-xl font-bold text-xs shadow-2xs transition cursor-pointer"
+            title="تصدير كشف حركة الخزائن والحسابات إلى ملف Excel"
+          >
+            <FileSpreadsheet className="h-4 w-4 text-indigo-600" />
+            <span>تصدير كشف الحسابات (Excel)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleOpenAddAccount}
+            className="flex items-center gap-2 px-3.5 py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold text-xs shadow-2xs transition cursor-pointer"
+          >
+            <Plus className="h-4 w-4" />
+            <span>إضافة خزينة / حساب</span>
+          </button>
+        </div>
       </div>
 
       {/* Financial Overview Cards */}
@@ -1045,6 +1073,25 @@ export const TreasuryManagement: React.FC = () => {
 
             <form onSubmit={handleSaveAdjustment} className="flex flex-col flex-1 overflow-hidden min-h-0">
               <div className="p-5 overflow-y-auto flex-1 space-y-3.5 text-xs overscroll-contain">
+                {/* Account Selector */}
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">الحساب أو الخزينة المستهدفة بالعملية *</label>
+                  <select
+                    value={adjustmentTargetAccount.id}
+                    onChange={(e) => {
+                      const found = targetAccounts.find(a => a.id === e.target.value);
+                      if (found) setAdjustmentTargetAccount(found);
+                    }}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 text-xs"
+                  >
+                    {targetAccounts.filter(a => a.active !== false).map(acc => (
+                      <option key={acc.id} value={acc.id}>
+                        {acc.name} ({acc.bankName || acc.type}) - الرصيد: {Number(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 {/* Current balance reminder */}
                 <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
                   <span className="text-slate-500 font-medium">الرصيد الحالي للحساب:</span>
@@ -1054,8 +1101,8 @@ export const TreasuryManagement: React.FC = () => {
                 </div>
 
                 {/* Amount */}
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
+                <div className="space-y-1.5">
+                  <label className="block font-bold text-slate-700">
                     المبلغ المراد {adjustmentType === 'in' ? 'إيداعه' : 'سحبه'} ({adjustmentTargetAccount.currency}) *
                   </label>
                   <input
@@ -1070,23 +1117,90 @@ export const TreasuryManagement: React.FC = () => {
                       adjustmentType === 'in' ? 'focus:border-emerald-500 text-emerald-800' : 'focus:border-rose-500 text-rose-800'
                     }`}
                   />
+                  {/* Quick Amount Chips */}
+                  <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                    <span className="text-[11px] text-slate-500 font-semibold">مبالغ سريعة:</span>
+                    {[500, 1000, 5000, 10000, 50000].map(amt => (
+                      <button
+                        key={amt}
+                        type="button"
+                        onClick={() => {
+                          const current = parseFloat(adjustmentAmount) || 0;
+                          setAdjustmentAmount(String(current + amt));
+                        }}
+                        className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 rounded-lg text-[11px] font-bold transition cursor-pointer"
+                      >
+                        +{amt.toLocaleString()}
+                      </button>
+                    ))}
+                    {adjustmentAmount && (
+                      <button
+                        type="button"
+                        onClick={() => setAdjustmentAmount('')}
+                        className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[10px] font-medium transition cursor-pointer"
+                      >
+                        مسح
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Reason / Notes */}
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">بيان وسبب الحركة *</label>
+                <div className="space-y-1.5">
+                  <label className="block font-bold text-slate-700">بيان وسبب الحركة *</label>
                   <textarea
                     required
-                    rows={3}
+                    rows={2}
                     value={adjustmentReason}
                     onChange={(e) => setAdjustmentReason(e.target.value)}
                     placeholder={
                       adjustmentType === 'in'
-                        ? 'مثال: توريد نقدي من المندوب فلان، استلام مبيعات يومية، إيداع بنكي...'
-                        : 'مثال: تسليم عهدة كاش للمندوب، سحب نثريات غير مجدولة، مصاريف بنكية...'
+                        ? 'مثال: توريد نقدي، استلام مبيعات يومية، إيداع بنكي...'
+                        : 'مثال: تسليم عهدة كاش، سحب نثريات غير مجدولة، مصاريف بنكية...'
                     }
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                   />
+                  {/* Quick Reason Chips */}
+                  {adjustmentType === 'in' ? (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[11px] text-slate-500 font-semibold">أسباب شائعة:</span>
+                      {[
+                        'تغذية رصيد عهدة تشغيل',
+                        'إيداع مبيعات نقدية',
+                        'تحويل من حساب بنكي',
+                        'تمويل رأس مال تشغيلي',
+                        'استرداد متبقي عهدة موظف'
+                      ].map(reason => (
+                        <button
+                          key={reason}
+                          type="button"
+                          onClick={() => setAdjustmentReason(reason)}
+                          className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium transition cursor-pointer"
+                        >
+                          {reason}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[11px] text-slate-500 font-semibold">أسباب شائعة:</span>
+                      {[
+                        'صرف عهدة نقدية لمندوب',
+                        'مصروفات نقدية طارئة',
+                        'تحويل إلى حساب فرعي',
+                        'رسوم ومصاريف بنكية'
+                      ].map(reason => (
+                        <button
+                          key={reason}
+                          type="button"
+                          onClick={() => setAdjustmentReason(reason)}
+                          className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium transition cursor-pointer"
+                        >
+                          {reason}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 

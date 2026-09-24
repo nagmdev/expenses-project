@@ -47,6 +47,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 }) => {
   const { 
     requests, 
+    allRequests,
     organizations,
     allOrganizations,
     activeOrg, 
@@ -62,6 +63,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     disburseRequest,
     resolveParentBankAccount
   } = useApp();
+
+  const isSuperAdmin = currentRole === 'super_admin' || currentUser.role === 'super_admin';
+  const targetRequests = useMemo(() => {
+    return (isSuperAdmin && activeOrgId === 'all') ? (allRequests && allRequests.length > 0 ? allRequests : requests) : requests;
+  }, [isSuperAdmin, activeOrgId, allRequests, requests]);
 
   const canApprove = currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance';
 
@@ -110,20 +116,20 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   // Derive unique departments for filter dropdown
   const uniqueDepartments = useMemo(() => {
     const set = new Set<string>();
-    requests.forEach(r => {
+    targetRequests.forEach(r => {
       if (r.requesterDepartment) set.add(r.requesterDepartment.trim());
     });
     return Array.from(set);
-  }, [requests]);
+  }, [targetRequests]);
 
   // Derive unique requesters for filter dropdown
   const uniqueRequesters = useMemo(() => {
     const set = new Set<string>();
-    requests.forEach(r => {
+    targetRequests.forEach(r => {
       if (r.requesterName) set.add(r.requesterName.trim());
     });
     return Array.from(set).sort();
-  }, [requests]);
+  }, [targetRequests]);
 
   // Strict deduplication & comprehensive multi-filter matching
   const filteredRequests = useMemo(() => {
@@ -131,7 +137,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     const seenNumbers = new Set<string>();
     const now = new Date();
 
-    return requests.filter(req => {
+    return targetRequests.filter(req => {
       const numKey = (req.requestNumber || '').trim().toUpperCase();
       if (seenIds.has(req.id) || (numKey && seenNumbers.has(numKey))) {
         return false;
@@ -206,11 +212,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   // Selected Active Request for Deep Tracking Workspace
   const activeRequest: ExpenseRequest | undefined = useMemo(() => {
     if (selectedReqId) {
-      const found = filteredRequests.find(r => r.id === selectedReqId) || requests.find(r => r.id === selectedReqId);
+      const found = filteredRequests.find(r => r.id === selectedReqId) || targetRequests.find(r => r.id === selectedReqId);
       if (found) return found;
     }
     return filteredRequests[0];
-  }, [selectedReqId, filteredRequests, requests]);
+  }, [selectedReqId, filteredRequests, targetRequests]);
 
   // Synchronize disburse method with request preference when activeRequest changes
   React.useEffect(() => {
@@ -444,19 +450,19 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   };
 
   // Financial KPIs Calculations
-  const totalAmount = requests.reduce((sum, r) => sum + r.amount, 0);
-  const totalDisbursed = requests
+  const totalAmount = targetRequests.reduce((sum, r) => sum + r.amount, 0);
+  const totalDisbursed = targetRequests
     .filter(r => r.status === 'disbursed')
     .reduce((sum, r) => sum + r.amount, 0);
-  const totalApproved = requests
+  const totalApproved = targetRequests
     .filter(r => r.status === 'approved')
     .reduce((sum, r) => sum + r.amount, 0);
-  const totalPending = requests
+  const totalPending = targetRequests
     .filter(r => r.status === 'pending' || r.status === 'clarification_requested')
     .reduce((sum, r) => sum + r.amount, 0);
 
-  const approvedToDisburseCount = requests.filter(r => r.status === 'approved').length;
-  const currency = activeOrg?.currency || requests[0]?.currency || 'EGP';
+  const approvedToDisburseCount = targetRequests.filter(r => r.status === 'approved').length;
+  const currency = activeOrg?.currency || targetRequests[0]?.currency || 'EGP';
 
   const getStatusBadge = (status: ExpenseRequest['status']) => {
     switch (status) {

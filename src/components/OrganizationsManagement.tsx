@@ -453,7 +453,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setEditingMember(mem);
     setEditMemberName(mem.userName);
     setEditMemberPhone(mem.phone || '');
-    setEditMemberOrgId(mem.orgId);
+    setEditMemberOrgId(mem.orgId || displayOrgs[0]?.id || '');
     setEditMemberRole(mem.role);
     setEditMemberDept(mem.department || 'العمليات والتشغيل');
     setEditMemberJob(mem.jobTitle || 'موظف');
@@ -466,10 +466,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
     setEditMemberLoading(true);
     try {
+      const finalOrgId = editMemberOrgId || editingMember.orgId || displayOrgs[0]?.id || '';
       await updateMember(editingMember.id, {
         userName: editMemberName.trim(),
         phone: editMemberPhone.trim(),
-        orgId: editMemberOrgId || editingMember.orgId,
+        orgId: finalOrgId,
         role: editMemberRole,
         department: editMemberDept.trim(),
         jobTitle: editMemberJob.trim(),
@@ -1550,8 +1551,35 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                         </td>
 
                         <td className="py-3 px-4">
-                          <span className="font-semibold text-slate-700 block">{orgObj?.name || 'غير محدد'}</span>
-                          <span className="text-[10px] text-slate-400 font-mono block">{orgObj?.code || '-'}</span>
+                          {orgObj ? (
+                            <>
+                              <span className="font-semibold text-slate-700 block">{orgObj.name}</span>
+                              <span className="text-[10px] text-slate-400 font-mono block">{orgObj.code || '-'}</span>
+                            </>
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              <span className="text-[11px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200 w-fit">
+                                غير محدد ⚠️
+                              </span>
+                              {canManageOrgs && displayOrgs.length > 0 && (
+                                <select
+                                  value=""
+                                  onChange={async (e) => {
+                                    const newOrgId = e.target.value;
+                                    if (newOrgId) {
+                                      await updateMember(mem.id, { orgId: newOrgId });
+                                    }
+                                  }}
+                                  className="text-[10px] bg-indigo-50 hover:bg-indigo-100 text-indigo-900 font-bold border border-indigo-200 rounded-lg px-1.5 py-1 cursor-pointer"
+                                >
+                                  <option value="">⚡ تعيين لشركة الآن...</option>
+                                  {displayOrgs.map(o => (
+                                    <option key={o.id} value={o.id}>{o.name}</option>
+                                  ))}
+                                </select>
+                              )}
+                            </div>
+                          )}
                         </td>
 
                         <td className="py-3 px-4">

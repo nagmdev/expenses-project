@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
   X, 
@@ -287,9 +287,42 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [amount, setAmount] = useState('');
   const [currency, setCurrency] = useState(currentOrg?.currency || activeOrg?.currency || 'EGP');
   const [urgency, setUrgency] = useState<'low' | 'medium' | 'high'>('medium');
-  const [preferredPaymentMethod, setPreferredPaymentMethod] = useState<PaymentMethod>('instapay');
+  const [preferredPaymentMethod, setPreferredPaymentMethod] = useState<PaymentMethod>(
+    (currentUser.preferredPaymentMethod as PaymentMethod) || 'instapay'
+  );
   const [paymentAccountDetails, setPaymentAccountDetails] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // Helper to get auto-fill details from profile for a given payment method
+  const getProfilePayoutDetail = useCallback((method: PaymentMethod | string) => {
+    switch (method) {
+      case 'instapay':
+        return currentUser.instapay || currentUser.phone || '';
+      case 'wallet':
+      case 'digital_wallet':
+        return currentUser.wallet || currentUser.phone || '';
+      case 'bank_transfer':
+        return currentUser.iban 
+          ? (currentUser.bankName ? `${currentUser.bankName} - ${currentUser.iban}` : currentUser.iban) 
+          : '';
+      case 'cash':
+        return 'خزينة المقر الرئيسي';
+      default:
+        return '';
+    }
+  }, [currentUser]);
+
+  // Auto-fill from profile when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      const defaultMethod = (currentUser.preferredPaymentMethod as PaymentMethod) || 'instapay';
+      setPreferredPaymentMethod(defaultMethod);
+      const detail = getProfilePayoutDetail(defaultMethod);
+      if (detail) {
+        setPaymentAccountDetails(detail);
+      }
+    }
+  }, [isOpen, currentUser, getProfilePayoutDetail]);
 
   // Validation & Error Handling States
   const [formError, setFormError] = useState<string | null>(null);
@@ -1148,9 +1181,23 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       <CreditCard className="h-4 w-4 text-rose-600" />
                       <span>بيانات تحويل المبلغ للمستفيد (- OUT) *</span>
                     </div>
-                    <span className="text-[10px] font-bold text-rose-800 bg-rose-100 px-2 py-0.5 rounded-md">
-                      صرف خارج (- OUT)
-                    </span>
+                    {/* Auto-fill badge if details match profile */}
+                    {paymentAccountDetails && (
+                      paymentAccountDetails === currentUser.instapay || 
+                      paymentAccountDetails === currentUser.wallet || 
+                      paymentAccountDetails === currentUser.phone ||
+                      paymentAccountDetails === currentUser.iban ||
+                      (currentUser.iban && paymentAccountDetails.includes(currentUser.iban)) ||
+                      paymentAccountDetails === 'خزينة المقر الرئيسي'
+                    ) ? (
+                      <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100/90 border border-emerald-300 px-2 py-0.5 rounded-full flex items-center gap-1">
+                        <span>⚡ معبأة تلقائياً من بروفايلك</span>
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-bold text-rose-800 bg-rose-100 px-2 py-0.5 rounded-md">
+                        صرف خارج (- OUT)
+                      </span>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1159,8 +1206,10 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       <select
                         value={preferredPaymentMethod}
                         onChange={(e: any) => {
-                          setPreferredPaymentMethod(e.target.value);
-                          setPaymentAccountDetails('');
+                          const newMethod = e.target.value as PaymentMethod;
+                          setPreferredPaymentMethod(newMethod);
+                          const detail = getProfilePayoutDetail(newMethod);
+                          setPaymentAccountDetails(detail);
                           if (formError) setFormError(null);
                           if (fieldHighlight === 'paymentDetails') setFieldHighlight(null);
                         }}
@@ -1174,11 +1223,22 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                     </div>
 
                     <div>
-                      <label className="block font-bold text-slate-700 mb-1">
-                        {preferredPaymentMethod === 'instapay' ? 'عنوان انستاباي (IPA / رقم الهاتف) *' :
-                         preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية (أرقام فقط) *' :
-                         preferredPaymentMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN) *' : 'جهة الاستلام'}
-                      </label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="font-bold text-slate-700">
+                          {preferredPaymentMethod === 'instapay' ? 'عنوان انستاباي (IPA / رقم الهاتف) *' :
+                           preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية (أرقام فقط) *' :
+                           preferredPaymentMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN) *' : 'جهة الاستلام'}
+                        </label>
+                        {!paymentAccountDetails && getProfilePayoutDetail(preferredPaymentMethod) && (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentAccountDetails(getProfilePayoutDetail(preferredPaymentMethod))}
+                            className="text-[10px] text-purple-700 font-bold hover:underline cursor-pointer flex items-center gap-1"
+                          >
+                            ⚡ ملء من بروفايلي
+                          </button>
+                        )}
+                      </div>
                       <input
                         ref={paymentInputRef}
                         type="text"

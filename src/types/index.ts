@@ -23,6 +23,13 @@ export interface User {
   avatar?: string;
   phone?: string;
   orgId?: string;
+  // Financial Payout Profile (بيانات استلام المستحقات المالية للموظف)
+  instapay?: string; // عنوان إنستاباي IPA (مثال: name@instapay أو رقم الهاتف)
+  wallet?: string; // رقم المحفظة الإلكترونية (فودافون كاش / أورنج / اتصالات / وي)
+  walletProvider?: string; // مزود المحفظة (فودافون كاش، اتصالات كاش، أورنج، وي باي، إلخ)
+  bankName?: string; // اسم البنك (CIB، الأهلي، بنك مصر، إلخ)
+  iban?: string; // رقم الحساب المصرفي أو الآيبان الدولي IBAN
+  preferredPaymentMethod?: PaymentMethod; // طريقة الاستلام المفضلة تلقائياً
 }
 
 export interface OrganizationMember {
@@ -38,6 +45,13 @@ export interface OrganizationMember {
   active: boolean;
   phone?: string;
   updatedAt?: string;
+  // Financial Payout Profile
+  instapay?: string;
+  wallet?: string;
+  walletProvider?: string;
+  bankName?: string;
+  iban?: string;
+  preferredPaymentMethod?: PaymentMethod;
 }
 
 export type BudgetPeriod = 'monthly' | 'yearly' | 'per_request' | 'unlimited';
@@ -129,7 +143,7 @@ export interface TimelineEvent {
   timestamp: string;
 }
 
-export type PaymentMethod = 'instapay' | 'bank_transfer' | 'digital_wallet' | 'cash' | 'cheque';
+export type PaymentMethod = 'instapay' | 'bank_transfer' | 'digital_wallet' | 'cash' | 'cheque' | 'wallet';
 
 export type RequestType = 'expense' | 'income';
 
