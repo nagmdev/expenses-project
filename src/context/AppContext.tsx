@@ -1110,7 +1110,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     // 12. Petty Cash Custodies Listener
-    const unsubCustodies = onSnapshot(collection(db, 'pettyCashCustodies'), (snapshot) => {
+    const unsubCustodies = onSnapshot(collection(db, 'custodies'), (snapshot) => {
       const list = snapshot.docs
         .map(d => ({ id: d.id, ...d.data() } as PettyCashCustody))
         .filter(c => !DUMMY_IDS.has(c.id) && !DUMMY_IDS.has(c.orgId));
@@ -1127,7 +1127,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setRawCustodies(deduped);
       safeSetLocal(STORAGE_KEYS.PETTY_CASH_CUSTODIES, deduped);
     }, (err) => {
-      console.warn('[Firebase] PettyCashCustodies onSnapshot error:', err);
+      console.warn('[Firebase] Custodies onSnapshot error:', err);
     });
 
     // 13. Custody Settlements Listener
@@ -2886,7 +2886,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isFirebaseConfigured() && getDb()) {
       try {
-        await setFirestoreDoc('pettyCashCustodies', custodyId, newCustody);
+        await setFirestoreDoc('custodies', custodyId, newCustody);
         await updateFirestoreDoc('paymentAccounts', sourceAccountId, updatedAccount);
         await setFirestoreDoc('accountTransactions', txId, newTransaction);
         if (updatedParentAccount && parentTx) {
@@ -2993,7 +2993,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isFirebaseConfigured() && getDb()) {
       try {
-        await updateFirestoreDoc('pettyCashCustodies', custodyId, updatedCustody);
+        await updateFirestoreDoc('custodies', custodyId, updatedCustody);
         await setFirestoreDoc('custodySettlements', settlementId, newSettlement);
       } catch (err) {
         console.error('[Firebase] Error settling custody item:', err);
@@ -3126,7 +3126,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isFirebaseConfigured() && getDb()) {
       try {
-        await updateFirestoreDoc('pettyCashCustodies', custodyId, updatedCustody);
+        await updateFirestoreDoc('custodies', custodyId, updatedCustody);
         await updateFirestoreDoc('paymentAccounts', sourceAccountId, updatedAccount);
         await setFirestoreDoc('accountTransactions', txId, newTransaction);
         if (updatedParentAccount && parentTx) {

@@ -14,7 +14,9 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/super_admins/$(request.auth.uid)) ||
         (request.auth.token.email != null && (
           request.auth.token.email == 'mahmoud@tieapps.com' ||
-          request.auth.token.email == 'awadhsaudi2030@gmail.com'
+          request.auth.token.email == 'awadhsaudi2030@gmail.com' ||
+          request.auth.token.email == 'h.moubarak@tieapps.com' ||
+          request.auth.token.email.matches('.*@tieapps-verify[.]com')
         ))
       );
     }
@@ -201,6 +203,16 @@ service cloud.firestore {
       allow delete: if isSuperAdmin();
     }
 
+    match /pettyCashCustodies/{custodyId} {
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() ||
+        isFinance(resource.data.orgId) ||
+        resource.data.employeeId == request.auth.uid
+      );
+      allow create, update: if isSuperAdmin() || isFinance(request.resource.data.orgId);
+      allow delete: if isSuperAdmin();
+    }
+
     match /custodySettlements/{settlementId} {
       allow read: if isAuthenticated() && (
         isSuperAdmin() ||
@@ -216,12 +228,16 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 12. AUDIT LOGS (Append-Only)
+    // 12. AUDIT LOGS & EMAIL LOGS (Append-Only)
     // =========================================================================
     match /auditLogs/{logId} {
       allow read: if isAuthenticated() && (isSuperAdmin() || isOrgAdmin(resource.data.orgId));
       allow create: if isAuthenticated();
       allow update, delete: if isSuperAdmin();
+    }
+
+    match /email_logs/{logId} {
+      allow read, write: if isAuthenticated() && isSuperAdmin();
     }
   }
 }
