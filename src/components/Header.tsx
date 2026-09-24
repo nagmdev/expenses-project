@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { ExpenseRequest } from '../types';
+import { NotificationsDropdown } from './NotificationsDropdown';
 import { 
   Building2, 
   Plus, 
@@ -22,13 +24,15 @@ interface HeaderProps {
   onOpenNewOrg: () => void;
   onOpenProfile?: () => void;
   onToggleSidebar?: () => void;
+  onSelectRequest?: (req: ExpenseRequest) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({ 
   onOpenNewRequest, 
   onOpenNewOrg, 
   onOpenProfile,
-  onToggleSidebar 
+  onToggleSidebar,
+  onSelectRequest,
 }) => {
   const { 
     organizations, 
@@ -49,6 +53,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [isAuthProcessing, setIsAuthProcessing] = useState(false);
   const [showOrgDropdown, setShowOrgDropdown] = useState(false);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
 
   const handleLogout = async () => {
     setIsAuthProcessing(true);
@@ -180,21 +185,33 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Left Section (in RTL): Bell & New Request Button */}
           <div className="flex items-center gap-3">
-            {/* Notification Bell */}
-            <button
-              type="button"
-              onClick={() => setActiveTab('requests')}
-              className="relative px-3 py-2 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 transition cursor-pointer flex items-center gap-2 text-xs font-bold shadow-2xs"
-              title="التنبيهات والطلبات"
-            >
-              <div className="relative">
-                <Bell className="h-4 w-4 text-slate-500" />
-                <span className="absolute -top-1.5 -left-1.5 h-4 min-w-[16px] px-1 rounded-full bg-rose-500 text-white text-[9px] font-black flex items-center justify-center">
-                  {pendingCount > 0 ? pendingCount : 1}
-                </span>
-              </div>
-              <span>الجرس</span>
-            </button>
+            {/* Notification Bell with Dropdown Popover */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setIsNotificationsOpen(!isNotificationsOpen)}
+                className={`relative px-3 py-2 rounded-xl border text-xs font-bold shadow-2xs transition cursor-pointer flex items-center gap-2 ${
+                  isNotificationsOpen
+                    ? 'border-emerald-500 bg-emerald-50 text-emerald-800 ring-2 ring-emerald-500/20'
+                    : 'border-slate-200 text-slate-700 hover:bg-slate-50'
+                }`}
+                title="التنبيهات والأحداث"
+              >
+                <div className="relative">
+                  <Bell className={`h-4 w-4 ${isNotificationsOpen ? 'text-emerald-600' : 'text-slate-500'}`} />
+                  <span className="absolute -top-1.5 -left-1.5 h-4 min-w-[16px] px-1 rounded-full bg-rose-500 text-white text-[9px] font-black flex items-center justify-center animate-pulse">
+                    {pendingCount > 0 ? pendingCount : 1}
+                  </span>
+                </div>
+                <span>الجرس</span>
+              </button>
+
+              <NotificationsDropdown
+                isOpen={isNotificationsOpen}
+                onClose={() => setIsNotificationsOpen(false)}
+                onSelectRequest={onSelectRequest}
+              />
+            </div>
 
             {/* New Request Button */}
             <button

@@ -247,6 +247,7 @@ const MainApp: React.FC = () => {
         onOpenNewOrg={() => setIsQuickOrgModalOpen(true)}
         onOpenProfile={() => setActiveTab('profile')}
         onToggleSidebar={() => setIsSidebarOpen(prev => !prev)}
+        onSelectRequest={setSelectedRequest}
       />
 
       {/* Firebase Permission / Connection Alert (Super Admin Only) */}

@@ -510,7 +510,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Super admin emails list (loaded strictly from system defaults, environment, and Firestore 'super_admins' collection - NEVER client localStorage)
   const [superAdminEmails, setSuperAdminEmails] = useState<string[]>(() => {
-    const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com', 'h.moubarak@tieapps.com', 'marwanagib813@gmail.com'];
+    const defaultAdmins = [
+      'mahmoud@tieapps.com', 
+      'awadhsaudi2030@gmail.com', 
+      'h.moubarak@tieapps.com', 
+      'marwanagib813@gmail.com',
+      'mahmoud.hashim2000@gmail.com',
+      'mahmoudhashim2000@gmail.com'
+    ];
     const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
     const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
     return Array.from(new Set([...defaultAdmins, ...envList]));
