@@ -478,16 +478,18 @@ export const CustodyManagement: React.FC = () => {
           </div>
 
           {/* Action button */}
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleOpenIssueModal}
-              className="inline-flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs shadow-sm transition hover:shadow-md cursor-pointer shrink-0"
-            >
-              <Plus className="h-4 w-4" />
-              <span>صرف عهدة جديدة لموظف</span>
-            </button>
-          </div>
+          {currentRole !== 'employee' && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleOpenIssueModal}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs shadow-sm transition hover:shadow-md cursor-pointer shrink-0"
+              >
+                <Plus className="h-4 w-4" />
+                <span>صرف عهدة جديدة لموظف</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Filters Bar */}
@@ -852,15 +854,17 @@ export const CustodyManagement: React.FC = () => {
                       </button>
 
                       {/* Replenish Action */}
-                      <button
-                        type="button"
-                        onClick={() => handleOpenReplenishModal(custody)}
-                        className="py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
-                        title="استعاضة العهدة وإعادة تغذية رصيد الموظف"
-                      >
-                        <RefreshCw className="h-3.5 w-3.5 text-slate-600" />
-                        <span>استعاضة</span>
-                      </button>
+                      {currentRole !== 'employee' && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenReplenishModal(custody)}
+                          className="py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                          title="استعاضة العهدة وإعادة تغذية رصيد الموظف"
+                        >
+                          <RefreshCw className="h-3.5 w-3.5 text-slate-600" />
+                          <span>استعاضة</span>
+                        </button>
+                      )}
 
                       {/* Inspect details */}
                       <button

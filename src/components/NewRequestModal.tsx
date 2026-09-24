@@ -407,6 +407,18 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
   };
 
+  // Close on Escape key press for accessibility
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        handleClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   // Computed Values for Expense
@@ -631,7 +643,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto">
+    <div 
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="new-request-modal-title"
+    >
       <div 
         className="bg-white rounded-3xl max-w-2xl w-full max-h-[92vh] shadow-2xl border border-slate-100 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 my-auto"
         onClick={(e) => e.stopPropagation()}
@@ -644,7 +661,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         }`}>
           <div>
             <div className="flex items-center gap-2">
-              <h3 className="text-base font-bold text-slate-900">
+              <h3 id="new-request-modal-title" className="text-base font-bold text-slate-900">
                 {requestType === 'income' ? '📥 توريد وتحصيل مالي (Inflow)' : '💸 طلب صرف ومطالبة مالية (Outflow)'}
               </h3>
               <span className={`px-2 py-0.5 rounded-md text-[10px] font-black ${
@@ -664,6 +681,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           <button
             type="button"
             onClick={handleClose}
+            aria-label="إغلاق النافذة"
             className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition cursor-pointer"
           >
             <X className="h-5 w-5" />

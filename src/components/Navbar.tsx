@@ -32,17 +32,25 @@ export const Navbar: React.FC = () => {
   const navItems = [];
 
   if (currentRole === 'employee') {
-    navItems.push({
-      id: 'my-requests',
-      label: '💳 طلباتي ومتابعة التحويلات (InstaPay / البنك)',
-      icon: Clock3,
-      badge: myClarificationCount > 0 ? (
-        <span className="bg-red-100 text-red-700 text-xs px-2 py-0.5 rounded-full font-bold flex items-center gap-1 animate-pulse">
-          <BadgeAlert className="h-3 w-3" />
-          {myClarificationCount} بحاجة لتوضيح
-        </span>
-      ) : null,
-    });
+    navItems.push(
+      {
+        id: 'my-requests',
+        label: '💳 طلباتي ومتابعة التحويلات (InstaPay / البنك)',
+        icon: Clock3,
+        badge: myClarificationCount > 0 ? (
+          <span className="bg-red-100 text-red-700 text-xs px-2 py-0.5 rounded-full font-bold flex items-center gap-1 animate-pulse">
+            <BadgeAlert className="h-3 w-3" />
+            {myClarificationCount} بحاجة لتوضيح
+          </span>
+        ) : null,
+      },
+      {
+        id: 'custody',
+        label: '💼 عُهدي النقدية وتصفيتها',
+        icon: Briefcase,
+        badge: null,
+      }
+    );
   } else if (currentRole === 'org_admin') {
     navItems.push(
       {

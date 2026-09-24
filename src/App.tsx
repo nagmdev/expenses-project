@@ -188,9 +188,11 @@ const MainApp: React.FC = () => {
             </div>
           </div>
         ) : currentRole === 'employee' ? (
-          /* Employee Experience: Dedicated Banking Tracker or Full Profile */
+          /* Employee Experience: Dedicated Banking Tracker, Profile, or Petty Cash Custodies */
           activeTab === 'profile' ? (
             <ProfileManagement />
+          ) : activeTab === 'custody' ? (
+            <CustodyManagement />
           ) : (
             <RequesterTracker 
               onOpenNewRequest={() => setIsNewRequestModalOpen(true)}

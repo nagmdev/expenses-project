@@ -151,8 +151,8 @@ service cloud.firestore {
       // Update: strictly guarded transitions
       allow update: if isAuthenticated() && (
         isSuperAdmin() ||
-        // Org Admin: can approve, reject, or request clarification
-        (isOrgAdmin(resource.data.orgId) && (
+        // Org Admin & Finance: can approve, reject, or request clarification
+        ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && (
           request.resource.data.status in ['approved', 'rejected', 'clarification_requested', 'pending']
         )) ||
         // Finance: can disburse ONLY IF status is currently approved

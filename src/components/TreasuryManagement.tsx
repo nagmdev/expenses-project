@@ -607,18 +607,20 @@ export const TreasuryManagement: React.FC = () => {
                           >
                             <Edit3 className="h-3.5 w-3.5" />
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (confirm(`هل أنت متأكد من حذف الحساب "${acc.name}"؟`)) {
-                                deletePaymentAccount(acc.id);
-                              }
-                            }}
-                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                            title="حذف الحساب"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                          {isSuperAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (confirm(`هل أنت متأكد من حذف الحساب "${acc.name}"؟`)) {
+                                  deletePaymentAccount(acc.id);
+                                }
+                              }}
+                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                              title="حذف الحساب"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
                         </div>
                       </div>
 
