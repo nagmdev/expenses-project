@@ -863,47 +863,52 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       aria-labelledby="new-request-modal-title"
     >
       <div 
-        className="bg-white rounded-3xl max-w-2xl w-full max-h-[92vh] shadow-2xl border border-slate-100 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 my-auto"
+        className="bg-white rounded-3xl max-w-3xl lg:max-w-4xl w-full max-h-[92vh] shadow-2xl border border-slate-100 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 my-auto"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className={`shrink-0 flex items-center justify-between p-4 sm:p-5 border-b sticky top-0 z-10 transition-colors ${
-          isEditMode
-            ? 'border-indigo-100 bg-gradient-to-r from-indigo-50/95 via-purple-50/50 to-white'
-            : requestType === 'income'
-            ? 'border-emerald-100 bg-gradient-to-r from-emerald-50/95 via-teal-50/50 to-white'
-            : 'border-rose-100 bg-gradient-to-r from-rose-50/95 via-pink-50/40 to-white'
-        }`}>
-          <div>
-            <div className="flex items-center gap-2">
-              <h3 id="new-request-modal-title" className="text-base font-bold text-slate-900">
-                {isEditMode 
-                  ? `✏️ تعديل طلب المصروفات (${editingRequest?.requestNumber})` 
-                  : (requestType === 'income' ? '📥 توريد وتحصيل مالي (Inflow)' : '💸 طلب صرف ومطالبة مالية (Outflow)')}
-              </h3>
-              <span className={`px-2 py-0.5 rounded-md text-[10px] font-black ${
-                isEditMode
-                  ? 'bg-indigo-100 text-indigo-800 border border-indigo-300'
-                  : requestType === 'income'
-                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                  : 'bg-rose-100 text-rose-800 border border-rose-300'
-              }`}>
-                {isEditMode ? 'وضع التعديل' : (requestType === 'income' ? '+ إيداع وتوريد' : '- منصرف مالي')}
-              </span>
-            </div>
-            <p className="text-xs text-slate-500 mt-0.5">
-              {isEditMode
-                ? 'يمكنك تعديل تفاصيل ومبالغ وبنود الطلب والمرفقات قبل اعتماده وصرفه'
+        <div className="shrink-0 flex items-center justify-between p-4 sm:p-5 border-b border-slate-100 bg-white sticky top-0 z-10">
+          <div className="flex items-center gap-3">
+            <div className={`h-11 w-11 rounded-2xl flex items-center justify-center text-white shadow-md ${
+              isEditMode 
+                ? 'bg-gradient-to-tr from-indigo-600 to-purple-500 shadow-indigo-500/20' 
                 : requestType === 'income'
-                ? 'حدد المبلغ وشكل التوريد لإيداعه في كارت الخزينة وتحديث الرصيد فور الاستلام'
-                : 'اكتب المبلغ والبيانات المطلوبة لتقديم طلب الصرف للاعتماد الفوري'}
-            </p>
+                ? 'bg-gradient-to-tr from-emerald-600 to-teal-500 shadow-emerald-500/20'
+                : 'bg-gradient-to-tr from-[#0d9488] to-teal-500 shadow-teal-500/20'
+            }`}>
+              {isEditMode ? <Receipt className="h-5 w-5" /> : requestType === 'income' ? <ArrowDownLeft className="h-5 w-5" /> : <Wallet className="h-5 w-5" />}
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 id="new-request-modal-title" className="text-base sm:text-lg font-black text-slate-900 tracking-tight">
+                  {isEditMode 
+                    ? `تعديل طلب المصروفات (${editingRequest?.requestNumber})` 
+                    : (requestType === 'income' ? 'توريد وتحصيل مالي (Inflow)' : 'طلب صرف ومطالبة مالية')}
+                </h3>
+                <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black ${
+                  isEditMode
+                    ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                    : requestType === 'income'
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-teal-50 text-teal-700 border border-teal-200'
+                }`}>
+                  {isEditMode ? 'وضع التعديل' : (requestType === 'income' ? '+ إيداع وتوريد' : '- منصرف مالي')}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5 font-medium">
+                {isEditMode
+                  ? 'يمكنك تعديل تفاصيل ومبالغ وبنود الطلب والمرفقات قبل اعتماده وصرفه'
+                  : requestType === 'income'
+                  ? 'حدد المبلغ وشكل التوريد لإيداعه في كارت الخزينة وتحديث الرصيد فور الاستلام'
+                  : 'أدخل تفاصيل المصروف والمبلغ، وأرفق الفاتورة أو إيصال السداد للاعتماد الفوري'}
+              </p>
+            </div>
           </div>
           <button
             type="button"
             onClick={handleClose}
             aria-label="إغلاق النافذة"
-            className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition cursor-pointer"
+            className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition cursor-pointer"
           >
             <X className="h-5 w-5" />
           </button>
@@ -913,33 +918,33 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0 overflow-hidden">
           
           {/* Scrollable Form Body */}
-          <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
+          <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-5 sm:p-7 space-y-5 text-xs">
           
             {/* Primary Operation Switcher (Always at the very top) */}
-            <div className="bg-slate-100/90 p-1.5 rounded-2xl flex gap-2">
+            <div className="bg-slate-100/80 p-1.5 rounded-2xl flex gap-2 border border-slate-200/60">
               <button
                 type="button"
                 onClick={() => handleSwitchRequestType('expense')}
-                className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl font-bold transition cursor-pointer text-xs ${
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl font-extrabold transition cursor-pointer text-xs ${
                   requestType === 'expense'
-                    ? 'bg-white text-rose-800 shadow-xs border border-rose-200 ring-2 ring-rose-500/20'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                    ? 'bg-white text-teal-900 shadow-xs border border-teal-200/80 ring-2 ring-teal-500/10'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'
                 }`}
               >
-                <ArrowUpRight className="h-4 w-4 text-rose-600" />
-                <span>💸 طلب صرف مالي (Outflow)</span>
+                <ArrowUpRight className="h-4 w-4 text-teal-600 stroke-[2.5]" />
+                <span>طلب صرف مالي (- OUT)</span>
               </button>
               <button
                 type="button"
                 onClick={() => handleSwitchRequestType('income')}
-                className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl font-bold transition cursor-pointer text-xs ${
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl font-extrabold transition cursor-pointer text-xs ${
                   requestType === 'income'
-                    ? 'bg-white text-emerald-800 shadow-xs border border-emerald-200 ring-2 ring-emerald-500/20'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                    ? 'bg-white text-emerald-900 shadow-xs border border-emerald-200/80 ring-2 ring-emerald-500/10'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'
                 }`}
               >
-                <ArrowDownLeft className="h-4 w-4 text-emerald-600" />
-                <span>📥 توريد / تحصيل مالي (Inflow)</span>
+                <ArrowDownLeft className="h-4 w-4 text-emerald-600 stroke-[2.5]" />
+                <span>توريد / تحصيل مالي (+ IN)</span>
               </button>
             </div>
 
@@ -1170,18 +1175,18 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               </div>
             ) : (
               /* =========================================================================
-                  OUTFLOW FORM (طلب صرف ومصروف مالي)
+                  OUTFLOW FORM (طلب صرف ومصروف مالي) - MODERN 3-CARD FRIENDLY LAYOUT
                  ========================================================================= */
-              <div className="space-y-4 animate-in fade-in duration-150">
-                {/* 1. Quick Request Templates Bar */}
-                <div className="p-3.5 rounded-2xl border shadow-2xs space-y-2 bg-gradient-to-r from-indigo-50/90 via-purple-50/70 to-blue-50/90 border-indigo-100/90">
+              <div className="space-y-5 animate-in fade-in duration-150">
+                {/* 1. Quick Request Templates Bar (Soft & Friendly) */}
+                <div className="p-3 sm:p-3.5 rounded-2xl border border-slate-200/80 bg-slate-50/70 shadow-2xs space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="font-black text-xs flex items-center gap-1.5 text-indigo-950">
-                      <Zap className="h-4 w-4 text-indigo-600 fill-indigo-600" />
-                      <span>قوالب سريعة لمصروفات متكررة (- OUT):</span>
+                    <span className="font-extrabold text-xs flex items-center gap-1.5 text-slate-800">
+                      <Zap className="h-3.5 w-3.5 text-teal-600 fill-teal-600" />
+                      <span>قوالب سريعة للمصروفات المتكررة:</span>
                     </span>
-                    <span className="text-[10px] font-bold text-indigo-600/80">
-                      تعبئة وتحديد آلي للبنود بنقرة واحدة
+                    <span className="text-[10px] font-bold text-teal-700 bg-teal-50 px-2 py-0.5 rounded-full border border-teal-200/60">
+                      تعبئة بنقرة واحدة
                     </span>
                   </div>
 
@@ -1191,7 +1196,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         key={tpl.label}
                         type="button"
                         onClick={() => applyQuickTemplate(tpl)}
-                        className="shrink-0 px-3.5 py-2 bg-white rounded-xl text-xs font-bold transition-all duration-150 shadow-2xs hover:shadow-xs cursor-pointer active:scale-95 flex items-center gap-1.5 border hover:bg-indigo-600 hover:text-white text-indigo-900 border-indigo-200/80"
+                        className="shrink-0 px-3 py-1.5 bg-white rounded-xl text-xs font-bold transition-all duration-150 shadow-2xs hover:shadow-xs cursor-pointer active:scale-95 flex items-center gap-1.5 border border-slate-200 hover:border-teal-500 hover:bg-teal-50/50 hover:text-teal-900 text-slate-700"
                         title={`تطبيق قالب سريع: ${tpl.title}`}
                       >
                         <span>{tpl.label}</span>
@@ -1200,78 +1205,86 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   </div>
                 </div>
 
-                {/* 2. Amount, Currency & Urgency Card (Prominent & Easy to Fill) */}
-                <div 
-                  className={`bg-gradient-to-br from-rose-50/90 via-pink-50/40 to-white p-4 sm:p-5 rounded-2xl border-2 transition-all shadow-xs space-y-2.5 ${
-                    fieldHighlight === 'amount' 
-                      ? 'border-rose-500 ring-4 ring-rose-500/20' 
-                      : 'border-rose-300/90'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <label className="font-black text-slate-800 text-sm flex items-center gap-2">
-                      <span className="p-1.5 bg-rose-600 text-white rounded-lg">
-                        <ArrowUpRight className="h-4 w-4" />
+                {/* =====================================================================
+                    CARD 1: بيانات الطلب والمبلغ (Request & Amount Data)
+                   ===================================================================== */}
+                <div className="bg-slate-50/60 border border-slate-200/90 rounded-3xl p-5 sm:p-6 space-y-4">
+                  {/* Step Header */}
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-200/70">
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-7 h-7 rounded-xl bg-teal-600 text-white flex items-center justify-center font-black text-xs shadow-xs">
+                        1
                       </span>
-                      <span>المبلغ المطلوب صرفه (- OUT) *</span>
-                    </label>
-                    <div className="flex items-center gap-2">
+                      <div>
+                        <h4 className="font-black text-slate-900 text-sm">بيانات الطلب والمبلغ المطلوب</h4>
+                        <p className="text-[11px] text-slate-500">أدخل القيمة المراد صرفها، العملة، ودرجة الأولوية وبند المصروف</p>
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-bold text-teal-800 bg-teal-50 border border-teal-200/80 px-2.5 py-0.5 rounded-full">
+                      منصرف مالي (- OUT)
+                    </span>
+                  </div>
+
+                  {/* Amount & Currency Fields */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="font-extrabold text-slate-800 text-xs flex items-center gap-1.5">
+                        <Wallet className="h-3.5 w-3.5 text-teal-600" />
+                        <span>المبلغ المطلوب صرفه *</span>
+                      </label>
                       {fieldHighlight === 'amount' && (
-                        <span className="text-[11px] font-black text-rose-700 bg-rose-100 border border-rose-300 px-2.5 py-0.5 rounded-full animate-pulse">
+                        <span className="text-[11px] font-black text-rose-700 bg-rose-50 border border-rose-200 px-2.5 py-0.5 rounded-full animate-pulse">
                           ⚠️ يرجى إدخال المبلغ هنا
                         </span>
                       )}
-                      <span className="text-[11px] font-bold text-rose-800 bg-rose-100/90 px-2.5 py-0.5 rounded-full">
-                        منصرف مالي
-                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                      <div className="sm:col-span-8 relative">
+                        <input
+                          ref={amountInputRef}
+                          type="text"
+                          inputMode="decimal"
+                          value={amount}
+                          onKeyDown={(e) => handleNumericKeyDown(e, true)}
+                          onChange={(e) => {
+                            setAmount(sanitizeAmount(e.target.value));
+                            if (formError) setFormError(null);
+                            if (fieldHighlight === 'amount') setFieldHighlight(null);
+                          }}
+                          placeholder="0.00"
+                          className={`w-full p-3.5 bg-white border-2 rounded-2xl focus:outline-none font-black text-slate-900 pl-24 text-2xl sm:text-3xl shadow-xs transition-all ${
+                            fieldHighlight === 'amount'
+                              ? 'border-rose-500 ring-4 ring-rose-500/20'
+                              : 'border-slate-200 focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10'
+                          }`}
+                        />
+                        <span className="absolute left-3 top-3.5 px-2.5 py-1.5 rounded-xl text-xs font-black bg-slate-100 text-slate-700 border border-slate-200 flex items-center gap-1 pointer-events-none select-none">
+                          <span>-</span>
+                          <span>{currency}</span>
+                        </span>
+                      </div>
+
+                      <div className="sm:col-span-4">
+                        <select
+                          value={currency}
+                          onChange={(e) => setCurrency(e.target.value)}
+                          className="w-full p-3.5 bg-white border border-slate-200 rounded-2xl focus:outline-none focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-bold text-xs text-slate-800 shadow-xs h-full"
+                        >
+                          {SUPPORTED_CURRENCIES.map((c) => (
+                            <option key={c.code} value={c.code}>
+                              {c.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 pt-1">
-                    <div className="sm:col-span-8 relative">
-                      <input
-                        ref={amountInputRef}
-                        type="text"
-                        inputMode="decimal"
-                        value={amount}
-                        onKeyDown={(e) => handleNumericKeyDown(e, true)}
-                        onChange={(e) => {
-                          setAmount(sanitizeAmount(e.target.value));
-                          if (formError) setFormError(null);
-                          if (fieldHighlight === 'amount') setFieldHighlight(null);
-                        }}
-                        placeholder="0.00"
-                        className={`w-full p-3.5 bg-white border-2 rounded-xl focus:outline-none focus:ring-4 font-black text-slate-900 pl-24 text-xl shadow-xs transition-all ${
-                          fieldHighlight === 'amount'
-                            ? 'border-rose-500 focus:ring-rose-500/30 ring-2 ring-rose-500/20'
-                            : 'border-rose-400 focus:ring-rose-500/20'
-                        }`}
-                      />
-                      <span className="absolute left-3 top-3.5 px-2.5 py-1 rounded-lg text-xs font-black bg-rose-100 text-rose-800 border border-rose-300 flex items-center gap-1 pointer-events-none select-none">
-                        <span>-</span>
-                        <span>{currency}</span>
-                      </span>
-                    </div>
-
-                    <div className="sm:col-span-4">
-                      <select
-                        value={currency}
-                        onChange={(e) => setCurrency(e.target.value)}
-                        className="w-full p-3.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-rose-500/20 font-bold text-xs shadow-xs h-full"
-                      >
-                        {SUPPORTED_CURRENCIES.map((c) => (
-                          <option key={c.code} value={c.code}>
-                            {c.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* Urgency selector buttons */}
-                  <div className="pt-2 flex items-center justify-between border-t border-rose-100/80 text-xs">
-                    <span className="font-bold text-slate-600">درجة الأولوية:</span>
-                    <div className="flex items-center gap-2">
+                  {/* Urgency Selector (Segmented Pills) */}
+                  <div className="pt-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                    <span className="font-extrabold text-slate-700">درجة الأولوية:</span>
+                    <div className="grid grid-cols-3 gap-2 sm:flex sm:items-center">
                       {[
                         { id: 'low', label: '🟢 عادي' },
                         { id: 'medium', label: '🟡 متوسط الأهمية' },
@@ -1281,10 +1294,10 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                           key={u.id}
                           type="button"
                           onClick={() => setUrgency(u.id as any)}
-                          className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                          className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer text-center ${
                             urgency === u.id
-                              ? 'bg-rose-600 text-white shadow-xs'
-                              : 'bg-white/80 text-slate-600 hover:bg-white border border-slate-200'
+                              ? 'bg-white text-slate-900 border-2 border-teal-600 shadow-xs ring-2 ring-teal-500/10'
+                              : 'bg-white/80 text-slate-600 hover:bg-white border border-slate-200/90'
                           }`}
                         >
                           {u.label}
@@ -1292,134 +1305,336 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       ))}
                     </div>
                   </div>
-                </div>
 
-                {/* 3. Title Selection */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="font-bold text-slate-700">موضوع وعنوان الطلب *</label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsCustomTitle(!isCustomTitle);
-                        if (!isCustomTitle && !customTitle) {
-                          setCustomTitle(selectedTitlePreset.startsWith('✏️') ? '' : selectedTitlePreset);
-                        }
-                      }}
-                      className="text-[11px] text-indigo-600 hover:text-indigo-700 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
-                    >
-                      {isCustomTitle ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة عنوان مخصص'}
-                    </button>
+                  {/* Category & Provider Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="font-extrabold text-slate-700 flex items-center gap-1.5">
+                          <Layers className="h-3.5 w-3.5 text-teal-600" />
+                          <span>بند الخدمة / مركز التكلفة *</span>
+                        </label>
+                        <span className="text-[10px] text-slate-400 font-bold">
+                          ({effectiveServices.length} متاح)
+                        </span>
+                      </div>
+
+                      <select
+                        value={selectedServiceId}
+                        onChange={(e) => {
+                          const sId = e.target.value;
+                          setSelectedServiceId(sId);
+                          const srv = effectiveServices.find(s => s.id === sId);
+                          if (srv) {
+                            applyServiceCategoryDefaults(srv);
+                          }
+                        }}
+                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 font-bold text-slate-900 text-xs shadow-2xs"
+                      >
+                        {effectiveServices.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name} {s.code ? `(${s.code})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="font-extrabold text-slate-700 flex items-center gap-1.5">
+                          <Building className="h-3.5 w-3.5 text-teal-600" />
+                          <span>مقدم الخدمة / المورد *</span>
+                        </label>
+                        <span className="text-[10px] text-slate-400 font-bold">
+                          ({effectiveProviders.length} متاح)
+                        </span>
+                      </div>
+
+                      <select
+                        value={selectedProviderId}
+                        onChange={(e) => setSelectedProviderId(e.target.value)}
+                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 font-bold text-slate-900 text-xs shadow-2xs"
+                      >
+                        {effectiveProviders.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} {p.contactPerson ? `(مسؤول: ${p.contactPerson})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
 
-                  {isCustomTitle ? (
-                    <input
-                      ref={titleInputRef}
-                      type="text"
-                      value={customTitle}
-                      onChange={(e) => {
-                        setCustomTitle(e.target.value);
-                        if (formError) setFormError(null);
-                        if (fieldHighlight === 'title') setFieldHighlight(null);
-                      }}
-                      placeholder="اكتب موضوع وعنوان الطلب بالتفصيل هنا..."
-                      className={`w-full p-2.5 bg-white border rounded-xl focus:outline-none focus:ring-2 font-medium text-xs shadow-xs ${
-                        fieldHighlight === 'title' 
-                          ? 'border-rose-500 ring-2 ring-rose-500/20' 
-                          : 'border-indigo-400 focus:ring-indigo-500/20 text-slate-900'
-                      }`}
-                    />
-                  ) : (
-                    <select
-                      value={selectedTitlePreset}
-                      onChange={(e) => {
-                        if (e.target.value.startsWith('✏️')) {
-                          setIsCustomTitle(true);
-                          setCustomTitle('');
-                        } else {
-                          setSelectedTitlePreset(e.target.value);
-                        }
-                        if (formError) setFormError(null);
-                        if (fieldHighlight === 'title') setFieldHighlight(null);
-                      }}
-                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900"
-                    >
-                      {EXPENSE_TITLE_TEMPLATES.map((tpl) => (
-                        <option key={tpl} value={tpl}>{tpl}</option>
-                      ))}
-                    </select>
+                  {/* Title / Subject Selection */}
+                  <div className="pt-1">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="font-extrabold text-slate-700">موضوع وعنوان الطلب *</label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsCustomTitle(!isCustomTitle);
+                          if (!isCustomTitle && !customTitle) {
+                            setCustomTitle(selectedTitlePreset.startsWith('✏️') ? '' : selectedTitlePreset);
+                          }
+                        }}
+                        className="text-[11px] text-teal-700 hover:text-teal-800 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
+                      >
+                        {isCustomTitle ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة عنوان مخصص'}
+                      </button>
+                    </div>
+
+                    {isCustomTitle ? (
+                      <input
+                        ref={titleInputRef}
+                        type="text"
+                        value={customTitle}
+                        onChange={(e) => {
+                          setCustomTitle(e.target.value);
+                          if (formError) setFormError(null);
+                          if (fieldHighlight === 'title') setFieldHighlight(null);
+                        }}
+                        placeholder="اكتب موضوع وعنوان الطلب بالتفصيل هنا..."
+                        className={`w-full p-3 bg-white border rounded-xl focus:outline-none font-medium text-xs shadow-2xs ${
+                          fieldHighlight === 'title' 
+                            ? 'border-rose-500 ring-2 ring-rose-500/20' 
+                            : 'border-slate-200 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 text-slate-900'
+                        }`}
+                      />
+                    ) : (
+                      <select
+                        value={selectedTitlePreset}
+                        onChange={(e) => {
+                          if (e.target.value.startsWith('✏️')) {
+                            setIsCustomTitle(true);
+                            setCustomTitle('');
+                          } else {
+                            setSelectedTitlePreset(e.target.value);
+                          }
+                          if (formError) setFormError(null);
+                          if (fieldHighlight === 'title') setFieldHighlight(null);
+                        }}
+                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 font-bold text-slate-900 text-xs shadow-2xs"
+                      >
+                        {EXPENSE_TITLE_TEMPLATES.map((tpl) => (
+                          <option key={tpl} value={tpl}>{tpl}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </div>
+
+                {/* =====================================================================
+                    CARD 2: تفاصيل الفاتورة وسند السداد (Invoice & Voucher Details)
+                   ===================================================================== */}
+                <div className="bg-white border border-slate-200/90 rounded-3xl p-5 sm:p-6 space-y-4 shadow-xs">
+                  {/* Step Header */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-7 h-7 rounded-xl bg-teal-600 text-white flex items-center justify-center font-black text-xs shadow-xs">
+                        2
+                      </span>
+                      <div>
+                        <h4 className="font-black text-slate-900 text-sm">تفاصيل الفاتورة وسند السداد</h4>
+                        <p className="text-[11px] text-slate-500">إرفاق إيصال السداد أو الفاتورة لتوثيق المصداقية وحفظ الحقوق</p>
+                      </div>
+                    </div>
+
+                    {/* Toggle: Personal Payment / Reimbursement */}
+                    <div className="flex items-center gap-2.5 bg-slate-50 border border-slate-200/80 px-3 py-1.5 rounded-2xl self-start sm:self-auto shadow-2xs">
+                      <span className="text-[11px] font-bold text-slate-700">سداد من جيبي الخاص:</span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={isPrepaidByRequester}
+                        onClick={() => setIsPrepaidByRequester(!isPrepaidByRequester)}
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                          isPrepaidByRequester ? 'bg-teal-600' : 'bg-slate-300'
+                        }`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                            isPrepaidByRequester ? 'translate-x-0' : '-translate-x-5'
+                          }`}
+                        />
+                      </button>
+                      <span className={`text-[10px] font-black px-2 py-0.5 rounded-lg ${
+                        isPrepaidByRequester ? 'bg-teal-100 text-teal-900 border border-teal-300' : 'bg-slate-200 text-slate-600'
+                      }`}>
+                        {isPrepaidByRequester ? 'نعم (استرداد شخصي)' : 'لا (دفع مباشر)'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Clarification banner when personal payment is toggled */}
+                  {isPrepaidByRequester && (
+                    <div className="p-3.5 bg-teal-50/80 border border-teal-200/80 rounded-2xl text-xs text-teal-950 flex items-start gap-2.5 animate-in fade-in">
+                      <CheckCircle2 className="h-4 w-4 text-teal-700 shrink-0 mt-0.5" />
+                      <div>
+                        <strong className="block font-bold">طلب استرداد مصروفات شخصية (Reimbursement):</strong>
+                        <span className="text-[11px] text-teal-900 mt-0.5 block">
+                          أنت تؤكد أنك قمت بسداد المبلغ من جيبك الخاص، وسيتم تحويل قيمة الفاتورة لحسابك الموضح كاسترداد للمصروفات بعد الاعتماد.
+                        </span>
+                      </div>
+                    </div>
                   )}
-                </div>
 
-                {/* 4. Service & Provider Dropdowns (With Auto Fallbacks) */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="font-bold text-slate-700 flex items-center gap-1">
-                        <Layers className="h-3.5 w-3.5 text-indigo-600" />
-                        <span>بند الخدمة / مركز التكلفة *</span>
+                  {/* Invoice Fields: Number & Date */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    <div>
+                      <label className="block font-extrabold text-slate-700 mb-1.5 flex items-center gap-1.5 text-xs">
+                        <Hash className="h-3.5 w-3.5 text-teal-600" />
+                        <span>رقم الفاتورة / الإيصال (اختياري)</span>
                       </label>
-                      <span className="text-[10px] text-slate-400 font-bold">
-                        ({effectiveServices.length} بند متاح)
-                      </span>
+                      <input
+                        type="text"
+                        value={invoiceNumber}
+                        onChange={(e) => setInvoiceNumber(e.target.value)}
+                        placeholder="مثال: INV-2026-0899 أو رقم إيصال الدفع..."
+                        className="w-full p-3 bg-slate-50/70 border border-slate-200 rounded-xl font-medium text-slate-900 text-xs focus:bg-white focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 transition-all shadow-2xs"
+                      />
                     </div>
 
-                    <select
-                      value={selectedServiceId}
-                      onChange={(e) => {
-                        const sId = e.target.value;
-                        setSelectedServiceId(sId);
-                        const srv = effectiveServices.find(s => s.id === sId);
-                        if (srv) {
-                          applyServiceCategoryDefaults(srv);
-                        }
-                      }}
-                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900 text-xs"
-                    >
-                      {effectiveServices.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} {s.code ? `(${s.code})` : ''}
-                        </option>
-                      ))}
-                    </select>
+                    <div>
+                      <label className="block font-extrabold text-slate-700 mb-1.5 flex items-center gap-1.5 text-xs">
+                        <Calendar className="h-3.5 w-3.5 text-teal-600" />
+                        <span>تاريخ الفاتورة / السداد (اختياري)</span>
+                      </label>
+                      <input
+                        type="date"
+                        value={invoiceDate}
+                        onChange={(e) => setInvoiceDate(e.target.value)}
+                        className="w-full p-3 bg-slate-50/70 border border-slate-200 rounded-xl font-medium text-slate-900 text-xs focus:bg-white focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 transition-all shadow-2xs"
+                      />
+                    </div>
                   </div>
 
+                  {/* File Upload Dropzone & Preview Area */}
                   <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="font-bold text-slate-700 flex items-center gap-1">
-                        <Building className="h-3.5 w-3.5 text-indigo-600" />
-                        <span>مقدم الخدمة / المورد *</span>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="font-extrabold text-slate-700 flex items-center gap-1.5 text-xs">
+                        <Paperclip className="h-3.5 w-3.5 text-teal-600" />
+                        <span>مرفق الفاتورة أو إيصال السداد</span>
                       </label>
-                      <span className="text-[10px] text-slate-400 font-bold">
-                        ({effectiveProviders.length} مورد متاح)
-                      </span>
+                      <span className="text-[10px] text-slate-400 font-medium">بحد أقصى 10 ميجابايت (JPG, PNG, PDF)</span>
                     </div>
 
-                    <select
-                      value={selectedProviderId}
-                      onChange={(e) => setSelectedProviderId(e.target.value)}
-                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900 text-xs"
-                    >
-                      {effectiveProviders.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name} {p.contactPerson ? `(مسؤول: ${p.contactPerson})` : ''}
-                        </option>
-                      ))}
-                    </select>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                      id="invoice-file-upload-input"
+                    />
+
+                    {!invoiceAttachment ? (
+                      <div 
+                        onClick={() => fileInputRef.current?.click()}
+                        className="border-2 border-dashed border-slate-200 hover:border-teal-500 bg-slate-50/60 hover:bg-teal-50/30 rounded-2xl p-6 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-2 group"
+                      >
+                        <div className="w-12 h-12 rounded-2xl bg-teal-50 group-hover:bg-teal-100 text-teal-700 flex items-center justify-center transition-colors shadow-2xs">
+                          <Upload className="h-5 w-5" />
+                        </div>
+                        <div className="space-y-0.5">
+                          <span className="text-xs font-bold text-slate-800 block group-hover:text-teal-900 transition-colors">
+                            انقر هنا لرفع صورة الفاتورة أو إيصال السداد
+                          </span>
+                          <span className="text-[11px] text-slate-500 block">
+                            يدعم ملفات الصور (JPG, PNG) والمستندات الإلكترونية (PDF)
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fileInputRef.current?.click();
+                          }}
+                          className="mt-1 px-4 py-1.5 bg-white hover:bg-slate-50 text-slate-700 hover:text-slate-900 font-bold text-xs rounded-xl border border-slate-200 shadow-2xs transition flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Paperclip className="h-3.5 w-3.5 text-slate-500" />
+                          <span>اختيار ملف من جهازك</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="bg-white border-2 border-teal-300 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+                        <div className="flex items-center gap-3 min-w-0">
+                          {invoiceAttachment.url && (invoiceAttachment.type === 'png' || invoiceAttachment.type === 'jpg' || invoiceAttachment.type.startsWith('image/')) ? (
+                            <img 
+                              src={invoiceAttachment.url} 
+                              alt="معاينة الفاتورة" 
+                              className="w-12 h-12 rounded-xl object-cover border border-slate-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
+                              onClick={() => setPreviewModalUrl({ url: invoiceAttachment.url!, name: invoiceAttachment.name, type: invoiceAttachment.type })}
+                              title="انقر للمعاينة بحجم كبير"
+                            />
+                          ) : (
+                            <div className="w-12 h-12 rounded-xl bg-teal-50 text-teal-700 flex items-center justify-center font-bold text-xs shrink-0 border border-teal-200">
+                              PDF
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-slate-900 text-xs truncate block max-w-[200px] sm:max-w-xs" title={invoiceAttachment.name}>
+                                {invoiceAttachment.name}
+                              </span>
+                              <span className="text-[10px] font-black text-teal-800 bg-teal-50 border border-teal-200 px-2 py-0.5 rounded-full shrink-0">
+                                مرفق جاهز ✓
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
+                              <span>الحجم: {invoiceAttachment.size}</span>
+                              <span>•</span>
+                              <span>النوع: {invoiceAttachment.type.toUpperCase()}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Action Buttons: Preview & Delete */}
+                        <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                          {invoiceAttachment.url && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (invoiceAttachment.url) {
+                                  setPreviewModalUrl({ url: invoiceAttachment.url, name: invoiceAttachment.name, type: invoiceAttachment.type });
+                                }
+                              }}
+                              className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200 flex items-center gap-1.5 transition cursor-pointer"
+                            >
+                              <Eye className="h-3.5 w-3.5 text-slate-500" />
+                              <span>معاينة المرفق</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => setInvoiceAttachment(null)}
+                            className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
+                            title="حذف هذا المرفق"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            <span>حذف</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                {/* 5. Expense Recipient Payment Details */}
-                <div className={`p-4 rounded-2xl border space-y-3 transition-all ${
-                  fieldHighlight === 'paymentDetails'
-                    ? 'bg-rose-50 border-rose-500 ring-2 ring-rose-500/20'
-                    : 'bg-rose-50/60 border-rose-200/80'
-                }`}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 font-bold text-rose-950 text-xs">
-                      <CreditCard className="h-4 w-4 text-rose-600" />
-                      <span>بيانات تحويل المبلغ للمستفيد (- OUT) *</span>
+                {/* =====================================================================
+                    CARD 3: المستفيد وطريقة التحويل (Beneficiary & Payout Method)
+                   ===================================================================== */}
+                <div className="bg-slate-50/60 border border-slate-200/90 rounded-3xl p-5 sm:p-6 space-y-4">
+                  {/* Step Header */}
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-200/70">
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-7 h-7 rounded-xl bg-teal-600 text-white flex items-center justify-center font-black text-xs shadow-xs">
+                        3
+                      </span>
+                      <div>
+                        <h4 className="font-black text-slate-900 text-sm">المستفيد وطريقة التحويل</h4>
+                        <p className="text-[11px] text-slate-500">طريقة سداد واستلام المبلغ لحساب المستفيد</p>
+                      </div>
                     </div>
+
                     {/* Auto-fill badge if details match profile */}
                     {paymentAccountDetails && (
                       paymentAccountDetails === currentUser.instapay || 
@@ -1428,20 +1643,20 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       paymentAccountDetails === currentUser.iban ||
                       (currentUser.iban && paymentAccountDetails.includes(currentUser.iban)) ||
                       paymentAccountDetails === 'خزينة المقر الرئيسي'
-                    ) ? (
-                      <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100/90 border border-emerald-300 px-2 py-0.5 rounded-full flex items-center gap-1">
-                        <span>⚡ معبأة تلقائياً من بروفايلك</span>
-                      </span>
-                    ) : (
-                      <span className="text-[10px] font-bold text-rose-800 bg-rose-100 px-2 py-0.5 rounded-md">
-                        صرف خارج (- OUT)
+                    ) && (
+                      <span className="text-[10px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full flex items-center gap-1">
+                        <Zap className="h-3 w-3 text-emerald-600 fill-emerald-600" />
+                        <span>معبأة تلقائياً من بروفايلك</span>
                       </span>
                     )}
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Payment Method & Payout Details Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block font-bold text-slate-700 mb-1">طريقة التحويل المفضلة للمستفيد *</label>
+                      <label className="block font-extrabold text-slate-700 mb-1.5 text-xs">
+                        طريقة التحويل المفضلة للمستفيد *
+                      </label>
                       <select
                         value={preferredPaymentMethod}
                         onChange={(e: any) => {
@@ -1452,7 +1667,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                           if (formError) setFormError(null);
                           if (fieldHighlight === 'paymentDetails') setFieldHighlight(null);
                         }}
-                        className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-bold text-xs"
+                        className="w-full p-3 bg-white border border-slate-200 rounded-xl font-bold text-xs text-slate-900 focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 shadow-2xs"
                       >
                         <option value="instapay">انستاباي (InstaPay)</option>
                         <option value="bank_transfer">تحويل بنكي فوري (IBAN)</option>
@@ -1462,8 +1677,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                     </div>
 
                     <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="font-bold text-slate-700">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="font-extrabold text-slate-700 text-xs">
                           {preferredPaymentMethod === 'instapay' ? 'عنوان انستاباي (IPA / رقم الهاتف) *' :
                            preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية (أرقام فقط) *' :
                            preferredPaymentMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN) *' : 'جهة الاستلام'}
@@ -1472,7 +1687,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                           <button
                             type="button"
                             onClick={() => setPaymentAccountDetails(getProfilePayoutDetail(preferredPaymentMethod))}
-                            className="text-[10px] text-purple-700 font-bold hover:underline cursor-pointer flex items-center gap-1"
+                            className="text-[10px] text-teal-700 font-bold hover:underline cursor-pointer flex items-center gap-1"
                           >
                             ⚡ ملء من بروفايلي
                           </button>
@@ -1507,317 +1722,120 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                           preferredPaymentMethod === 'digital_wallet' ? '010xxxxxxxx (أرقام فقط)' :
                           preferredPaymentMethod === 'bank_transfer' ? 'EG... / SA... (حروف وأرقام)' : 'الفرع أو الخزينة'
                         }
-                        className={`w-full p-2.5 bg-white border rounded-xl font-mono text-xs ${
-                          fieldHighlight === 'paymentDetails' ? 'border-rose-500 ring-2 ring-rose-500/20' : 'border-slate-200'
+                        className={`w-full p-3 bg-white border rounded-xl font-mono text-xs shadow-2xs transition-all ${
+                          fieldHighlight === 'paymentDetails' 
+                            ? 'border-rose-500 ring-2 ring-rose-500/20' 
+                            : 'border-slate-200 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 text-slate-900'
                         }`}
                       />
                     </div>
                   </div>
-                </div>
 
-                {/* 🧾 DEDICATED INVOICE / RECEIPT ATTACHMENT SECTION */}
-                <div className="bg-gradient-to-br from-amber-50/80 via-orange-50/30 to-white p-4 sm:p-5 rounded-2xl border-2 border-amber-300 shadow-xs space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-amber-200/70">
-                    <div className="flex items-center gap-2.5">
-                      <div className="p-2.5 bg-amber-500 text-white rounded-xl shadow-xs shrink-0">
-                        <Receipt className="h-5 w-5" />
-                      </div>
-                      <div>
-                        <h4 className="font-black text-slate-900 text-xs sm:text-sm">
-                          🧾 إرفاق فاتورة / إيصال سداد (في حال الدفع المسبق من طرفك)
-                        </h4>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          إثبات للمصداقية وحفظ حقوق السداد في حال قيامك بدفع القيمة مقدماً لصالح الشركة
-                        </p>
-                      </div>
-                    </div>
-                    
-                    {/* Toggle: Personal Payment / Reimbursement */}
-                    <div className="flex items-center gap-2 self-start sm:self-auto bg-white/95 p-1.5 px-2.5 rounded-xl border border-amber-200 shadow-2xs">
-                      <span className="text-[11px] font-bold text-slate-700">سداد من جيبي الخاص:</span>
+                  {/* Items Detail (Optional) */}
+                  <div className="pt-1">
+                    <label className="block font-extrabold text-slate-700 mb-1.5 text-xs">
+                      بيانات البضاعة أو الأصناف (اختياري - اسم الصنف، الكمية، سعر الوحدة)
+                    </label>
+                    <input
+                      type="text"
+                      value={itemsDetail}
+                      onChange={(e) => setItemsDetail(e.target.value)}
+                      placeholder="مثال: فطار مجمع وحليب ومستلزمات، أو 10 كراتين بضاعة x 150 ج.م..."
+                      className="w-full p-3 bg-white border border-slate-200 rounded-xl font-medium text-slate-800 text-xs focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 shadow-2xs"
+                    />
+                  </div>
+
+                  {/* Justification Field */}
+                  <div className="pt-1">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="font-extrabold text-slate-700 text-xs">المبرر المالي للطلب *</label>
                       <button
                         type="button"
-                        role="switch"
-                        aria-checked={isPrepaidByRequester}
-                        onClick={() => setIsPrepaidByRequester(!isPrepaidByRequester)}
-                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                          isPrepaidByRequester ? 'bg-amber-600' : 'bg-slate-300'
-                        }`}
+                        onClick={() => {
+                          setIsCustomJustification(!isCustomJustification);
+                          if (!isCustomJustification && !customJustification) {
+                            setCustomJustification(selectedJustPreset.startsWith('✏️') ? '' : selectedJustPreset);
+                          }
+                        }}
+                        className="text-[11px] text-teal-700 hover:text-teal-800 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
                       >
-                        <span
-                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
-                            isPrepaidByRequester ? 'translate-x-0' : '-translate-x-5'
-                          }`}
-                        />
+                        {isCustomJustification ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة مبرر مخصص'}
                       </button>
-                      <span className={`text-[10px] font-black px-2 py-0.5 rounded-md ${
-                        isPrepaidByRequester ? 'bg-amber-100 text-amber-900 border border-amber-300' : 'bg-slate-100 text-slate-600'
-                      }`}>
-                        {isPrepaidByRequester ? 'نعم (استرداد شخصي)' : 'لا (دفع مباشر)'}
-                      </span>
                     </div>
-                  </div>
 
-                  {/* Clarification banner when personal payment is toggled */}
-                  {isPrepaidByRequester && (
-                    <div className="p-3 bg-amber-100/90 border border-amber-300 rounded-xl text-xs text-amber-950 flex items-start gap-2 animate-in fade-in">
-                      <AlertCircle className="h-4 w-4 text-amber-700 shrink-0 mt-0.5" />
-                      <div>
-                        <strong className="block font-black">طلب استرداد مصروفات شخصية (Reimbursement):</strong>
-                        <span>أنت تؤكد أنك قمت بسداد المبلغ من جيبك الخاص، وسيتم تحويل قيمة الفاتورة لحسابك الموضح كاسترداد للمصروفات بعد الاعتماد.</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Invoice Fields: Number & Date */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                    {/* 1. Invoice / Receipt Number */}
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5 text-xs">
-                        <Hash className="h-3.5 w-3.5 text-amber-600" />
-                        <span>رقم الفاتورة / الإيصال (اختياري)</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={invoiceNumber}
-                        onChange={(e) => setInvoiceNumber(e.target.value)}
-                        placeholder="مثال: INV-2026-0899 أو رقم إيصال الدفع..."
-                        className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-medium text-slate-900 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                    {isCustomJustification ? (
+                      <textarea
+                        rows={2}
+                        value={customJustification}
+                        onChange={(e) => setCustomJustification(e.target.value)}
+                        placeholder="اكتب المبرر المالي والتشغيلي للطلب بالتفصيل هنا..."
+                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 text-slate-900 text-xs shadow-2xs"
                       />
-                    </div>
-
-                    {/* 2. Invoice Date */}
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5 text-xs">
-                        <Calendar className="h-3.5 w-3.5 text-amber-600" />
-                        <span>تاريخ الفاتورة / السداد (اختياري)</span>
-                      </label>
-                      <input
-                        type="date"
-                        value={invoiceDate}
-                        onChange={(e) => setInvoiceDate(e.target.value)}
-                        className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-medium text-slate-900 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/20"
-                      />
-                    </div>
-                  </div>
-
-                  {/* 3. File Upload Button & Preview / Delete Area */}
-                  <div className="pt-1">
-                    <label className="block font-bold text-slate-700 mb-1.5 flex items-center justify-between text-xs">
-                      <span className="flex items-center gap-1.5">
-                        <Paperclip className="h-3.5 w-3.5 text-amber-600" />
-                        <span>مرفق الفاتورة أو إيصال السداد (صورة JPG, PNG أو مستند PDF)</span>
-                      </span>
-                      <span className="text-[10px] text-slate-400 font-semibold">بحد أقصى 10 ميجابايت</span>
-                    </label>
-
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
-                      onChange={handleFileUpload}
-                      className="hidden"
-                      id="invoice-file-upload-input"
-                    />
-
-                    {!invoiceAttachment ? (
-                      <div 
-                        onClick={() => fileInputRef.current?.click()}
-                        className="border-2 border-dashed border-amber-300 hover:border-amber-500 bg-amber-50/40 hover:bg-amber-50/80 rounded-2xl p-4 sm:p-5 text-center transition cursor-pointer flex flex-col items-center justify-center gap-2"
-                      >
-                        <div className="p-3 bg-amber-100 text-amber-700 rounded-2xl shadow-2xs">
-                          <Upload className="h-6 w-6" />
-                        </div>
-                        <div>
-                          <span className="text-xs font-bold text-slate-800 block">
-                            انقر هنا لرفع وتحديد ملف الفاتورة أو الإيصال
-                          </span>
-                          <span className="text-[11px] text-slate-500 mt-0.5 block">
-                            يدعم صور الفواتير الورقية (JPG, PNG) والمستندات الإلكترونية (PDF)
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            fileInputRef.current?.click();
-                          }}
-                          className="mt-1 px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <Upload className="h-3.5 w-3.5" />
-                          <span>اختيار ملف الفاتورة</span>
-                        </button>
-                      </div>
                     ) : (
-                      <div className="bg-white border-2 border-emerald-300 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
-                        <div className="flex items-center gap-3 min-w-0">
-                          {/* Thumbnail / Icon */}
-                          {invoiceAttachment.url && (invoiceAttachment.type === 'png' || invoiceAttachment.type === 'jpg' || invoiceAttachment.type.startsWith('image/')) ? (
-                            <img 
-                              src={invoiceAttachment.url} 
-                              alt="معاينة الفاتورة" 
-                              className="w-12 h-12 rounded-xl object-cover border border-slate-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
-                              onClick={() => setPreviewModalUrl({ url: invoiceAttachment.url!, name: invoiceAttachment.name, type: invoiceAttachment.type })}
-                              title="انقر للمعاينة بحجم كبير"
-                            />
-                          ) : (
-                            <div className="w-12 h-12 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center font-bold text-xs shrink-0">
-                              PDF
-                            </div>
-                          )}
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-slate-900 text-xs truncate block max-w-[200px] sm:max-w-xs" title={invoiceAttachment.name}>
-                                {invoiceAttachment.name}
-                              </span>
-                              <span className="text-[10px] font-black text-emerald-800 bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded-full shrink-0">
-                                مرفق جاهز ✓
-                              </span>
-                            </div>
-                            <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
-                              <span>الحجم: {invoiceAttachment.size}</span>
-                              <span>•</span>
-                              <span>النوع: {invoiceAttachment.type.toUpperCase()}</span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Action Buttons: Preview & Delete */}
-                        <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
-                          {invoiceAttachment.url && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (invoiceAttachment.url) {
-                                  setPreviewModalUrl({ url: invoiceAttachment.url, name: invoiceAttachment.name, type: invoiceAttachment.type });
-                                }
-                              }}
-                              className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs rounded-xl border border-indigo-200 flex items-center gap-1.5 transition cursor-pointer"
-                            >
-                              <Eye className="h-3.5 w-3.5" />
-                              <span>معاينة المرفق</span>
-                            </button>
-                          )}
-
-                          <button
-                            type="button"
-                            onClick={() => setInvoiceAttachment(null)}
-                            className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
-                            title="حذف هذا المرفق"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            <span>حذف</span>
-                          </button>
-                        </div>
-                      </div>
+                      <select
+                        value={selectedJustPreset}
+                        onChange={(e) => {
+                          if (e.target.value.startsWith('✏️')) {
+                            setIsCustomJustification(true);
+                            setCustomJustification('');
+                          } else {
+                            setSelectedJustPreset(e.target.value);
+                          }
+                        }}
+                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 font-semibold text-slate-900 text-xs shadow-2xs"
+                      >
+                        {EXPENSE_JUSTIFICATION_TEMPLATES.map((tpl) => (
+                          <option key={tpl} value={tpl}>{tpl}</option>
+                        ))}
+                      </select>
                     )}
                   </div>
-                </div>
 
-                {/* 6. Items Detail (Optional) */}
-                <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80">
-                  <label className="block font-bold text-slate-800 mb-1">
-                    📦 بيانات البضاعة أو الأصناف (اختياري - اسم الصنف، الكمية، سعر الوحدة)
-                  </label>
-                  <input
-                    type="text"
-                    value={itemsDetail}
-                    onChange={(e) => setItemsDetail(e.target.value)}
-                    placeholder="مثال: فطار مجمع وحليب ومستلزمات، أو 10 كراتين بضاعة x 150 ج.م..."
-                    className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-medium text-slate-800 text-xs outline-hidden"
-                  />
-                </div>
+                  {/* Description Field */}
+                  <div className="pt-1">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="font-extrabold text-slate-700 text-xs">تفاصيل ومواصفات الطلب</label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsCustomDescription(!isCustomDescription);
+                          if (!isCustomDescription && !customDescription) {
+                            setCustomDescription(selectedDescPreset.startsWith('✏️') ? '' : selectedDescPreset);
+                          }
+                        }}
+                        className="text-[11px] text-teal-700 hover:text-teal-800 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
+                      >
+                        {isCustomDescription ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة تفاصيل مخصصة'}
+                      </button>
+                    </div>
 
-                {/* 7. Justification */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="font-bold text-slate-700">المبرر المالي للطلب *</label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsCustomJustification(!isCustomJustification);
-                        if (!isCustomJustification && !customJustification) {
-                          setCustomJustification(selectedJustPreset.startsWith('✏️') ? '' : selectedJustPreset);
-                        }
-                      }}
-                      className="text-[11px] text-indigo-600 hover:text-indigo-700 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
-                    >
-                      {isCustomJustification ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة مبرر مخصص'}
-                    </button>
+                    {isCustomDescription ? (
+                      <textarea
+                        rows={2}
+                        value={customDescription}
+                        onChange={(e) => setCustomDescription(e.target.value)}
+                        placeholder="اكتب مواصفات وتفاصيل الخدمة أو السلعة المطلوبة هنا..."
+                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 text-slate-900 text-xs shadow-2xs"
+                      />
+                    ) : (
+                      <select
+                        value={selectedDescPreset}
+                        onChange={(e) => {
+                          if (e.target.value.startsWith('✏️')) {
+                            setIsCustomDescription(true);
+                            setCustomDescription('');
+                          } else {
+                            setSelectedDescPreset(e.target.value);
+                          }
+                        }}
+                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 font-semibold text-slate-900 text-xs shadow-2xs"
+                      >
+                        {EXPENSE_DESCRIPTION_TEMPLATES.map((tpl) => (
+                          <option key={tpl} value={tpl}>{tpl}</option>
+                        ))}
+                      </select>
+                    )}
                   </div>
-
-                  {isCustomJustification ? (
-                    <textarea
-                      rows={2}
-                      value={customJustification}
-                      onChange={(e) => setCustomJustification(e.target.value)}
-                      placeholder="اكتب المبرر المالي والتشغيلي للطلب بالتفصيل هنا..."
-                      className="w-full p-2.5 bg-white border border-indigo-400 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-900 text-xs shadow-xs"
-                    />
-                  ) : (
-                    <select
-                      value={selectedJustPreset}
-                      onChange={(e) => {
-                        if (e.target.value.startsWith('✏️')) {
-                          setIsCustomJustification(true);
-                          setCustomJustification('');
-                        } else {
-                          setSelectedJustPreset(e.target.value);
-                        }
-                      }}
-                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-semibold text-slate-900"
-                    >
-                      {EXPENSE_JUSTIFICATION_TEMPLATES.map((tpl) => (
-                        <option key={tpl} value={tpl}>{tpl}</option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-
-                {/* 8. Description */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="font-bold text-slate-700">تفاصيل ومواصفات الطلب</label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsCustomDescription(!isCustomDescription);
-                        if (!isCustomDescription && !customDescription) {
-                          setCustomDescription(selectedDescPreset.startsWith('✏️') ? '' : selectedDescPreset);
-                        }
-                      }}
-                      className="text-[11px] text-indigo-600 hover:text-indigo-700 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
-                    >
-                      {isCustomDescription ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة تفاصيل مخصصة'}
-                    </button>
-                  </div>
-
-                  {isCustomDescription ? (
-                    <textarea
-                      rows={2}
-                      value={customDescription}
-                      onChange={(e) => setCustomDescription(e.target.value)}
-                      placeholder="اكتب مواصفات وتفاصيل الخدمة أو السلعة المطلوبة هنا..."
-                      className="w-full p-2.5 bg-white border border-indigo-400 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-900 text-xs shadow-xs"
-                    />
-                  ) : (
-                    <select
-                      value={selectedDescPreset}
-                      onChange={(e) => {
-                        if (e.target.value.startsWith('✏️')) {
-                          setIsCustomDescription(true);
-                          setCustomDescription('');
-                        } else {
-                          setSelectedDescPreset(e.target.value);
-                        }
-                      }}
-                      className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none font-semibold text-slate-900"
-                    >
-                      {EXPENSE_DESCRIPTION_TEMPLATES.map((tpl) => (
-                        <option key={tpl} value={tpl}>{tpl}</option>
-                      ))}
-                    </select>
-                  )}
                 </div>
               </div>
             )}
@@ -1841,30 +1859,40 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
             </div>
           )}
 
-          {/* Footer Buttons */}
-          <div className="shrink-0 flex items-center justify-between gap-3 p-4 border-t border-slate-100 bg-slate-50/80">
-            <div className="text-[11px] font-bold text-slate-500 flex items-center gap-1.5">
-              <span className={`w-2 h-2 rounded-full ${requestType === 'income' ? 'bg-emerald-500' : 'bg-rose-500'}`} />
-              <span>العملية: {requestType === 'income' ? 'توريد مالي (+ IN)' : 'صرف ومصروف (- OUT)'}</span>
+          {/* Sticky Footer Buttons with Amount Summary */}
+          <div className="shrink-0 flex items-center justify-between gap-3 p-4 sm:p-5 border-t border-slate-100 bg-white sticky bottom-0 z-10 shadow-lg">
+            <div className="flex items-center gap-3">
+              <div className="text-right">
+                <span className="text-[10px] text-slate-400 font-bold block">إجمالي مبلغ الطلب</span>
+                <span className="text-base sm:text-lg font-black text-slate-900 flex items-center gap-1">
+                  <span>{amount ? Number(amount).toLocaleString('ar-EG', { maximumFractionDigits: 2 }) : '0.00'}</span>
+                  <span className="text-xs font-bold text-teal-700">{currency}</span>
+                </span>
+              </div>
+              <div className="h-8 w-px bg-slate-200 hidden sm:block" />
+              <div className="text-[11px] font-semibold text-slate-500 hidden sm:flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full ${requestType === 'income' ? 'bg-emerald-500' : 'bg-teal-500'}`} />
+                <span>{requestType === 'income' ? 'توريد مالي (+ IN)' : 'صرف ومصروف (- OUT)'}</span>
+              </div>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2.5">
               <button
                 type="button"
                 onClick={handleClose}
-                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer font-medium"
+                className="px-4 py-2.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition cursor-pointer font-bold text-xs"
               >
                 إلغاء
               </button>
               <button
                 type="submit"
                 disabled={submitting}
-                className={`px-6 py-2.5 text-white font-bold rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${
+                className={`px-6 py-2.5 text-white font-extrabold rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 text-xs ${
                   isEditMode
-                    ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-500/20'
+                    ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/20'
                     : requestType === 'income'
-                    ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20'
-                    : 'bg-rose-600 hover:bg-rose-700 shadow-rose-500/20'
+                    ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20'
+                    : 'bg-[#0d9488] hover:bg-[#0f766e] shadow-teal-700/20'
                 }`}
               >
                 {submitting ? (
@@ -1877,7 +1905,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                 ) : requestType === 'income' ? (
                   <>
                     <ArrowDownLeft className="h-4 w-4" />
-                    <span>📥 إرسال طلب التوريد للمراجعة والاستلام (+ IN)</span>
+                    <span>إرسال طلب التوريد للمراجعة (+ IN)</span>
                   </>
                 ) : (
                   <>
