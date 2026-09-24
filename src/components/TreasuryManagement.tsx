@@ -412,14 +412,16 @@ export const TreasuryManagement: React.FC = () => {
             <span>تصدير كشف الحسابات (Excel)</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handleOpenAddAccount}
-            className="flex items-center gap-2 px-3.5 py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold text-xs shadow-2xs transition cursor-pointer"
-          >
-            <Plus className="h-4 w-4" />
-            <span>إضافة خزينة / حساب</span>
-          </button>
+          {(isSuperAdmin || currentRole === 'org_admin') && (
+            <button
+              type="button"
+              onClick={handleOpenAddAccount}
+              className="flex items-center gap-2 px-3.5 py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold text-xs shadow-2xs transition cursor-pointer"
+            >
+              <Plus className="h-4 w-4" />
+              <span>إضافة خزينة / حساب</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -607,7 +609,7 @@ export const TreasuryManagement: React.FC = () => {
                           >
                             <Edit3 className="h-3.5 w-3.5" />
                           </button>
-                          {isSuperAdmin && (
+                          {(isSuperAdmin || currentRole === 'org_admin') && (
                             <button
                               type="button"
                               onClick={() => {

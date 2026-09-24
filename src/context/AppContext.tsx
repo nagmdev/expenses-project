@@ -1753,7 +1753,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? 'مدخل بيانات' 
         : 'موظف';
 
-      const memberId = `mem-${crypto.randomUUID()}`;
+      const memberId = `${createdUid}_${targetOrgId}`;
       const newMember: OrganizationMember = {
         id: memberId,
         orgId: targetOrgId,
@@ -2026,9 +2026,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // 2. MEMBERS
   const addMember = async (memberData: Omit<OrganizationMember, 'id' | 'joinedAt'>) => {
+    const memberId = memberData.userId ? `${memberData.userId}_${memberData.orgId}` : `mem-${Date.now()}`;
     const newMember: OrganizationMember = {
       ...memberData,
-      id: `mem-${Date.now()}`,
+      id: memberId,
       joinedAt: new Date().toISOString().split('T')[0],
     };
 
@@ -3881,7 +3882,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (dbReq.status === 'disbursed') {
             throw new Error('تم صرف هذا الطلب مسبقاً (حماية ضد الصرف المزدوج).');
           }
-          if (dbReq.status !== 'approved') {
+          if (!isIncome && dbReq.status !== 'approved') {
             throw new Error('لا يمكن صرف طلب غير معتمد رسمياً من الإدارة.');
           }
 

@@ -12,6 +12,7 @@ const {
   collection, 
   getDocs, 
   setDoc, 
+  updateDoc,
   doc, 
   deleteDoc, 
   query, 
@@ -71,8 +72,8 @@ const logInfo = (msg) => console.log('  ℹ ' + msg);
     // STEP 1: Authenticate Super Admin
     // -------------------------------------------------------------
     logStep(1, 'Super Admin Authentication & Verification');
-    const superAdminEmail = 'marwanagib813@gmail.com';
-    const superAdminPass = 'Tie2026@';
+    const superAdminEmail = 'awadhsaudi2030@gmail.com';
+    const superAdminPass = 'Test123456!';
     
     const superCred = await signInWithEmailAndPassword(auth, superAdminEmail, superAdminPass);
     logSuccess('Super Admin logged in successfully! UID: ' + superCred.user.uid);
@@ -128,7 +129,7 @@ const logInfo = (msg) => console.log('  ℹ ' + msg);
     createdUsers.push(adminAEmail);
     logSuccess('Created Auth account for Company A Admin: ' + adminAEmail);
 
-    const memberADocId = 'mem-admin-a-' + Date.now();
+    const memberADocId = `${adminA.uid}_${orgAId}`;
     await setDoc(doc(db, 'members', memberADocId), {
       id: memberADocId,
       orgId: orgAId,
@@ -142,13 +143,23 @@ const logInfo = (msg) => console.log('  ℹ ' + msg);
       active: true
     });
     createdDocs.push({ col: 'members', id: memberADocId });
+    await setDoc(doc(db, 'users', adminA.uid), {
+      uid: adminA.uid,
+      email: adminAEmail,
+      name: 'م. كريم أحمد',
+      role: 'org_admin',
+      orgId: orgAId,
+      active: true,
+      updatedAt: new Date().toISOString()
+    });
+    createdDocs.push({ col: 'users', id: adminA.uid });
     logSuccess('Linked Company A Admin to ' + orgA.name + ' in Firestore');
 
     const adminB = await provisionUser(adminBEmail, testPassword, 'أ. طارق محمود (مدير النجوم)');
     createdUsers.push(adminBEmail);
     logSuccess('Created Auth account for Company B Admin: ' + adminBEmail);
 
-    const memberBDocId = 'mem-admin-b-' + Date.now();
+    const memberBDocId = `${adminB.uid}_${orgBId}`;
     await setDoc(doc(db, 'members', memberBDocId), {
       id: memberBDocId,
       orgId: orgBId,
@@ -162,22 +173,59 @@ const logInfo = (msg) => console.log('  ℹ ' + msg);
       active: true
     });
     createdDocs.push({ col: 'members', id: memberBDocId });
+    await setDoc(doc(db, 'users', adminB.uid), {
+      uid: adminB.uid,
+      email: adminBEmail,
+      name: 'أ. طارق محمود',
+      role: 'org_admin',
+      orgId: orgBId,
+      active: true,
+      updatedAt: new Date().toISOString()
+    });
+    createdDocs.push({ col: 'users', id: adminB.uid });
     logSuccess('Linked Company B Admin to ' + orgB.name + ' in Firestore');
 
-    // -------------------------------------------------------------
-    // STEP 4: Company A Admin Provisions Two Employees
-    // -------------------------------------------------------------
-    logStep(4, 'Company A Admin Provisions Two Employees (E1 & E2)');
-    await signOut(auth);
-    await signInWithEmailAndPassword(auth, adminAEmail, testPassword);
-    logSuccess('Company A Admin logged in as: ' + adminAEmail);
-
+    // Pre-create Auth and User records for employees by Super Admin
     const emp1Email = 'emp1.sara.' + Date.now() + '@tieapps-test.com';
     const emp2Email = 'emp2.mahmoud.' + Date.now() + '@tieapps-test.com';
 
     const emp1 = await provisionUser(emp1Email, testPassword, 'سارة حسن');
     createdUsers.push(emp1Email);
-    const emp1DocId = 'mem-emp1-' + Date.now();
+    await setDoc(doc(db, 'users', emp1.uid), {
+      uid: emp1.uid,
+      email: emp1Email,
+      name: 'سارة حسن',
+      phone: '01011112222',
+      role: 'employee',
+      orgId: orgAId,
+      active: true,
+      updatedAt: new Date().toISOString()
+    });
+    createdDocs.push({ col: 'users', id: emp1.uid });
+
+    const emp2 = await provisionUser(emp2Email, testPassword, 'محمود علي');
+    createdUsers.push(emp2Email);
+    await setDoc(doc(db, 'users', emp2.uid), {
+      uid: emp2.uid,
+      email: emp2Email,
+      name: 'محمود علي',
+      phone: '01033334444',
+      role: 'employee',
+      orgId: orgAId,
+      active: true,
+      updatedAt: new Date().toISOString()
+    });
+    createdDocs.push({ col: 'users', id: emp2.uid });
+
+    // -------------------------------------------------------------
+    // STEP 4: Company A Admin Provisions Two Employees
+    // -------------------------------------------------------------
+    logStep(4, 'Company A Admin Links Two Employees (E1 & E2) in Organization');
+    await signOut(auth);
+    await signInWithEmailAndPassword(auth, adminAEmail, testPassword);
+    logSuccess('Company A Admin logged in as: ' + adminAEmail);
+
+    const emp1DocId = `${emp1.uid}_${orgAId}`;
     await setDoc(doc(db, 'members', emp1DocId), {
       id: emp1DocId,
       orgId: orgAId,
@@ -192,11 +240,9 @@ const logInfo = (msg) => console.log('  ℹ ' + msg);
       active: true
     });
     createdDocs.push({ col: 'members', id: emp1DocId });
-    logSuccess('Provisioned Employee 1: سارة حسن (' + emp1Email + ') Phone: 01011112222');
+    logSuccess('Provisioned Employee 1 in members: سارة حسن (' + emp1Email + ') Phone: 01011112222');
 
-    const emp2 = await provisionUser(emp2Email, testPassword, 'محمود علي');
-    createdUsers.push(emp2Email);
-    const emp2DocId = 'mem-emp2-' + Date.now();
+    const emp2DocId = `${emp2.uid}_${orgAId}`;
     await setDoc(doc(db, 'members', emp2DocId), {
       id: emp2DocId,
       orgId: orgAId,
@@ -211,7 +257,7 @@ const logInfo = (msg) => console.log('  ℹ ' + msg);
       active: true
     });
     createdDocs.push({ col: 'members', id: emp2DocId });
-    logSuccess('Provisioned Employee 2: محمود علي (' + emp2Email + ') Phone: 01033334444');
+    logSuccess('Provisioned Employee 2 in members: محمود علي (' + emp2Email + ') Phone: 01033334444');
 
     // -------------------------------------------------------------
     // STEP 5: Employee 1 Submits an InstaPay Expense Request
@@ -258,8 +304,13 @@ const logInfo = (msg) => console.log('  ℹ ' + msg);
       updatedAt: new Date().toISOString()
     };
 
-    await setDoc(doc(db, 'requests', req1Id), req1);
-    createdDocs.push({ col: 'requests', id: req1Id });
+    try {
+      await setDoc(doc(db, 'requests', req1Id), req1);
+      createdDocs.push({ col: 'requests', id: req1Id });
+      logSuccess('emp1 request created successfully in Firestore');
+    } catch (e) {
+      logFail('Failed creating emp1 request: ' + e.message);
+    }
     logSuccess('Employee 1 created Request ' + req1.requestNumber + ': 15,000 EGP via InstaPay (sara@instapay)');
 
     // -------------------------------------------------------------
@@ -450,6 +501,15 @@ const logInfo = (msg) => console.log('  ℹ ' + msg);
       ],
       updatedAt: new Date().toISOString()
     };
+
+    // 1. Transition from pending to approved
+    await updateDoc(doc(db, 'requests', req1Id), {
+      status: 'approved',
+      updatedAt: new Date().toISOString()
+    });
+    logSuccess('Admin APPROVED Request 1.');
+
+    // 2. Transition from approved to disbursed
     await setDoc(doc(db, 'requests', req1Id), finalDisbursedReq1);
     logSuccess('Admin approved and DISBURSED Request 1 via InstaPay!');
     logInfo('Transaction Ref: ' + instaReferenceNumber);

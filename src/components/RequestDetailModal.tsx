@@ -78,6 +78,18 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     }
   }, [request]);
 
+  // Close on Escape key press for accessibility
+  useEffect(() => {
+    if (!request) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [request, onClose]);
+
   if (!request) return null;
 
   const mapAccountTypeToPaymentMethod = (type: PaymentAccount['type']): PaymentMethod => {
@@ -162,7 +174,12 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+    <div 
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="request-detail-title"
+    >
       <div 
         className="bg-white rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150"
         onClick={(e) => e.stopPropagation()}
@@ -174,13 +191,14 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
             <span className="font-mono text-xs font-bold text-slate-500 bg-slate-200 px-2.5 py-1 rounded-lg">
               {request.requestNumber}
             </span>
-            <h3 className="text-base font-bold text-slate-900 truncate max-w-md">
+            <h3 id="request-detail-title" className="text-base font-bold text-slate-900 truncate max-w-md">
               {request.title}
             </h3>
           </div>
           <button
             type="button"
             onClick={onClose}
+            aria-label="إغلاق النافذة"
             className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition cursor-pointer"
           >
             <X className="h-5 w-5" />

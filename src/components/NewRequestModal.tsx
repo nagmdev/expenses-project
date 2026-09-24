@@ -401,9 +401,9 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     } else {
       setSelectedTitlePreset(EXPENSE_TITLE_TEMPLATES[0]);
       setSelectedJustPreset(EXPENSE_JUSTIFICATION_TEMPLATES[0]);
-      setSelectedDescPreset(EXPENSE_DESCRIPTION_TEMPLATES[0]);
-      setPreferredPaymentMethod('instapay');
-      setPaymentAccountDetails(currentUser.phone || '');
+      const defaultMethod = (currentUser.preferredPaymentMethod as PaymentMethod) || 'instapay';
+      setPreferredPaymentMethod(defaultMethod);
+      setPaymentAccountDetails(getProfilePayoutDetail(defaultMethod));
     }
   };
 

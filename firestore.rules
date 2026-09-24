@@ -36,17 +36,22 @@ service cloud.firestore {
 
     function isOrgAdmin(orgId) {
       return isSuperAdmin() || (
-        isOrgMember(orgId) &&
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        getUserRecord().role == 'org_admin'
+        isOrgMember(orgId) && (
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRecord().role == 'org_admin') ||
+          (exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId)) &&
+           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId)).data.role == 'org_admin')
+        )
       );
     }
 
     function isFinance(orgId) {
       return isSuperAdmin() || (
-        isOrgMember(orgId) &&
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        (getUserRecord().role == 'finance' || getUserRecord().role == 'org_admin')
+        isOrgMember(orgId) && (
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+           (getUserRecord().role == 'finance' || getUserRecord().role == 'org_admin')) ||
+          (exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId)) &&
+           (get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId)).data.role in ['finance', 'org_admin']))
+        )
       );
     }
 
@@ -67,10 +72,18 @@ service cloud.firestore {
     // 2. USERS (Profiles & Security Metadata)
     // =========================================================================
     match /users/{userId} {
-      allow read: if isAuthenticated() && (request.auth.uid == userId || isSuperAdmin());
-      allow create: if isAuthenticated() && (request.auth.uid == userId || isSuperAdmin());
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isSuperAdmin() || (resource.data.orgId != null && isOrgAdmin(resource.data.orgId)));
+      allow create: if isAuthenticated() && (
+        request.auth.uid == userId || 
+        isSuperAdmin() || 
+        (isOrgAdmin(request.resource.data.orgId) && request.resource.data.role != 'super_admin')
+      );
       // Self-update permitted ONLY for display preferences, never for role/orgId escalation
       allow update: if isSuperAdmin() || (
+        isOrgAdmin(resource.data.orgId) && 
+        request.resource.data.role != 'super_admin' && 
+        request.resource.data.orgId == resource.data.orgId
+      ) || (
         isAuthenticated() && request.auth.uid == userId &&
         request.resource.data.role == resource.data.role &&
         request.resource.data.orgId == resource.data.orgId
@@ -155,9 +168,12 @@ service cloud.firestore {
         ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && (
           request.resource.data.status in ['approved', 'rejected', 'clarification_requested', 'pending']
         )) ||
-        // Finance: can disburse ONLY IF status is currently approved
+        // Finance: can disburse ONLY IF status is currently approved (or pending for income receipt)
         (isFinance(resource.data.orgId) && (
-          (request.resource.data.status == 'disbursed' && resource.data.status == 'approved') ||
+          (request.resource.data.status == 'disbursed' && (
+            resource.data.status == 'approved' ||
+            (resource.data.requestType == 'income' && resource.data.status == 'pending')
+          )) ||
           (request.resource.data.status == resource.data.status)
         )) ||
         // Requester: can reply to clarification ONLY IF previously clarification_requested
@@ -199,7 +215,13 @@ service cloud.firestore {
         isFinance(resource.data.orgId) ||
         resource.data.employeeId == request.auth.uid
       );
-      allow create, update: if isSuperAdmin() || isFinance(request.resource.data.orgId);
+      allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
+      allow update: if isSuperAdmin() || isFinance(resource.data.orgId) || (
+        resource.data.employeeId == request.auth.uid &&
+        request.resource.data.employeeId == resource.data.employeeId &&
+        request.resource.data.totalAmount == resource.data.totalAmount &&
+        request.resource.data.orgId == resource.data.orgId
+      );
       allow delete: if isSuperAdmin();
     }
 
@@ -209,7 +231,13 @@ service cloud.firestore {
         isFinance(resource.data.orgId) ||
         resource.data.employeeId == request.auth.uid
       );
-      allow create, update: if isSuperAdmin() || isFinance(request.resource.data.orgId);
+      allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
+      allow update: if isSuperAdmin() || isFinance(resource.data.orgId) || (
+        resource.data.employeeId == request.auth.uid &&
+        request.resource.data.employeeId == resource.data.employeeId &&
+        request.resource.data.totalAmount == resource.data.totalAmount &&
+        request.resource.data.orgId == resource.data.orgId
+      );
       allow delete: if isSuperAdmin();
     }
 
