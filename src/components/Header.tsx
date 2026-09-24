@@ -12,16 +12,24 @@ import {
   Flame,
   LogOut,
   Crown,
-  Edit3
+  Bell,
+  Menu,
+  X
 } from 'lucide-react';
 
 interface HeaderProps {
   onOpenNewRequest: () => void;
   onOpenNewOrg: () => void;
   onOpenProfile?: () => void;
+  onToggleSidebar?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, onOpenProfile }) => {
+export const Header: React.FC<HeaderProps> = ({ 
+  onOpenNewRequest, 
+  onOpenNewOrg, 
+  onOpenProfile,
+  onToggleSidebar 
+}) => {
   const { 
     organizations, 
     activeOrgId, 
@@ -34,13 +42,13 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
     logoutUser,
     refreshData,
     requests,
-    isBackendConnected,
     isFirebaseConnected,
     openFirebaseModal,
   } = useApp();
 
   const [isAuthProcessing, setIsAuthProcessing] = useState(false);
   const [showOrgDropdown, setShowOrgDropdown] = useState(false);
+  const [showUserDropdown, setShowUserDropdown] = useState(false);
 
   const handleLogout = async () => {
     setIsAuthProcessing(true);
@@ -60,223 +68,132 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
 
   return (
     <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="w-full px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-18">
           
-          {/* Logo & System Title */}
-          <div className="flex items-center gap-4">
-            <div className="h-11 w-11 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white shadow-md shadow-emerald-500/20">
-              <Wallet className="h-6 w-6" />
+          {/* Right Section (in RTL): Logo and Title */}
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center text-white shadow-md shadow-emerald-500/20">
+              <Wallet className="h-5 w-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <span className="font-extrabold text-xl tracking-tight text-slate-900">مصروفي</span>
-                <span className="text-xs bg-emerald-50 text-emerald-700 font-semibold px-2 py-0.5 rounded-full border border-emerald-200">
-                  نظام إدارة المصروفات والعهد
-                </span>
-              </div>
-              <p className="text-xs text-slate-500">إدارة متعددة المؤسسات، تتبع الصرف، وعزل بيانات بنكي 100%</p>
+              <span className="font-extrabold text-lg tracking-tight text-slate-900 block leading-tight">مصروفي</span>
+              <p className="text-[11px] text-slate-500 font-medium leading-none mt-0.5">نظام إدارة المصروفات والعهد</p>
             </div>
           </div>
 
-          {/* Org Switcher & Official Role Badge & Actions */}
-          <div className="flex items-center gap-3">
-            
-            {/* Organization Selector (Strictly Super Admin Only) */}
-            {currentRole === 'super_admin' ? (
-              <div className="relative">
+          {/* Center-Right Section: Organization Selector with embedded Hamburger Menu matching screenshot */}
+          <div className="flex items-center">
+            <div className="relative">
+              <div className="flex items-center bg-white border border-slate-200 rounded-2xl p-1 shadow-2xs hover:border-slate-300 transition">
+                {/* Dropdown Toggle trigger */}
                 <button
                   type="button"
                   onClick={() => setShowOrgDropdown(!showOrgDropdown)}
-                  className="flex items-center gap-2.5 px-3.5 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 text-sm font-medium transition cursor-pointer"
+                  className="flex items-center gap-2 px-3 py-1 cursor-pointer"
+                  title="اختر الشركة / المؤسسة"
                 >
-                  <Building2 className="h-4 w-4 text-emerald-600" />
-                  <span>{activeOrgId === 'all' ? 'جميع المؤسسات' : (activeOrg?.name || 'اختر مؤسسة')}</span>
                   <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+                  <div className="text-center">
+                    <span className="block font-bold text-xs text-slate-900 leading-tight">
+                      {activeOrgId === 'all' ? 'جميع المؤسسات' : (activeOrg?.name || 'Tie-Tanta')}
+                    </span>
+                    <span className="block text-[10px] text-slate-400 font-medium leading-none mt-0.5">
+                      (Dropdown)
+                    </span>
+                  </div>
+                  <div className="h-7 w-7 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                    <Building2 className="h-4 w-4" />
+                  </div>
                 </button>
 
-                {showOrgDropdown && (
-                  <div 
-                    className="absolute left-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-slate-100 py-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150"
-                    onClick={() => setShowOrgDropdown(false)}
+                {/* Vertical Divider */}
+                <div className="h-6 w-[1px] bg-slate-200 mx-1"></div>
+
+                {/* Sidebar toggle button inside the box */}
+                {onToggleSidebar && (
+                  <button
+                    type="button"
+                    onClick={onToggleSidebar}
+                    className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                    title="القائمة الجانبية"
                   >
-                    <div className="px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                      الشركات المتاحة للسوبر أدمن
-                    </div>
-                    
+                    <Menu className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+
+              {/* Organization Dropdown Popup */}
+              {showOrgDropdown && currentRole === 'super_admin' && (
+                <div 
+                  className="absolute right-0 mt-2 w-72 bg-white rounded-2xl shadow-xl border border-slate-100 py-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150 text-right"
+                  onClick={() => setShowOrgDropdown(false)}
+                >
+                  <div className="px-3 py-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                    الشركات المتاحة للسوبر أدمن
+                  </div>
+                  
+                  <button
+                    type="button"
+                    onClick={() => setActiveOrgId('all')}
+                    className={`w-full text-right px-3 py-2 text-xs flex items-center justify-between hover:bg-slate-50 cursor-pointer ${
+                      activeOrgId === 'all' ? 'text-emerald-600 font-bold bg-emerald-50/50' : 'text-slate-700'
+                    }`}
+                  >
+                    <span>عرض موحد (جميع المؤسسات)</span>
+                    {activeOrgId === 'all' && <span className="h-2 w-2 rounded-full bg-emerald-500"></span>}
+                  </button>
+
+                  <div className="my-1 border-t border-slate-100"></div>
+
+                  {organizations.map((org) => (
                     <button
+                      key={org.id}
                       type="button"
-                      onClick={() => setActiveOrgId('all')}
-                      className={`w-full text-right px-3 py-2 text-sm flex items-center justify-between hover:bg-slate-50 ${
-                        activeOrgId === 'all' ? 'text-emerald-600 font-bold bg-emerald-50/50' : 'text-slate-700'
+                      onClick={() => setActiveOrgId(org.id)}
+                      className={`w-full text-right px-3 py-2 text-xs flex items-center justify-between hover:bg-slate-50 cursor-pointer ${
+                        activeOrgId === org.id ? 'text-emerald-600 font-bold bg-emerald-50/50' : 'text-slate-700'
                       }`}
                     >
-                      <span>عرض موحد (جميع المؤسسات)</span>
-                      {activeOrgId === 'all' && <span className="h-2 w-2 rounded-full bg-emerald-500"></span>}
+                      <div>
+                        <div className="font-bold text-slate-800">{org.name}</div>
+                        <div className="text-[10px] text-slate-400 font-mono">{org.code} • الميزانية: {org.budget.toLocaleString()} {org.currency}</div>
+                      </div>
+                      {activeOrgId === org.id && <span className="h-2 w-2 rounded-full bg-emerald-500"></span>}
                     </button>
+                  ))}
 
-                    <div className="my-1 border-t border-slate-100"></div>
-
-                    {organizations.map((org) => (
-                      <button
-                        key={org.id}
-                        type="button"
-                        onClick={() => setActiveOrgId(org.id)}
-                        className={`w-full text-right px-3 py-2 text-sm flex items-center justify-between hover:bg-slate-50 ${
-                          activeOrgId === org.id ? 'text-emerald-600 font-bold bg-emerald-50/50' : 'text-slate-700'
-                        }`}
-                      >
-                        <div>
-                          <div className="font-medium">{org.name}</div>
-                          <div className="text-xs text-slate-400">{org.code} • الميزانية: {org.budget.toLocaleString()} {org.currency}</div>
-                        </div>
-                        {activeOrgId === org.id && <span className="h-2 w-2 rounded-full bg-emerald-500"></span>}
-                      </button>
-                    ))}
-
-                    <div className="my-1 border-t border-slate-100"></div>
-                    
-                    <button
-                      type="button"
-                      onClick={onOpenNewOrg}
-                      className="w-full text-right px-3 py-2 text-xs font-semibold text-emerald-600 hover:bg-emerald-50 flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      <span>إضافة مؤسسة جديدة</span>
-                    </button>
-                  </div>
-                )}
-              </div>
-            ) : (
-              /* For Org Admin and Employee: strictly locked label to their company */
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-800 text-xs font-bold shadow-2xs">
-                <Building2 className="h-4 w-4 text-emerald-600" />
-                <span>{activeOrg?.name || 'الشركة التابع لها'}</span>
-              </div>
-            )}
-
-            {/* Official Role Badge */}
-            {currentRole === 'super_admin' && (
-              <button
-                type="button"
-                onClick={() => setActiveTab('organizations')}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-black shadow-2xs transition cursor-pointer"
-                title="الانتقال إلى مركز الإدارة والتحكم الشامل"
-              >
-                <Crown className="h-4 w-4 text-amber-600" />
-                <span>🛡️ سوبر أدمن المنصة</span>
-              </button>
-            )}
-
-            {currentRole === 'org_admin' && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-900 border border-indigo-200 rounded-xl text-xs font-bold shadow-2xs">
-                <ShieldAlert className="h-4 w-4 text-indigo-600" />
-                <span>🏢 مدير الشركة</span>
-                {pendingCount > 0 && (
-                  <span className="bg-amber-500 text-white text-[10px] px-1.5 py-0.2 rounded-full font-black">
-                    {pendingCount}
-                  </span>
-                )}
-              </div>
-            )}
-
-            {currentRole === 'finance' && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-50 text-purple-900 border border-purple-200 rounded-xl text-xs font-bold shadow-2xs">
-                <Wallet className="h-4 w-4 text-purple-600" />
-                <span>💸 مسؤول الصرف والخزينة</span>
-              </div>
-            )}
-
-            {currentRole === 'employee' && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-900 border border-emerald-200 rounded-xl text-xs font-bold shadow-2xs">
-                <UserIcon className="h-4 w-4 text-emerald-600" />
-                <span>👤 موظف</span>
-              </div>
-            )}
-
-            {currentRole === 'data_entry' && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-50 text-sky-900 border border-sky-200 rounded-xl text-xs font-bold shadow-2xs">
-                <Edit3 className="h-4 w-4 text-sky-600" />
-                <span>✍️ مدخل بيانات</span>
-              </div>
-            )}
-
-            {/* Authenticated User Profile & Logout */}
-            {firebaseUser && (
-              <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50/90 hover:bg-slate-100 shadow-2xs transition">
-                <button
-                  type="button"
-                  onClick={onOpenProfile}
-                  className="flex items-center gap-2 text-right cursor-pointer group"
-                  title="فتح الملف الشخصي وتغيير كلمة المرور"
-                >
-                  {firebaseUser.photoURL ? (
-                    <img
-                      src={firebaseUser.photoURL}
-                      alt={currentUser.name}
-                      className="h-7 w-7 rounded-full object-cover ring-2 ring-emerald-500/30 group-hover:ring-emerald-500 transition"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className="h-7 w-7 rounded-full bg-emerald-600 group-hover:bg-emerald-700 text-white flex items-center justify-center font-bold text-xs shadow-2xs transition">
-                      {(currentUser.name || firebaseUser.email || 'U').slice(0, 2).toUpperCase()}
-                    </div>
-                  )}
-                  <div className="text-right flex flex-col justify-center leading-tight hidden sm:flex">
-                    <span className="font-bold text-xs text-slate-900 max-w-[120px] truncate group-hover:text-emerald-700 transition">
-                      {currentUser.name}
-                    </span>
-                    <span className="text-[10px] text-slate-500 max-w-[120px] truncate font-mono">
-                      {firebaseUser.email}
-                    </span>
-                  </div>
-                </button>
-
-                <div className="h-4 w-[1px] bg-slate-200 mx-0.5"></div>
-
-                <button
-                  type="button"
-                  onClick={handleLogout}
-                  disabled={isAuthProcessing}
-                  className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200/60 transition cursor-pointer disabled:opacity-50"
-                  title="تسجيل الخروج من الحساب"
-                >
-                  <LogOut className="h-3.5 w-3.5" />
-                  <span className="hidden md:inline">خروج</span>
-                </button>
-              </div>
-            )}
-
-            {/* Firebase Real-Time Status Badge (Restricted to Super Admin Only) */}
-            {currentRole === 'super_admin' && (
-              isFirebaseConnected ? (
-                <div
-                  className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border border-emerald-300 bg-emerald-50 text-emerald-700 shadow-2xs select-none"
-                  title="متصل بالسحابة المشفرة"
-                >
-                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  <span>🔥 متصل سحابياً</span>
+                  <div className="my-1 border-t border-slate-100"></div>
+                  
+                  <button
+                    type="button"
+                    onClick={onOpenNewOrg}
+                    className="w-full text-right px-3 py-2 text-xs font-bold text-emerald-600 hover:bg-emerald-50 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>إضافة مؤسسة جديدة</span>
+                  </button>
                 </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={openFirebaseModal}
-                  className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 shadow-2xs transition cursor-pointer"
-                >
-                  <Flame className="h-3.5 w-3.5 text-amber-600 animate-pulse" />
-                  <span>إعداد Firebase</span>
-                </button>
-              )
-            )}
+              )}
+            </div>
+          </div>
 
-            {/* Refresh Data */}
+          {/* Left Section (in RTL): Bell & New Request Button */}
+          <div className="flex items-center gap-3">
+            {/* Notification Bell */}
             <button
               type="button"
-              onClick={refreshData}
-              title="تحديث البيانات"
-              className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition cursor-pointer"
+              onClick={() => setActiveTab('requests')}
+              className="relative px-3 py-2 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 transition cursor-pointer flex items-center gap-2 text-xs font-bold shadow-2xs"
+              title="التنبيهات والطلبات"
             >
-              <RotateCcw className="h-4 w-4" />
+              <div className="relative">
+                <Bell className="h-4 w-4 text-slate-500" />
+                <span className="absolute -top-1.5 -left-1.5 h-4 min-w-[16px] px-1 rounded-full bg-rose-500 text-white text-[9px] font-black flex items-center justify-center">
+                  {pendingCount > 0 ? pendingCount : 1}
+                </span>
+              </div>
+              <span>الجرس</span>
             </button>
 
             {/* New Request Button */}
@@ -289,13 +206,13 @@ export const Header: React.FC<HeaderProps> = ({ onOpenNewRequest, onOpenNewOrg, 
                   onOpenNewRequest();
                 }
               }}
-              className="flex items-center gap-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold text-sm px-4 py-2 rounded-xl shadow-md shadow-emerald-600/20 transition cursor-pointer active:scale-98"
+              className="flex items-center gap-1.5 bg-[#0d9488] hover:bg-[#0f766e] text-white font-bold text-xs sm:text-sm px-4 py-2 rounded-xl shadow-xs transition cursor-pointer active:scale-98"
             >
-              <FilePlus className="h-4 w-4" />
+              <Plus className="h-4 w-4 stroke-[2.5]" />
               <span>طلب صرف جديد</span>
             </button>
-
           </div>
+
         </div>
       </div>
     </header>

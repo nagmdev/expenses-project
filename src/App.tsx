@@ -17,6 +17,8 @@ import { FirebaseConfigModal } from './components/FirebaseConfigModal';
 import { UserProfileModal } from './components/UserProfileModal';
 import { SettingsManagement } from './components/SettingsManagement';
 import { ProfileManagement } from './components/ProfileManagement';
+import { Sidebar } from './components/Sidebar';
+import { UsersManagement } from './components/UsersManagement';
 import { ExpenseRequest, SUPPORTED_CURRENCIES, Organization, OrganizationMember } from './types';
 import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
@@ -49,6 +51,7 @@ const MainApp: React.FC = () => {
   const [isNewRequestModalOpen, setIsNewRequestModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [selectedRequest, setSelectedRequest] = useState<ExpenseRequest | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   
   // Status check state for pending assignment screen
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
@@ -243,6 +246,7 @@ const MainApp: React.FC = () => {
         onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
         onOpenNewOrg={() => setIsQuickOrgModalOpen(true)}
         onOpenProfile={() => setActiveTab('profile')}
+        onToggleSidebar={() => setIsSidebarOpen(prev => !prev)}
       />
 
       {/* Firebase Permission / Connection Alert (Super Admin Only) */}
@@ -272,130 +276,146 @@ const MainApp: React.FC = () => {
         </div>
       )}
 
-      {/* Navigation Bar */}
-      <Navbar />
+      {/* Main Layout Container: Right Sidebar + Main Content (in RTL layout) */}
+      <div className="flex-1 flex flex-row w-full min-h-[calc(100vh-4.5rem)] relative">
+        {/* Right Navigation Sidebar */}
+        <Sidebar 
+          isOpen={isSidebarOpen} 
+          onClose={() => setIsSidebarOpen(false)} 
+        />
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {!loading && organizations.length === 0 && currentRole === 'super_admin' && activeTab === 'dashboard' ? (
-          <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-xl mx-auto text-center shadow-md my-8">
-            <div className="h-16 w-16 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto mb-4">
-              <Building2 className="h-8 w-8" />
+        {/* Main Content Area */}
+        <main className="flex-1 min-w-0 px-4 sm:px-6 lg:px-8 py-6 max-w-7xl mx-auto">
+          {!loading && organizations.length === 0 && currentRole === 'super_admin' && activeTab === 'dashboard' ? (
+            <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-xl mx-auto text-center shadow-md my-8">
+              <div className="h-16 w-16 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto mb-4">
+                <Building2 className="h-8 w-8" />
+              </div>
+              <h2 className="text-xl font-bold text-slate-900">مرحباً بك في لوحة تحكم المنصة (Super Admin)</h2>
+              <p className="text-xs text-slate-500 mt-2 leading-relaxed">
+                ابدأ بإنشاء الشركة الأولى وتعيين مدير لها ليبدأ في إضافة الموظفين واعتماد المصروفات.
+              </p>
+              <div className="flex flex-wrap items-center justify-center gap-3 mt-6">
+                <button
+                  type="button"
+                  onClick={() => setIsQuickOrgModalOpen(true)}
+                  className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer"
+                >
+                  + إنشاء الشركة الأولى الآن
+                </button>
+              </div>
             </div>
-            <h2 className="text-xl font-bold text-slate-900">مرحباً بك في لوحة تحكم المنصة (Super Admin)</h2>
-            <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-              ابدأ بإنشاء الشركة الأولى وتعيين مدير لها ليبدأ في إضافة الموظفين واعتماد المصروفات.
-            </p>
-            <div className="flex flex-wrap items-center justify-center gap-3 mt-6">
-              <button
-                type="button"
-                onClick={() => setIsQuickOrgModalOpen(true)}
-                className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer"
-              >
-                + إنشاء الشركة الأولى الآن
-              </button>
-            </div>
-          </div>
-        ) : !loading && currentRole !== 'super_admin' && organizations.length === 0 ? (
-          <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-lg mx-auto text-center shadow-md my-12 animate-in fade-in duration-200">
-            <div className="h-16 w-16 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto mb-4 border border-amber-200">
-              <Building2 className="h-8 w-8" />
-            </div>
-            <h2 className="text-lg font-bold text-slate-900">الحساب بانتظار التعيين في الشركة</h2>
-            <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-              مرحباً بك <strong>{currentUser.name}</strong> ({currentUser.email}).
-              <br />
-              لم يتم ربط حسابك بأي شركة أو مؤسسة بعد، أو أن الحساب بانتظار تفعيل المسؤول. يرجى التواصل مع مدير شركتك لإضافتك وتفعيل صلاحياتك.
-            </p>
-            <div className="mt-6 flex flex-col items-center gap-3">
-              <button
-                type="button"
-                disabled={isRefreshingStatus}
-                onClick={handleCheckStatusNow}
-                className="px-6 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition cursor-pointer flex items-center gap-2 shadow-sm"
-              >
-                {isRefreshingStatus ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin text-emerald-400" />
-                    <span>جاري فحص الصلاحيات وربط المؤسسة فورياً...</span>
-                  </>
-                ) : (
-                  <span>تحديث الحالة الآن</span>
+          ) : !loading && currentRole !== 'super_admin' && organizations.length === 0 ? (
+            <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-lg mx-auto text-center shadow-md my-12 animate-in fade-in duration-200">
+              <div className="h-16 w-16 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto mb-4 border border-amber-200">
+                <Building2 className="h-8 w-8" />
+              </div>
+              <h2 className="text-lg font-bold text-slate-900">الحساب بانتظار التعيين في الشركة</h2>
+              <p className="text-xs text-slate-500 mt-2 leading-relaxed">
+                مرحباً بك <strong>{currentUser.name}</strong> ({currentUser.email}).
+                <br />
+                لم يتم ربط حسابك بأي شركة أو مؤسسة بعد، أو أن الحساب بانتظار تفعيل المسؤول. يرجى التواصل مع مدير شركتك لإضافتك وتفعيل صلاحياتك.
+              </p>
+              <div className="mt-6 flex flex-col items-center gap-3">
+                <button
+                  type="button"
+                  disabled={isRefreshingStatus}
+                  onClick={handleCheckStatusNow}
+                  className="px-6 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition cursor-pointer flex items-center gap-2 shadow-sm"
+                >
+                  {isRefreshingStatus ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin text-emerald-400" />
+                      <span>جاري فحص الصلاحيات وربط المؤسسة فورياً...</span>
+                    </>
+                  ) : (
+                    <span>تحديث الحالة الآن</span>
+                  )}
+                </button>
+                {statusMessage && (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg max-w-sm">
+                    {statusMessage}
+                  </p>
                 )}
-              </button>
-              {statusMessage && (
-                <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg max-w-sm">
-                  {statusMessage}
-                </p>
-              )}
+              </div>
             </div>
-          </div>
-        ) : currentRole === 'employee' ? (
-          /* Employee Experience: Dedicated Banking Tracker, Profile, or Petty Cash Custodies */
-          activeTab === 'profile' ? (
-            <ProfileManagement />
-          ) : activeTab === 'custody' ? (
-            <CustodyManagement />
-          ) : (
-            <RequesterTracker 
-              onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
-              onSelectRequest={setSelectedRequest}
-            />
-          )
-        ) : (
-          /* Admin / Super Admin / Data Entry Multi-Tab View */
-          <>
-            {activeTab === 'profile' && (
+          ) : currentRole === 'employee' ? (
+            /* Employee Experience: Dedicated Banking Tracker, Profile, or Petty Cash Custodies */
+            activeTab === 'profile' ? (
               <ProfileManagement />
-            )}
-
-            {activeTab === 'dashboard' && currentRole !== 'data_entry' && (
-              <DashboardAnalytics 
-                onSelectRequest={setSelectedRequest}
-                onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
-              />
-            )}
-
-            {activeTab === 'requests' && currentRole !== 'data_entry' && (
-              <ExpenseRequestsList 
-                onSelectRequest={setSelectedRequest}
-                onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
-              />
-            )}
-
-            {activeTab === 'my-requests' && (
+            ) : activeTab === 'custody' ? (
+              <CustodyManagement />
+            ) : (
               <RequesterTracker 
                 onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
                 onSelectRequest={setSelectedRequest}
               />
-            )}
+            )
+          ) : (
+            /* Admin / Super Admin / Data Entry Multi-Tab View */
+            <>
+              {activeTab === 'profile' && (
+                <ProfileManagement />
+              )}
 
-            {activeTab === 'treasury' && (
-              <TreasuryManagement />
-            )}
+              {activeTab === 'dashboard' && currentRole !== 'data_entry' && (
+                <DashboardAnalytics 
+                  onSelectRequest={setSelectedRequest}
+                  onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+                />
+              )}
 
-            {activeTab === 'custody' && (
-              <CustodyManagement />
-            )}
+              {activeTab === 'requests' && currentRole !== 'data_entry' && (
+                <ExpenseRequestsList 
+                  onSelectRequest={setSelectedRequest}
+                  onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+                />
+              )}
 
-            {activeTab === 'services' && (
-              <ServicesManagement />
-            )}
+              {activeTab === 'my-requests' && (
+                <RequesterTracker 
+                  onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+                  onSelectRequest={setSelectedRequest}
+                />
+              )}
 
-            {activeTab === 'providers' && (
-              <VendorsManagement />
-            )}
+              {activeTab === 'treasury' && (
+                <TreasuryManagement />
+              )}
 
-            {activeTab === 'organizations' && (
-              <OrganizationsManagement />
-            )}
+              {activeTab === 'custody' && (
+                <CustodyManagement />
+              )}
 
-            {activeTab === 'settings' && (currentRole === 'org_admin' || currentRole === 'super_admin') && (
-              <SettingsManagement />
-            )}
-          </>
-        )}
-      </main>
+              {activeTab === 'services' && (
+                <ServicesManagement />
+              )}
+
+              {activeTab === 'providers' && (
+                <VendorsManagement />
+              )}
+
+              {/* Dedicated Users & Employees tab from screenshot */}
+              {activeTab === 'users' && (
+                <UsersManagement />
+              )}
+
+              {activeTab === 'organizations' && (
+                <OrganizationsManagement initialSection="companies" />
+              )}
+
+              {/* Dedicated Audit Log tab */}
+              {activeTab === 'audit' && (
+                <OrganizationsManagement initialSection="audit_log" />
+              )}
+
+              {activeTab === 'settings' && (currentRole === 'org_admin' || currentRole === 'super_admin') && (
+                <SettingsManagement />
+              )}
+            </>
+          )}
+        </main>
+      </div>
 
       {/* Modals */}
       <NewRequestModal 
