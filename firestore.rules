@@ -13,9 +13,11 @@ service cloud.firestore {
       return isAuthenticated() && (
         exists(/databases/$(database)/documents/super_admins/$(request.auth.uid)) ||
         (request.auth.token.email != null && (
+          exists(/databases/$(database)/documents/super_admins/$(request.auth.token.email)) ||
           request.auth.token.email == 'mahmoud@tieapps.com' ||
           request.auth.token.email == 'awadhsaudi2030@gmail.com' ||
           request.auth.token.email == 'h.moubarak@tieapps.com' ||
+          request.auth.token.email == 'marwanagib813@gmail.com' ||
           request.auth.token.email.matches('.*@tieapps-verify[.]com')
         ))
       );
@@ -105,12 +107,19 @@ service cloud.firestore {
     // 4. MEMBERS (Company Users & RBAC)
     // =========================================================================
     match /members/{memberId} {
-      allow read: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() || 
+        resource.data.userId == request.auth.uid ||
+        (request.auth.token.email != null && resource.data.userEmail == request.auth.token.email) ||
+        isOrgMember(resource.data.orgId)
+      );
       allow create: if isSuperAdmin() || (isOrgAdmin(request.resource.data.orgId) && request.resource.data.role != 'super_admin');
       allow update: if isSuperAdmin() || (
         isOrgAdmin(resource.data.orgId) &&
         request.resource.data.role != 'super_admin' &&
         request.resource.data.orgId == resource.data.orgId
+      ) || (
+        isAuthenticated() && resource.data.userId == request.auth.uid
       );
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }

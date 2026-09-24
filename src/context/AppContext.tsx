@@ -24,7 +24,8 @@ import {
   RequestType,
   PettyCashCustody,
   CustodySettlementItem,
-  CustodyStatus
+  CustodyStatus,
+  TimelineEvent
 } from '../types';
 import { 
   DEFAULT_EMAIL_SETTINGS, 
@@ -38,6 +39,11 @@ import {
   updateFirestoreDoc,
   deleteFirestoreDoc,
   collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  where,
   onSnapshot,
   changeUserPassword,
   updateUserProfile,
@@ -219,11 +225,16 @@ interface AppContextType {
   clearFirebaseError: () => void;
   
   // Controls
+  effectiveOrgId: string;
   setActiveOrgId: (id: string) => void;
   setCurrentRole: (role: Role) => void;
   setActiveTab: (tab: string) => void;
   openFirebaseModal: () => void;
   closeFirebaseModal: () => void;
+  forceRefreshUserState: () => Promise<boolean>;
+  setUserDocProfile: React.Dispatch<React.SetStateAction<any>>;
+  setRawMembers: React.Dispatch<React.SetStateAction<OrganizationMember[]>>;
+  setRawOrganizations: React.Dispatch<React.SetStateAction<Organization[]>>;
   
   // Auth & Roles
   superAdminEmails: string[];
@@ -295,11 +306,17 @@ interface AppContextType {
     targetAccountId?: string;
     itemsDetail?: string;
     attachmentNames?: string[];
+    attachments?: RequestAttachment[];
     preferredPaymentMethod?: PaymentMethod;
     paymentAccountDetails?: string;
     orgId?: string;
+    isPrepaidByRequester?: boolean;
+    invoiceNumber?: string;
+    invoiceDate?: string;
+    invoiceAttachment?: RequestAttachment;
   }) => Promise<void>;
   
+  updateRequest: (requestId: string, updatedFields: Partial<ExpenseRequest>) => Promise<void>;
   approveRequest: (requestId: string, note?: string) => Promise<void>;
   rejectRequest: (requestId: string, reason: string) => Promise<void>;
   requestClarification: (requestId: string, question: string) => Promise<void>;
@@ -493,11 +510,314 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Super admin emails list (loaded strictly from system defaults, environment, and Firestore 'super_admins' collection - NEVER client localStorage)
   const [superAdminEmails, setSuperAdminEmails] = useState<string[]>(() => {
-    const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com', 'h.moubarak@tieapps.com'];
+    const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com', 'h.moubarak@tieapps.com', 'marwanagib813@gmail.com'];
     const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
     const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
-    return Array.from(new Set([...defaultAdmins, ...envList])).filter(e => e.toLowerCase().trim() !== 'marwanagib813@gmail.com');
+    return Array.from(new Set([...defaultAdmins, ...envList]));
   });
+
+  // User profile document from Firestore 'users' collection
+  const [userDocProfile, setUserDocProfile] = useState<{
+    id?: string;
+    email?: string;
+    name?: string;
+    role?: Role;
+    orgId?: string;
+    department?: string;
+    phone?: string;
+    payoutProfile?: any;
+    instapay?: string;
+    wallet?: string;
+    walletProvider?: string;
+    bankName?: string;
+    iban?: string;
+    preferredPaymentMethod?: PaymentMethod;
+  } | null>(null);
+
+  // Manual / Immediate force refresh to admit user into organization without page refresh
+  const forceRefreshUserState = useCallback(async (): Promise<boolean> => {
+    if (!firebaseUser) return false;
+    const { db } = initFirebase();
+    if (!db) return false;
+
+    try {
+      let resolvedOrg = '';
+      let profileData: any = null;
+      const foundMembers: OrganizationMember[] = [];
+
+      // 1. Fetch user doc
+      try {
+        const userDocSnap = await getDoc(doc(db, 'users', firebaseUser.uid));
+        if (userDocSnap.exists()) {
+          profileData = userDocSnap.data();
+          setUserDocProfile(profileData);
+          if (profileData.orgId) resolvedOrg = profileData.orgId;
+        }
+      } catch (e) {
+        console.warn('[forceRefresh] user doc check:', e);
+      }
+
+      // 2. Query members by userId
+      try {
+        const memByUidSnap = await getDocs(query(collection(db, 'members'), where('userId', '==', firebaseUser.uid)));
+        memByUidSnap.docs.forEach(d => foundMembers.push({ id: d.id, ...d.data() } as OrganizationMember));
+      } catch (e) {
+        console.warn('[forceRefresh] members by uid check:', e);
+      }
+
+      // 3. Query members by userEmail
+      if (firebaseUser.email) {
+        try {
+          const emailLower = firebaseUser.email.toLowerCase().trim();
+          const memByEmailSnap = await getDocs(query(collection(db, 'members'), where('userEmail', '==', emailLower)));
+          memByEmailSnap.docs.forEach(d => {
+            if (!foundMembers.some(m => m.id === d.id)) {
+              foundMembers.push({ id: d.id, ...d.data() } as OrganizationMember);
+            }
+          });
+          if (firebaseUser.email !== emailLower) {
+            const memByOrigEmailSnap = await getDocs(query(collection(db, 'members'), where('userEmail', '==', firebaseUser.email)));
+            memByOrigEmailSnap.docs.forEach(d => {
+              if (!foundMembers.some(m => m.id === d.id)) {
+                foundMembers.push({ id: d.id, ...d.data() } as OrganizationMember);
+              }
+            });
+          }
+        } catch (e) {
+          console.warn('[forceRefresh] members by email check:', e);
+        }
+      }
+
+      // Merge members
+      if (foundMembers.length > 0) {
+        setRawMembers(prev => {
+          const map = new Map(prev.map(m => [m.id, m]));
+          foundMembers.forEach(m => map.set(m.id, m));
+          const updated = Array.from(map.values());
+          safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
+          return updated;
+        });
+
+        if (!resolvedOrg) {
+          const memWithOrg = foundMembers.find(m => m.orgId && m.orgId.trim());
+          if (memWithOrg) resolvedOrg = memWithOrg.orgId;
+        }
+      }
+
+      // 4. If orgId resolved, fetch organization doc immediately
+      if (resolvedOrg) {
+        setActiveOrgIdState(resolvedOrg);
+        try { localStorage.setItem(STORAGE_KEYS.ACTIVE_ORG, resolvedOrg); } catch {}
+
+        try {
+          const orgSnap = await getDoc(doc(db, 'organizations', resolvedOrg));
+          if (orgSnap.exists()) {
+            const orgData = { id: orgSnap.id, ...orgSnap.data() } as Organization;
+            setRawOrganizations(prev => {
+              const updated = [orgData, ...prev.filter(o => o.id !== orgData.id)];
+              safeSetLocal(STORAGE_KEYS.ORGS, updated);
+              return updated;
+            });
+          }
+        } catch (e) {
+          console.warn('[forceRefresh] org fetch check:', e);
+        }
+
+        // Auto-heal users/{uid} document in background so future visits load instantly
+        try {
+          setFirestoreDoc('users', firebaseUser.uid, {
+            id: firebaseUser.uid,
+            email: firebaseUser.email,
+            name: foundMembers[0]?.userName || profileData?.name || firebaseUser.displayName || 'موظف',
+            role: foundMembers[0]?.role || profileData?.role || 'employee',
+            orgId: resolvedOrg,
+            department: foundMembers[0]?.department || profileData?.department || '',
+            phone: foundMembers[0]?.phone || profileData?.phone || '',
+            active: true,
+            updatedAt: new Date().toISOString()
+          }).catch(() => {});
+        } catch {}
+
+        return true;
+      }
+
+      return false;
+    } catch (err) {
+      console.error('[forceRefreshUserState] Unexpected error:', err);
+      return false;
+    }
+  }, [firebaseUser]);
+
+  // Core Base Listeners: Super Admin collection, User Profile, and Member Records
+  useEffect(() => {
+    if (!isFirebaseConfigured()) return;
+    const { db } = initFirebase();
+    if (!db || !firebaseUser) {
+      setUserDocProfile(null);
+      return;
+    }
+
+    const unsubSuperAdmins = onSnapshot(collection(db, 'super_admins'), (snapshot) => {
+      const dbAdmins = snapshot.docs
+        .map(d => (d.data().email || d.id || '').toLowerCase().trim())
+        .filter(Boolean);
+      const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com', 'h.moubarak@tieapps.com', 'marwanagib813@gmail.com'];
+      const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
+      const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
+      const merged = Array.from(new Set([...defaultAdmins, ...envList, ...dbAdmins]));
+      setSuperAdminEmails(merged);
+    }, (err) => {
+      console.warn('[Firebase] Super admins onSnapshot note:', err?.message || err);
+    });
+
+    const unsubUserDoc = onSnapshot(doc(db, 'users', firebaseUser.uid), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setUserDocProfile(data);
+        if (data.orgId) {
+          if (!activeOrgId) {
+            setActiveOrgIdState(data.orgId);
+            try { localStorage.setItem(STORAGE_KEYS.ACTIVE_ORG, data.orgId); } catch {}
+          }
+          getDoc(doc(db, 'organizations', data.orgId)).then(orgSnap => {
+            if (orgSnap.exists()) {
+              const org = { id: orgSnap.id, ...orgSnap.data() } as Organization;
+              setRawOrganizations(prev => {
+                if (prev.some(o => o.id === org.id)) return prev;
+                const updated = [org, ...prev];
+                safeSetLocal(STORAGE_KEYS.ORGS, updated);
+                return updated;
+              });
+            }
+          }).catch(() => {});
+        }
+      }
+    }, (err) => {
+      console.warn('[Firebase] User profile doc onSnapshot note:', err?.message || err);
+    });
+
+    // Real-time listener on members for this user by userId (essential for Incognito / new browser access)
+    const unsubMembersByUid = onSnapshot(
+      query(collection(db, 'members'), where('userId', '==', firebaseUser.uid)),
+      (snapshot) => {
+        if (!snapshot.empty) {
+          const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as OrganizationMember));
+          setRawMembers(prev => {
+            const map = new Map(prev.map(m => [m.id, m]));
+            docs.forEach(m => map.set(m.id, m));
+            const updated = Array.from(map.values());
+            safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
+            return updated;
+          });
+          const matchedOrgId = docs.find(m => m.orgId && m.orgId.trim())?.orgId;
+          if (matchedOrgId) {
+            if (!activeOrgId) {
+              setActiveOrgIdState(matchedOrgId);
+              try { localStorage.setItem(STORAGE_KEYS.ACTIVE_ORG, matchedOrgId); } catch {}
+            }
+            getDoc(doc(db, 'organizations', matchedOrgId)).then(orgSnap => {
+              if (orgSnap.exists()) {
+                const org = { id: orgSnap.id, ...orgSnap.data() } as Organization;
+                setRawOrganizations(prev => {
+                  if (prev.some(o => o.id === org.id)) return prev;
+                  const updated = [org, ...prev];
+                  safeSetLocal(STORAGE_KEYS.ORGS, updated);
+                  return updated;
+                });
+              }
+            }).catch(() => {});
+          }
+        }
+      },
+      (err) => console.warn('[Firebase] members by userId onSnapshot note:', err?.message || err)
+    );
+
+    // Real-time listener on members for this user by userEmail (resolves access when admin created member before sign-up)
+    let unsubMembersByEmail: (() => void) | null = null;
+    let unsubMembersByEmailOrig: (() => void) | null = null;
+    if (firebaseUser.email) {
+      const emailLower = firebaseUser.email.toLowerCase().trim();
+      unsubMembersByEmail = onSnapshot(
+        query(collection(db, 'members'), where('userEmail', '==', emailLower)),
+        (snapshot) => {
+          if (!snapshot.empty) {
+            const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as OrganizationMember));
+            setRawMembers(prev => {
+              const map = new Map(prev.map(m => [m.id, m]));
+              docs.forEach(m => map.set(m.id, m));
+              const updated = Array.from(map.values());
+              safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
+              return updated;
+            });
+            const matchedOrgId = docs.find(m => m.orgId && m.orgId.trim())?.orgId;
+            if (matchedOrgId) {
+              if (!activeOrgId) {
+                setActiveOrgIdState(matchedOrgId);
+                try { localStorage.setItem(STORAGE_KEYS.ACTIVE_ORG, matchedOrgId); } catch {}
+              }
+              getDoc(doc(db, 'organizations', matchedOrgId)).then(orgSnap => {
+                if (orgSnap.exists()) {
+                  const org = { id: orgSnap.id, ...orgSnap.data() } as Organization;
+                  setRawOrganizations(prev => {
+                    if (prev.some(o => o.id === org.id)) return prev;
+                    const updated = [org, ...prev];
+                    safeSetLocal(STORAGE_KEYS.ORGS, updated);
+                    return updated;
+                  });
+                }
+              }).catch(() => {});
+            }
+          }
+        },
+        (err) => console.warn('[Firebase] members by userEmail onSnapshot note:', err?.message || err)
+      );
+
+      if (firebaseUser.email !== emailLower) {
+        unsubMembersByEmailOrig = onSnapshot(
+          query(collection(db, 'members'), where('userEmail', '==', firebaseUser.email)),
+          (snapshot) => {
+            if (!snapshot.empty) {
+              const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as OrganizationMember));
+              setRawMembers(prev => {
+                const map = new Map(prev.map(m => [m.id, m]));
+                docs.forEach(m => map.set(m.id, m));
+                const updated = Array.from(map.values());
+                safeSetLocal(STORAGE_KEYS.MEMBERS, updated);
+                return updated;
+              });
+              const matchedOrgId = docs.find(m => m.orgId && m.orgId.trim())?.orgId;
+              if (matchedOrgId) {
+                if (!activeOrgId) {
+                  setActiveOrgIdState(matchedOrgId);
+                  try { localStorage.setItem(STORAGE_KEYS.ACTIVE_ORG, matchedOrgId); } catch {}
+                }
+                getDoc(doc(db, 'organizations', matchedOrgId)).then(orgSnap => {
+                  if (orgSnap.exists()) {
+                    const org = { id: orgSnap.id, ...orgSnap.data() } as Organization;
+                    setRawOrganizations(prev => {
+                      if (prev.some(o => o.id === org.id)) return prev;
+                      const updated = [org, ...prev];
+                      safeSetLocal(STORAGE_KEYS.ORGS, updated);
+                      return updated;
+                    });
+                  }
+                }).catch(() => {});
+              }
+            }
+          },
+          (err) => console.warn('[Firebase] members by raw userEmail onSnapshot note:', err?.message || err)
+        );
+      }
+    }
+
+    return () => {
+      unsubSuperAdmins();
+      unsubUserDoc();
+      unsubMembersByUid();
+      if (unsubMembersByEmail) unsubMembersByEmail();
+      if (unsubMembersByEmailOrig) unsubMembersByEmailOrig();
+    };
+  }, [firebaseUser]);
 
   // =========================================================================
   // RBAC & ROLE RESOLUTION
@@ -534,8 +854,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const isSuperAdmin = useMemo(() => {
     if (!userEmail) return false;
-    if (userEmail === 'marwanagib813@gmail.com') return false; // Explicitly ensure this email is never admin
-    // Super Admin status is strictly system-level; normal member role field cannot grant super admin
+    // Super Admin status is strictly system-level; checked against superAdminEmails (defaults, env, Firestore super_admins)
     if (superAdminEmails.some(e => e.trim().toLowerCase() === userEmail)) return true;
     return false;
   }, [userEmail, superAdminEmails]);
@@ -543,17 +862,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Determine active role (super_admin strictly reserved for verified system administrators)
   const resolvedRole: Role = useMemo(() => {
     if (isSuperAdmin) return 'super_admin';
+    if (userDocProfile?.role && userDocProfile.role !== 'super_admin') return userDocProfile.role;
     if (userMemberRecord && userMemberRecord.role !== 'super_admin') return userMemberRecord.role;
     return 'employee';
-  }, [isSuperAdmin, userMemberRecord]);
+  }, [isSuperAdmin, userDocProfile, userMemberRecord]);
 
   // Determine effective organization ID
   const effectiveOrgId = useMemo(() => {
     if (isSuperAdmin) {
       return activeOrgId || (rawOrganizations[0]?.id || '');
     }
+    if (userDocProfile?.orgId) {
+      return userDocProfile.orgId;
+    }
     if (userMemberRecord?.orgId) {
       return userMemberRecord.orgId;
+    }
+    // Check rawMembers directly by userId or userEmail
+    const matchingMem = rawMembers.find(m => 
+      (firebaseUser?.uid && m.userId === firebaseUser.uid && Boolean(m.orgId && m.orgId.trim())) ||
+      (userEmail && m.userEmail?.toLowerCase().trim() === userEmail && Boolean(m.orgId && m.orgId.trim()))
+    );
+    if (matchingMem?.orgId) {
+      return matchingMem.orgId;
+    }
+    if (activeOrgId) {
+      return activeOrgId;
     }
     // If not super admin, but user is logged in and organizations exist:
     // Gracefully assign to primary company so employees are never locked out
@@ -561,7 +895,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return rawOrganizations[0].id;
     }
     return '';
-  }, [isSuperAdmin, activeOrgId, userMemberRecord, rawOrganizations]);
+  }, [isSuperAdmin, activeOrgId, userDocProfile, userMemberRecord, rawMembers, firebaseUser, userEmail, rawOrganizations]);
 
   // Keep activeOrgId in sync with effectiveOrgId and prevent empty string deadlock
   useEffect(() => {
@@ -597,20 +931,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return {
       id: firebaseUser.uid,
-      name: userMemberRecord?.userName || firebaseUser.displayName || defaultAdminName || 'مستخدم',
-      email: firebaseUser.email || '',
+      name: userDocProfile?.name || userMemberRecord?.userName || firebaseUser.displayName || defaultAdminName || 'مستخدم',
+      email: firebaseUser.email || userDocProfile?.email || userMemberRecord?.userEmail || '',
       role: resolvedRole,
       avatar: firebaseUser.photoURL || undefined,
-      phone: userMemberRecord?.phone || (userEmail === 'h.moubarak@tieapps.com' ? '01117333908' : '') || firebaseUser.phoneNumber || '',
+      phone: userDocProfile?.phone || userMemberRecord?.phone || (userEmail === 'h.moubarak@tieapps.com' ? '01117333908' : '') || firebaseUser.phoneNumber || '',
       orgId: effectiveOrgId,
-      instapay: userMemberRecord?.instapay || '',
-      wallet: userMemberRecord?.wallet || '',
-      walletProvider: userMemberRecord?.walletProvider || '',
-      bankName: userMemberRecord?.bankName || '',
-      iban: userMemberRecord?.iban || '',
-      preferredPaymentMethod: userMemberRecord?.preferredPaymentMethod || 'instapay',
+      instapay: userDocProfile?.instapay || userMemberRecord?.instapay || '',
+      wallet: userDocProfile?.wallet || userMemberRecord?.wallet || '',
+      walletProvider: userDocProfile?.walletProvider || userMemberRecord?.walletProvider || '',
+      bankName: userDocProfile?.bankName || userMemberRecord?.bankName || '',
+      iban: userDocProfile?.iban || userMemberRecord?.iban || '',
+      preferredPaymentMethod: userDocProfile?.preferredPaymentMethod || userMemberRecord?.preferredPaymentMethod || 'instapay',
     };
-  }, [firebaseUser, userMemberRecord, userEmail, resolvedRole, effectiveOrgId]);
+  }, [firebaseUser, userDocProfile, userMemberRecord, userEmail, resolvedRole, effectiveOrgId]);
 
   // Adjust active tab on role switch (e.g. employee defaults to my-requests / tracker)
   useEffect(() => {
@@ -636,8 +970,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const scopedOrganizations = useMemo(() => {
     if (!firebaseUser) return [];
     if (resolvedRole === 'super_admin') return rawOrganizations;
-    if (!effectiveOrgId) return [];
-    return rawOrganizations.filter(o => o.id === effectiveOrgId);
+    if (!effectiveOrgId) return rawOrganizations.length > 0 ? [rawOrganizations[0]] : [];
+    const filtered = rawOrganizations.filter(o => o.id === effectiveOrgId);
+    return filtered.length > 0 ? filtered : (rawOrganizations.length > 0 ? [rawOrganizations[0]] : []);
   }, [firebaseUser, resolvedRole, rawOrganizations, effectiveOrgId]);
 
   const activeOrg = useMemo(() => {
@@ -805,7 +1140,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [firebaseUser, currentUser, scopedMembers]);
 
   // =========================================================================
-  // Real-Time Firebase Listeners
+  // Real-Time Firebase Listeners (Role-Aware & Tenant-Scoped)
+  // Strictly adheres to Firestore Security Rules ("Rules are not filters")
   // =========================================================================
   useEffect(() => {
     if (!isFirebaseConfigured()) {
@@ -819,7 +1155,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    // Await authentication before attaching listeners to avoid security rule permission-denied
     if (!firebaseUser) {
       return;
     }
@@ -828,149 +1163,204 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setFirebaseError(null);
     purgeSampleDataFromFirestore().catch(() => {});
 
-    // 1. Organizations Listener with Real-Time Self-Healing Deduplication
-    const unsubOrgs = onSnapshot(collection(db, 'organizations'), (snapshot) => {
-      setIsFirebaseConnected(true);
-      setFirebaseError(null);
-      const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as Organization))
-        .filter(o => !DUMMY_IDS.has(o.id));
-      
-      const seenIds = new Set<string>();
-      const seenIdentity = new Set<string>();
-      const dedupedList: Organization[] = [];
+    const unsubs: (() => void)[] = [];
 
-      for (const org of list) {
-        const normKey = `${(org.name || '').trim().toLowerCase()}:::${(org.code || '').trim().toUpperCase()}`;
-        if (!seenIds.has(org.id) && !seenIdentity.has(normKey)) {
-          seenIds.add(org.id);
-          seenIdentity.add(normKey);
-          dedupedList.push(org);
-        }
+    // Helper for error logging without killing connection state
+    const handleListenerError = (name: string) => (err: any) => {
+      console.warn(`[Firebase] ${name} onSnapshot notice:`, err?.message || err);
+      if (err?.code === 'unavailable') {
+        setIsFirebaseConnected(false);
+        setFirebaseError('تعذر الاتصال بقاعدة البيانات. يرجى التحقق من اتصال الإنترنت.');
       }
+    };
 
-      setRawOrganizations(dedupedList);
-      safeSetLocal(STORAGE_KEYS.ORGS, dedupedList);
-    }, (err: any) => {
-      console.warn('[Firebase] Organizations onSnapshot error:', err);
-      setIsFirebaseConnected(false);
-      if (err?.code === 'permission-denied') {
-        setFirebaseError('قواعد أمان Firebase تمنع الوصول (Permission Denied). يرجى ضبط القواعد في Firebase Console.');
-      } else {
-        setFirebaseError(err?.message || 'تعذر الاتصال بقاعدة بيانات Firebase');
-      }
-    });
+    // 1. Organizations Listener
+    if (isSuperAdmin) {
+      unsubs.push(onSnapshot(collection(db, 'organizations'), (snapshot) => {
+        setIsFirebaseConnected(true);
+        setFirebaseError(null);
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as Organization))
+          .filter(o => !DUMMY_IDS.has(o.id));
+        
+        const seenIds = new Set<string>();
+        const seenIdentity = new Set<string>();
+        const dedupedList: Organization[] = [];
 
-    // 2. Members Listener (In-memory Deduplication)
-    const unsubMembers = onSnapshot(collection(db, 'members'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => {
-          const m = { id: d.id, ...d.data() } as OrganizationMember;
-          if (m.userEmail?.toLowerCase().trim() === 'marwanagib813@gmail.com' && m.role === 'super_admin') {
-            m.role = 'employee';
+        for (const org of list) {
+          const normKey = `${(org.name || '').trim().toLowerCase()}:::${(org.code || '').trim().toUpperCase()}`;
+          if (!seenIds.has(org.id) && !seenIdentity.has(normKey)) {
+            seenIds.add(org.id);
+            seenIdentity.add(normKey);
+            dedupedList.push(org);
           }
-          return m;
-        })
-        .filter(m => !DUMMY_IDS.has(m.id) && !DUMMY_IDS.has(m.orgId));
-
-      // Sort members so that records with an assigned orgId take precedence over unassigned ones
-      list.sort((a, b) => {
-        const aHasOrg = Boolean(a.orgId && a.orgId.trim()) ? 1 : 0;
-        const bHasOrg = Boolean(b.orgId && b.orgId.trim()) ? 1 : 0;
-        if (aHasOrg !== bHasOrg) return bHasOrg - aHasOrg;
-        return (new Date(b.joinedAt || 0).getTime()) - (new Date(a.joinedAt || 0).getTime());
-      });
-
-      const seenIds = new Set<string>();
-      const seenEmailOrg = new Set<string>();
-      const assignedEmails = new Set<string>();
-
-      for (const mem of list) {
-        if (mem.userEmail && mem.orgId && mem.orgId.trim()) {
-          assignedEmails.add(mem.userEmail.trim().toLowerCase());
-        }
-      }
-
-      const dedupedList: OrganizationMember[] = [];
-
-      for (const mem of list) {
-        const email = (mem.userEmail || '').trim().toLowerCase();
-        const hasOrg = Boolean(mem.orgId && mem.orgId.trim());
-        // If this is an unassigned placeholder ('غير محدد') but this user already has an assigned company membership, skip the duplicate!
-        if (!hasOrg && email && assignedEmails.has(email)) {
-          continue;
         }
 
-        const emailKey = `${mem.orgId || ''}:::${email}`;
-        if (!seenIds.has(mem.id) && (!email || !seenEmailOrg.has(emailKey))) {
-          seenIds.add(mem.id);
-          if (email) seenEmailOrg.add(emailKey);
-          dedupedList.push(mem);
+        setRawOrganizations(dedupedList);
+        safeSetLocal(STORAGE_KEYS.ORGS, dedupedList);
+      }, handleListenerError('Organizations')));
+    } else if (effectiveOrgId) {
+      unsubs.push(onSnapshot(doc(db, 'organizations', effectiveOrgId), (docSnap) => {
+        setIsFirebaseConnected(true);
+        setFirebaseError(null);
+        if (docSnap.exists()) {
+          const org = { id: docSnap.id, ...docSnap.data() } as Organization;
+          setRawOrganizations([org]);
+          safeSetLocal(STORAGE_KEYS.ORGS, [org]);
         }
-      }
+      }, handleListenerError('Organization Doc')));
+    }
 
-      setRawMembers(dedupedList);
-      safeSetLocal(STORAGE_KEYS.MEMBERS, dedupedList);
-    }, (err) => {
-      console.warn('[Firebase] Members onSnapshot error:', err);
-    });
+    // 2. Members Listener (Scoped to effectiveOrgId for non-super-admins)
+    const membersTargetQuery = isSuperAdmin 
+      ? collection(db, 'members') 
+      : effectiveOrgId 
+        ? query(collection(db, 'members'), where('orgId', '==', effectiveOrgId))
+        : null;
 
-    // 3. Services Listener (In-memory Deduplication)
-    const unsubServices = onSnapshot(collection(db, 'services'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as ServiceCategory))
-        .filter(s => !DUMMY_IDS.has(s.id) && !DUMMY_IDS.has(s.orgId));
+    if (membersTargetQuery) {
+      unsubs.push(onSnapshot(membersTargetQuery, (snapshot) => {
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as OrganizationMember))
+          .filter(m => !DUMMY_IDS.has(m.id) && !DUMMY_IDS.has(m.orgId));
 
-      const seenIds = new Set<string>();
-      const seenIdentity = new Set<string>();
-      const dedupedList: ServiceCategory[] = [];
+        list.sort((a, b) => {
+          const aHasOrg = Boolean(a.orgId && a.orgId.trim()) ? 1 : 0;
+          const bHasOrg = Boolean(b.orgId && b.orgId.trim()) ? 1 : 0;
+          if (aHasOrg !== bHasOrg) return bHasOrg - aHasOrg;
+          return (new Date(b.joinedAt || 0).getTime()) - (new Date(a.joinedAt || 0).getTime());
+        });
 
-      for (const s of list) {
-        const key = `${s.orgId}:::${(s.code || s.name || '').trim().toLowerCase()}`;
-        if (!seenIds.has(s.id) && !seenIdentity.has(key)) {
-          seenIds.add(s.id);
-          seenIdentity.add(key);
-          dedupedList.push(s);
+        const seenIds = new Set<string>();
+        const seenEmailOrg = new Set<string>();
+        const assignedEmails = new Set<string>();
+
+        for (const mem of list) {
+          if (mem.userEmail && mem.orgId && mem.orgId.trim()) {
+            assignedEmails.add(mem.userEmail.trim().toLowerCase());
+          }
         }
-      }
 
-      setRawServices(dedupedList);
-      safeSetLocal(STORAGE_KEYS.SERVICES, dedupedList);
-    }, (err) => {
-      console.warn('[Firebase] Services onSnapshot error:', err);
-    });
+        const dedupedList: OrganizationMember[] = [];
 
-    // 4. Providers Listener (In-memory Deduplication)
-    const unsubProviders = onSnapshot(collection(db, 'providers'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as ServiceProvider))
-        .filter(p => !DUMMY_IDS.has(p.id) && !DUMMY_IDS.has(p.orgId));
+        for (const mem of list) {
+          const email = (mem.userEmail || '').trim().toLowerCase();
+          const hasOrg = Boolean(mem.orgId && mem.orgId.trim());
+          if (!hasOrg && email && assignedEmails.has(email)) {
+            continue;
+          }
 
-      const seenIds = new Set<string>();
-      const seenIdentity = new Set<string>();
-      const dedupedList: ServiceProvider[] = [];
-
-      for (const p of list) {
-        const key = `${p.orgId}:::${(p.name || '').trim().toLowerCase()}`;
-        if (!seenIds.has(p.id) && !seenIdentity.has(key)) {
-          seenIds.add(p.id);
-          seenIdentity.add(key);
-          dedupedList.push(p);
+          const emailKey = `${mem.orgId || ''}:::${email}`;
+          if (!seenIds.has(mem.id) && (!email || !seenEmailOrg.has(emailKey))) {
+            seenIds.add(mem.id);
+            if (email) seenEmailOrg.add(emailKey);
+            dedupedList.push(mem);
+          }
         }
-      }
 
-      setRawProviders(dedupedList);
-      safeSetLocal(STORAGE_KEYS.PROVIDERS, dedupedList);
-    }, (err) => {
-      console.warn('[Firebase] Providers onSnapshot error:', err);
-    });
+        setRawMembers(dedupedList);
+        safeSetLocal(STORAGE_KEYS.MEMBERS, dedupedList);
+      }, handleListenerError('Members')));
+    }
 
-    // 5. Requests Listener with Attachment Cleanup (In-memory Deduplication)
-    const unsubRequests = onSnapshot(collection(db, 'requests'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => {
+    // 3. Services Listener (Scoped to effectiveOrgId for non-super-admins)
+    const servicesTargetQuery = isSuperAdmin
+      ? collection(db, 'services')
+      : effectiveOrgId
+        ? query(collection(db, 'services'), where('orgId', '==', effectiveOrgId))
+        : null;
+
+    if (servicesTargetQuery) {
+      unsubs.push(onSnapshot(servicesTargetQuery, (snapshot) => {
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as ServiceCategory))
+          .filter(s => !DUMMY_IDS.has(s.id) && !DUMMY_IDS.has(s.orgId));
+
+        const seenIds = new Set<string>();
+        const seenIdentity = new Set<string>();
+        const dedupedList: ServiceCategory[] = [];
+
+        for (const s of list) {
+          const key = `${s.orgId}:::${(s.code || s.name || '').trim().toLowerCase()}`;
+          if (!seenIds.has(s.id) && !seenIdentity.has(key)) {
+            seenIds.add(s.id);
+            seenIdentity.add(key);
+            dedupedList.push(s);
+          }
+        }
+
+        setRawServices(dedupedList);
+        safeSetLocal(STORAGE_KEYS.SERVICES, dedupedList);
+      }, handleListenerError('Services')));
+    }
+
+    // 4. Providers Listener (Scoped to effectiveOrgId for non-super-admins)
+    const providersTargetQuery = isSuperAdmin
+      ? collection(db, 'providers')
+      : effectiveOrgId
+        ? query(collection(db, 'providers'), where('orgId', '==', effectiveOrgId))
+        : null;
+
+    if (providersTargetQuery) {
+      unsubs.push(onSnapshot(providersTargetQuery, (snapshot) => {
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as ServiceProvider))
+          .filter(p => !DUMMY_IDS.has(p.id) && !DUMMY_IDS.has(p.orgId));
+
+        const seenIds = new Set<string>();
+        const seenIdentity = new Set<string>();
+        const dedupedList: ServiceProvider[] = [];
+
+        for (const p of list) {
+          const key = `${p.orgId}:::${(p.name || '').trim().toLowerCase()}`;
+          if (!seenIds.has(p.id) && !seenIdentity.has(key)) {
+            seenIds.add(p.id);
+            seenIdentity.add(key);
+            dedupedList.push(p);
+          }
+        }
+
+        setRawProviders(dedupedList);
+        safeSetLocal(STORAGE_KEYS.PROVIDERS, dedupedList);
+      }, handleListenerError('Providers')));
+    }
+
+    // 5. Departments Listener (Scoped to effectiveOrgId for non-super-admins)
+    const deptsTargetQuery = isSuperAdmin
+      ? collection(db, 'departments')
+      : effectiveOrgId
+        ? query(collection(db, 'departments'), where('orgId', '==', effectiveOrgId))
+        : null;
+
+    if (deptsTargetQuery) {
+      unsubs.push(onSnapshot(deptsTargetQuery, (snapshot) => {
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as Department))
+          .filter(d => !DUMMY_IDS.has(d.id) && !DUMMY_IDS.has(d.orgId));
+
+        const seenIds = new Set<string>();
+        const seenIdentity = new Set<string>();
+        const dedupedList: Department[] = [];
+
+        for (const d of list) {
+          const key = `${d.orgId}:::${(d.name || '').trim().toLowerCase()}`;
+          if (!seenIds.has(d.id) && !seenIdentity.has(key)) {
+            seenIds.add(d.id);
+            seenIdentity.add(key);
+            dedupedList.push(d);
+          }
+        }
+
+        setRawDepartments(dedupedList);
+        safeSetLocal(STORAGE_KEYS.DEPARTMENTS, dedupedList);
+      }, handleListenerError('Departments')));
+    }
+
+    // 6. Requests Listener (Role-Aware Scoping with Real-Time Multi-Query for Employees)
+    const parseReqSnap = (snapshot: any): ExpenseRequest[] => {
+      return snapshot.docs
+        .map((d: any) => {
           const data = d.data();
-          // Filter out dummy/unwanted attachments so fake documentation never displays
           const rawAttachments = Array.isArray(data.attachments) ? data.attachments : [];
           const cleanedAttachments = rawAttachments.filter((att: any) => 
             att && att.name && 
@@ -984,189 +1374,241 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             attachments: cleanedAttachments,
           } as ExpenseRequest;
         })
-        .filter(r => !DUMMY_IDS.has(r.id) && !DUMMY_IDS.has(r.orgId));
+        .filter((r: ExpenseRequest) => !DUMMY_IDS.has(r.id) && !DUMMY_IDS.has(r.orgId));
+    };
 
-      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const commitRequests = (incomingList: ExpenseRequest[], replaceAll = false) => {
+      setRawRequests(prev => {
+        let baseList: ExpenseRequest[] = [];
+        if (replaceAll) {
+          baseList = incomingList;
+        } else {
+          const map = new Map<string, ExpenseRequest>();
+          prev.forEach(r => map.set(r.id, r));
+          incomingList.forEach(r => map.set(r.id, r));
+          baseList = Array.from(map.values());
+        }
 
-      const seenIds = new Set<string>();
-      const seenReqNumbers = new Set<string>();
-      const dedupedList: ExpenseRequest[] = [];
+        baseList.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-      for (const req of list) {
-        const numKey = (req.requestNumber || '').trim().toUpperCase();
-        const isDuplicateId = seenIds.has(req.id);
-        const isDuplicateNum = Boolean(numKey && seenReqNumbers.has(numKey));
+        const seenIds = new Set<string>();
+        const seenReqNumbers = new Set<string>();
+        const dedupedList: ExpenseRequest[] = [];
 
-        if (!isDuplicateId && !isDuplicateNum) {
-          seenIds.add(req.id);
-          if (numKey) seenReqNumbers.add(numKey);
-          dedupedList.push(req);
+        for (const req of baseList) {
+          const numKey = (req.requestNumber || '').trim().toUpperCase();
+          const isDuplicateId = seenIds.has(req.id);
+          const isDuplicateNum = Boolean(numKey && seenReqNumbers.has(numKey));
+
+          if (!isDuplicateId && !isDuplicateNum) {
+            seenIds.add(req.id);
+            if (numKey) seenReqNumbers.add(numKey);
+            dedupedList.push(req);
+          }
+        }
+
+        safeSetLocal(STORAGE_KEYS.REQUESTS, dedupedList);
+        return dedupedList;
+      });
+    };
+
+    if (isSuperAdmin) {
+      unsubs.push(onSnapshot(collection(db, 'requests'), (snapshot) => {
+        commitRequests(parseReqSnap(snapshot), true);
+      }, handleListenerError('Requests (Super Admin)')));
+    } else if ((resolvedRole === 'org_admin' || resolvedRole === 'finance') && effectiveOrgId) {
+      unsubs.push(onSnapshot(query(collection(db, 'requests'), where('orgId', '==', effectiveOrgId)), (snapshot) => {
+        commitRequests(parseReqSnap(snapshot), true);
+      }, handleListenerError('Requests (Org Admin/Finance)')));
+    } else {
+      // Employee role: strictly listen to requests created by current user by UID and by email in real-time
+      unsubs.push(onSnapshot(query(collection(db, 'requests'), where('requesterId', '==', firebaseUser.uid)), (snapshot) => {
+        const list = parseReqSnap(snapshot);
+        commitRequests(list, false);
+      }, handleListenerError('Requests by UID')));
+
+      if (firebaseUser.email) {
+        const emailLower = firebaseUser.email.toLowerCase().trim();
+        unsubs.push(onSnapshot(query(collection(db, 'requests'), where('requesterEmail', '==', emailLower)), (snapshot) => {
+          const list = parseReqSnap(snapshot);
+          commitRequests(list, false);
+        }, handleListenerError('Requests by Email')));
+
+        if (firebaseUser.email !== emailLower) {
+          unsubs.push(onSnapshot(query(collection(db, 'requests'), where('requesterEmail', '==', firebaseUser.email)), (snapshot) => {
+            const list = parseReqSnap(snapshot);
+            commitRequests(list, false);
+          }, handleListenerError('Requests by Raw Email')));
         }
       }
+    }
 
-      setRawRequests(dedupedList);
-      safeSetLocal(STORAGE_KEYS.REQUESTS, dedupedList);
-    }, (err) => {
-      console.warn('[Firebase] Requests onSnapshot error:', err);
-    });
-
-    // 6. Super Admins Listener
-    const unsubSuperAdmins = onSnapshot(collection(db, 'super_admins'), (snapshot) => {
-      const dbAdmins = snapshot.docs
-        .map(d => (d.data().email || d.id || '').toLowerCase().trim())
-        .filter(e => e && e !== 'marwanagib813@gmail.com');
-      const defaultAdmins = ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com', 'h.moubarak@tieapps.com'];
-      const envAdmins = import.meta.env.VITE_SUPER_ADMIN_EMAILS || '';
-      const envList = envAdmins.split(',').map((e: string) => e.trim().toLowerCase()).filter(Boolean);
-      const merged = Array.from(new Set([...defaultAdmins, ...envList, ...dbAdmins])).filter(e => e !== 'marwanagib813@gmail.com');
-      setSuperAdminEmails(merged);
-    }, (err) => {
-      console.warn('[Firebase] Super admins onSnapshot error:', err);
-    });
-
-    // 7. Payment Accounts Listener (In-memory Deduplication)
-    const unsubPaymentAccounts = onSnapshot(collection(db, 'paymentAccounts'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as PaymentAccount))
-        .filter(p => !DUMMY_IDS.has(p.id) && !DUMMY_IDS.has(p.orgId));
-
-      const seenIds = new Set<string>();
-      const seenIdentity = new Set<string>();
-      const dedupedList: PaymentAccount[] = [];
-
-      for (const p of list) {
-        const key = `${p.orgId}:::${(p.accountIdentifier || p.name || '').trim().toLowerCase()}`;
-        if (!seenIds.has(p.id) && !seenIdentity.has(key)) {
-          seenIds.add(p.id);
-          seenIdentity.add(key);
-          dedupedList.push(p);
-        }
+    // 7. Payment Accounts Listener (Finance & Org Admin only)
+    let paymentAccountsQuery = null;
+    if (isSuperAdmin) {
+      paymentAccountsQuery = collection(db, 'paymentAccounts');
+    } else if (resolvedRole === 'org_admin' || resolvedRole === 'finance') {
+      if (effectiveOrgId) {
+        paymentAccountsQuery = query(collection(db, 'paymentAccounts'), where('orgId', '==', effectiveOrgId));
       }
+    }
 
-      setRawPaymentAccounts(dedupedList);
-      safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, dedupedList);
-    }, (err) => {
-      console.warn('[Firebase] PaymentAccounts onSnapshot error:', err);
-    });
+    if (paymentAccountsQuery) {
+      unsubs.push(onSnapshot(paymentAccountsQuery, (snapshot) => {
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as PaymentAccount))
+          .filter(p => !DUMMY_IDS.has(p.id) && !DUMMY_IDS.has(p.orgId));
 
-    // 8. Departments Listener (In-memory Deduplication)
-    const unsubDepartments = onSnapshot(collection(db, 'departments'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as Department))
-        .filter(d => !DUMMY_IDS.has(d.id) && !DUMMY_IDS.has(d.orgId));
+        const seenIds = new Set<string>();
+        const seenIdentity = new Set<string>();
+        const dedupedList: PaymentAccount[] = [];
 
-      const seenIds = new Set<string>();
-      const seenIdentity = new Set<string>();
-      const dedupedList: Department[] = [];
-
-      for (const d of list) {
-        const key = `${d.orgId}:::${(d.name || '').trim().toLowerCase()}`;
-        if (!seenIds.has(d.id) && !seenIdentity.has(key)) {
-          seenIds.add(d.id);
-          seenIdentity.add(key);
-          dedupedList.push(d);
+        for (const p of list) {
+          const key = `${p.orgId}:::${(p.accountIdentifier || p.name || '').trim().toLowerCase()}`;
+          if (!seenIds.has(p.id) && !seenIdentity.has(key)) {
+            seenIds.add(p.id);
+            seenIdentity.add(key);
+            dedupedList.push(p);
+          }
         }
+
+        setRawPaymentAccounts(dedupedList);
+        safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, dedupedList);
+      }, handleListenerError('PaymentAccounts')));
+    } else {
+      setRawPaymentAccounts([]);
+    }
+
+    // 8. Account Transactions Listener (Finance & Org Admin only)
+    let txTargetQuery = null;
+    if (isSuperAdmin) {
+      txTargetQuery = collection(db, 'accountTransactions');
+    } else if (resolvedRole === 'org_admin' || resolvedRole === 'finance') {
+      if (effectiveOrgId) {
+        txTargetQuery = query(collection(db, 'accountTransactions'), where('orgId', '==', effectiveOrgId));
       }
+    }
 
-      setRawDepartments(dedupedList);
-      safeSetLocal(STORAGE_KEYS.DEPARTMENTS, dedupedList);
-    }, (err) => {
-      console.warn('[Firebase] Departments onSnapshot error:', err);
-    });
+    if (txTargetQuery) {
+      unsubs.push(onSnapshot(txTargetQuery, (snapshot) => {
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as AccountTransaction))
+          .filter(t => !DUMMY_IDS.has(t.id));
+        list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        setRawTransactions(list);
+        safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, list);
+      }, handleListenerError('AccountTransactions')));
+    } else {
+      setRawTransactions([]);
+    }
 
-    // 9. Audit Logs Listener
-    const unsubAuditLogs = onSnapshot(collection(db, 'auditLogs'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as AuditLogEntry))
-        .filter(a => !DUMMY_IDS.has(a.id));
-      list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-      setRawAuditLogs(list);
-      safeSetLocal(STORAGE_KEYS.AUDIT_LOGS, list);
-    }, (err) => {
-      console.warn('[Firebase] AuditLogs onSnapshot error:', err);
-    });
+    // 9. Petty Cash Custodies Listener (Role-Aware Scoping)
+    let custodiesTargetQuery = null;
+    if (isSuperAdmin) {
+      custodiesTargetQuery = collection(db, 'custodies');
+    } else if (resolvedRole === 'org_admin' || resolvedRole === 'finance') {
+      if (effectiveOrgId) {
+        custodiesTargetQuery = query(collection(db, 'custodies'), where('orgId', '==', effectiveOrgId));
+      }
+    } else {
+      // Employee role: strictly listen to their own assigned custodies
+      custodiesTargetQuery = query(collection(db, 'custodies'), where('employeeId', '==', firebaseUser.uid));
+    }
 
-    // 10. Email Logs Listener
-    const unsubEmailLogs = onSnapshot(collection(db, 'email_logs'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as EmailLogEntry));
-      list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-      setEmailLogs(list);
-      safeSetLocal(STORAGE_KEYS.EMAIL_LOGS, list);
-    }, (err) => {
-      console.warn('[Firebase] EmailLogs onSnapshot error:', err);
-    });
+    if (custodiesTargetQuery) {
+      unsubs.push(onSnapshot(custodiesTargetQuery, (snapshot) => {
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as PettyCashCustody))
+          .filter(c => !DUMMY_IDS.has(c.id) && !DUMMY_IDS.has(c.orgId));
+        list.sort((a, b) => new Date(b.createdAt || b.issuedAt).getTime() - new Date(a.createdAt || a.issuedAt).getTime());
 
-    // 11. Account Transactions Listener
-    const unsubAccountTransactions = onSnapshot(collection(db, 'accountTransactions'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as AccountTransaction))
-        .filter(t => !DUMMY_IDS.has(t.id));
-      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setRawTransactions(list);
-      safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, list);
-    }, (err) => {
-      console.warn('[Firebase] AccountTransactions onSnapshot error:', err);
-    });
-
-    // 12. Petty Cash Custodies Listener
-    const unsubCustodies = onSnapshot(collection(db, 'custodies'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as PettyCashCustody))
-        .filter(c => !DUMMY_IDS.has(c.id) && !DUMMY_IDS.has(c.orgId));
-      list.sort((a, b) => new Date(b.createdAt || b.issuedAt).getTime() - new Date(a.createdAt || a.issuedAt).getTime());
-
-      const seen = new Set<string>();
-      const deduped: PettyCashCustody[] = [];
-      for (const c of list) {
-        if (!seen.has(c.id)) {
-          seen.add(c.id);
-          deduped.push(c);
+        const seen = new Set<string>();
+        const deduped: PettyCashCustody[] = [];
+        for (const c of list) {
+          if (!seen.has(c.id)) {
+            seen.add(c.id);
+            deduped.push(c);
+          }
         }
+        setRawCustodies(deduped);
+        safeSetLocal(STORAGE_KEYS.PETTY_CASH_CUSTODIES, deduped);
+      }, handleListenerError('Custodies')));
+    }
+
+    // 10. Custody Settlements Listener (Role-Aware Scoping)
+    let settlementsTargetQuery = null;
+    if (isSuperAdmin) {
+      settlementsTargetQuery = collection(db, 'custodySettlements');
+    } else if (resolvedRole === 'org_admin' || resolvedRole === 'finance') {
+      if (effectiveOrgId) {
+        settlementsTargetQuery = query(collection(db, 'custodySettlements'), where('orgId', '==', effectiveOrgId));
       }
-      setRawCustodies(deduped);
-      safeSetLocal(STORAGE_KEYS.PETTY_CASH_CUSTODIES, deduped);
-    }, (err) => {
-      console.warn('[Firebase] Custodies onSnapshot error:', err);
-    });
+    } else {
+      settlementsTargetQuery = query(collection(db, 'custodySettlements'), where('employeeId', '==', firebaseUser.uid));
+    }
 
-    // 13. Custody Settlements Listener
-    const unsubCustodySettlements = onSnapshot(collection(db, 'custodySettlements'), (snapshot) => {
-      const list = snapshot.docs
-        .map(d => ({ id: d.id, ...d.data() } as CustodySettlementItem))
-        .filter(s => !DUMMY_IDS.has(s.id) && !DUMMY_IDS.has(s.orgId));
-      list.sort((a, b) => new Date(b.createdAt || b.invoiceDate || '').getTime() - new Date(a.createdAt || a.invoiceDate || '').getTime());
+    if (settlementsTargetQuery) {
+      unsubs.push(onSnapshot(settlementsTargetQuery, (snapshot) => {
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as CustodySettlementItem))
+          .filter(s => !DUMMY_IDS.has(s.id) && !DUMMY_IDS.has(s.orgId));
+        list.sort((a, b) => new Date(b.createdAt || b.invoiceDate || '').getTime() - new Date(a.createdAt || a.invoiceDate || '').getTime());
 
-      const seen = new Set<string>();
-      const deduped: CustodySettlementItem[] = [];
-      for (const s of list) {
-        if (!seen.has(s.id)) {
-          seen.add(s.id);
-          deduped.push(s);
+        const seen = new Set<string>();
+        const deduped: CustodySettlementItem[] = [];
+        for (const s of list) {
+          if (!seen.has(s.id)) {
+            seen.add(s.id);
+            deduped.push(s);
+          }
         }
-      }
-      setRawCustodySettlements(deduped);
-      safeSetLocal(STORAGE_KEYS.CUSTODY_SETTLEMENTS, deduped);
-    }, (err) => {
-      console.warn('[Firebase] CustodySettlements onSnapshot error:', err);
-    });
+        setRawCustodySettlements(deduped);
+        safeSetLocal(STORAGE_KEYS.CUSTODY_SETTLEMENTS, deduped);
+      }, handleListenerError('CustodySettlements')));
+    }
+
+    // 11. Audit Logs Listener (Super Admin & Org Admin only)
+    let auditTargetQuery = null;
+    if (isSuperAdmin) {
+      auditTargetQuery = collection(db, 'auditLogs');
+    } else if (resolvedRole === 'org_admin' && effectiveOrgId) {
+      auditTargetQuery = query(collection(db, 'auditLogs'), where('orgId', '==', effectiveOrgId));
+    }
+
+    if (auditTargetQuery) {
+      unsubs.push(onSnapshot(auditTargetQuery, (snapshot) => {
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as AuditLogEntry))
+          .filter(a => !DUMMY_IDS.has(a.id));
+        list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        setRawAuditLogs(list);
+        safeSetLocal(STORAGE_KEYS.AUDIT_LOGS, list);
+      }, handleListenerError('AuditLogs')));
+    } else {
+      setRawAuditLogs([]);
+    }
+
+    // 12. Email Logs Listener (Super Admin strictly)
+    if (isSuperAdmin) {
+      unsubs.push(onSnapshot(collection(db, 'email_logs'), (snapshot) => {
+        const list = snapshot.docs
+          .map(d => ({ id: d.id, ...d.data() } as EmailLogEntry));
+        list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        setEmailLogs(list);
+        safeSetLocal(STORAGE_KEYS.EMAIL_LOGS, list);
+      }, handleListenerError('EmailLogs')));
+    } else {
+      setEmailLogs([]);
+    }
 
     return () => {
-      unsubOrgs();
-      unsubMembers();
-      unsubServices();
-      unsubProviders();
-      unsubRequests();
-      unsubSuperAdmins();
-      unsubPaymentAccounts();
-      unsubDepartments();
-      unsubAuditLogs();
-      unsubEmailLogs();
-      unsubAccountTransactions();
-      unsubCustodies();
-      unsubCustodySettlements();
+      unsubs.forEach(u => {
+        try {
+          u();
+        } catch {}
+      });
     };
-  }, [firebaseUser, firebaseSyncCounter]);
+  }, [firebaseUser, isSuperAdmin, resolvedRole, effectiveOrgId, firebaseSyncCounter]);
 
   // =========================================================================
   // PROACTIVE MEMBER & USER SELF-HEALING SYNCHRONIZATION
@@ -1244,7 +1686,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const newMembersToAppend: OrganizationMember[] = [];
 
       missingMembersMap.forEach((data) => {
-        const memberId = `mem-${data.userId || Date.now()}`;
+        const memberId = data.userId ? `${data.userId}_${data.orgId}` : `mem-${Date.now()}`;
         const newMemDoc: OrganizationMember = {
           id: memberId,
           orgId: data.orgId,
@@ -1260,8 +1702,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
 
         setFirestoreDoc('members', memberId, newMemDoc).catch(err => {
-          console.warn('[Self-Healing] Error persisting auto-healed member doc:', err);
+          console.warn('[Self-Healing] Error persisting auto-healed member doc:', err?.message || err);
         });
+
+        if (data.userId) {
+          setFirestoreDoc('users', data.userId, {
+            id: data.userId,
+            email: data.userEmail,
+            name: data.userName,
+            role: 'employee',
+            orgId: data.orgId,
+            department: data.department || 'العمليات والتشغيل',
+            phone: data.phone || '',
+            active: true,
+            updatedAt: new Date().toISOString()
+          }).catch(() => {});
+        }
 
         newMembersToAppend.push(newMemDoc);
       });
@@ -1280,8 +1736,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    // 3. Heal any existing members with empty or invalid orgId (such as marwanagib13@gmail.com)
-    if (rawOrganizations.length > 0) {
+    // 3. Heal any existing members with empty or invalid orgId (strictly performed by Super Admin who sees all orgs)
+    if (isSuperAdmin && rawOrganizations.length > 0) {
       const defaultOrgId = rawOrganizations[0].id;
       const validOrgIds = new Set(rawOrganizations.map(o => o.id));
       let hadOrphanUpdates = false;
@@ -1318,6 +1774,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // 4. حساب بنكي (Bank Account)
   // =========================================================================
   useEffect(() => {
+    if (!isSuperAdmin && resolvedRole !== 'org_admin') return;
     if (rawOrganizations.length === 0) return;
 
     const newAccountsToAppend: PaymentAccount[] = [];
@@ -1557,11 +2014,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (isFirebaseConfigured() && getDb()) {
       try {
         const docId = cleanEmail.replace(/[^a-zA-Z0-9]/g, '_');
-        await setFirestoreDoc('super_admins', docId, {
+        await setFirestoreDoc('super_admins', cleanEmail, {
           email: cleanEmail,
+          role: 'super_admin',
+          promotedAt: new Date().toISOString(),
           createdAt: new Date().toISOString(),
           active: true,
         });
+        if (docId !== cleanEmail) {
+          await deleteFirestoreDoc('super_admins', docId).catch(() => {});
+        }
       } catch (err) {
         console.error('[Firebase] Error saving super admin email:', err);
       }
@@ -1571,6 +2033,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const updated = Array.from(new Set([...prev, cleanEmail]));
       safeSetLocal(SUPER_ADMINS_STORAGE_KEY, updated);
       return updated;
+    });
+
+    await logAuditAction({
+      actionType: 'role_change',
+      entityType: 'member',
+      entityId: cleanEmail,
+      entityName: cleanEmail,
+      details: `تمت ترقية الحساب (${cleanEmail}) إلى سوبر أدمن (مشرف عام على المنصة) 👑`,
     });
   };
 
@@ -1632,7 +2102,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (isFirebaseConfigured() && getDb()) {
       try {
         const docId = cleanEmail.replace(/[^a-zA-Z0-9]/g, '_');
-        await deleteFirestoreDoc('super_admins', docId);
+        await deleteFirestoreDoc('super_admins', cleanEmail);
+        if (docId !== cleanEmail) {
+          await deleteFirestoreDoc('super_admins', docId).catch(() => {});
+        }
       } catch (err) {
         console.error('[Firebase] Error removing super admin email:', err);
       }
@@ -3292,9 +3765,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     targetAccountId?: string;
     itemsDetail?: string;
     attachmentNames?: string[];
+    attachments?: RequestAttachment[];
     preferredPaymentMethod?: PaymentMethod;
     paymentAccountDetails?: string;
     orgId?: string;
+    isPrepaidByRequester?: boolean;
+    invoiceNumber?: string;
+    invoiceDate?: string;
+    invoiceAttachment?: RequestAttachment;
   }) => {
     const service = rawServices.find(s => s.id === data.serviceCategoryId);
     const provider = rawProviders.find(p => p.id === data.providerId);
@@ -3312,13 +3790,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const now = new Date();
     const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-    const attachments: RequestAttachment[] = (data.attachmentNames || []).map((name) => ({
-      id: `att-${crypto.randomUUID()}`,
-      name,
-      size: '1.2 MB',
-      type: 'pdf',
-      uploadedAt: dateFormatted,
-    }));
+    let attachments: RequestAttachment[] = data.attachments && data.attachments.length > 0
+      ? [...data.attachments]
+      : (data.attachmentNames || []).map((name) => ({
+          id: `att-${crypto.randomUUID()}`,
+          name,
+          size: '1.2 MB',
+          type: 'pdf',
+          uploadedAt: dateFormatted,
+        }));
+
+    if (data.invoiceAttachment && !attachments.some(a => a.id === data.invoiceAttachment!.id)) {
+      attachments = [data.invoiceAttachment, ...attachments];
+    }
 
     const isIncome = data.requestType === 'income';
 
@@ -3371,6 +3855,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       requestType: data.requestType || 'expense',
       targetAccountId: resolvedTargetAccountId,
       itemsDetail: data.itemsDetail,
+      isPrepaidByRequester: data.isPrepaidByRequester,
+      invoiceNumber: data.invoiceNumber,
+      invoiceDate: data.invoiceDate,
+      invoiceAttachment: data.invoiceAttachment,
       attachments,
       comments: [],
       timeline: [
@@ -3438,6 +3926,55 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     } catch (e) {
       console.warn('[Email Dispatch Error]', e);
+    }
+  };
+
+  const updateRequest = async (requestId: string, updatedFields: Partial<ExpenseRequest>) => {
+    const now = new Date();
+    const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+    let targetUpdated: ExpenseRequest | null = null;
+
+    setRawRequests(prev => {
+      const list = prev.map(req => {
+        if (req.id !== requestId) return req;
+
+        const newTimelineEvent: TimelineEvent = {
+          id: `tl-${Date.now()}`,
+          status: (updatedFields.status || req.status) as any,
+          title: 'تعديل بيانات ومرفقات الطلب',
+          description: 'قام مقدم الطلب بتعديل بيانات الطلب والمرفقات',
+          actorName: currentUser.name,
+          timestamp: dateFormatted,
+        };
+
+        const updated: ExpenseRequest = {
+          ...req,
+          ...updatedFields,
+          timeline: [...(req.timeline || []), newTimelineEvent],
+          updatedAt: now.toISOString(),
+        };
+        targetUpdated = updated;
+        return updated;
+      });
+      safeSetLocal(STORAGE_KEYS.REQUESTS, list);
+      return list;
+    });
+
+    if (targetUpdated && isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('requests', requestId, targetUpdated);
+      } catch (err) {
+        console.error('[Firebase] Error updating request:', err);
+      }
+    }
+
+    if (isBackendConnected) {
+      await safeFetchJson<ExpenseRequest>(`/api/requests/${requestId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(targetUpdated),
+      });
     }
   };
 
@@ -4497,6 +5034,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         allOrganizations: rawOrganizations,
         activeOrgId: effectiveOrgId,
         activeOrg,
+        effectiveOrgId,
+        forceRefreshUserState,
+        setUserDocProfile,
+        setRawMembers,
+        setRawOrganizations,
         users,
         currentUser,
         firebaseUser,
@@ -4548,6 +5090,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateProvider,
         deleteProvider,
         createRequest,
+        updateRequest,
         approveRequest,
         rejectRequest,
         requestClarification,

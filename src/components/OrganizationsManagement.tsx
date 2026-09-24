@@ -301,11 +301,42 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [adminSuccessMsg, setAdminSuccessMsg] = useState<string | null>(null);
   const [adminErrorMsg, setAdminErrorMsg] = useState<string | null>(null);
   const [isSuperAdminModalOpen, setIsSuperAdminModalOpen] = useState(false);
+  const [selectedMemberEmailForSuperAdmin, setSelectedMemberEmailForSuperAdmin] = useState('');
+  const [superAdminMemberSearch, setSuperAdminMemberSearch] = useState('');
   const [editingSuperAdminEmail, setEditingSuperAdminEmail] = useState<string | null>(null);
   const [targetSuperAdminRole, setTargetSuperAdminRole] = useState<Role>('org_admin');
   const [targetSuperAdminOrgId, setTargetSuperAdminOrgId] = useState<string>('');
   const [superAdminActionLoading, setSuperAdminActionLoading] = useState(false);
   const [superAdminActionFeedback, setSuperAdminActionFeedback] = useState<{ msg: string; isError?: boolean } | null>(null);
+
+  // All distinct registered members across companies for Super Admin promotion
+  const candidateMembersForSuperAdmin = useMemo(() => {
+    const list = allMembers && allMembers.length > 0 ? allMembers : members;
+    const seenEmails = new Set<string>();
+    const result: OrganizationMember[] = [];
+    for (const m of list) {
+      const email = m.userEmail?.trim().toLowerCase();
+      if (!email || seenEmails.has(email)) continue;
+      seenEmails.add(email);
+      result.push(m);
+    }
+    return result;
+  }, [allMembers, members]);
+
+  // Filtered members by search query in the super admin modal
+  const filteredCandidateMembers = useMemo(() => {
+    if (!superAdminMemberSearch.trim()) return candidateMembersForSuperAdmin;
+    const q = superAdminMemberSearch.toLowerCase().trim();
+    return candidateMembersForSuperAdmin.filter(m => {
+      const org = (allOrganizations && allOrganizations.length > 0 ? allOrganizations : organizations).find(o => o.id === m.orgId);
+      return (
+        m.userName?.toLowerCase().includes(q) ||
+        m.userEmail?.toLowerCase().includes(q) ||
+        org?.name?.toLowerCase().includes(q) ||
+        m.jobTitle?.toLowerCase().includes(q)
+      );
+    });
+  }, [candidateMembersForSuperAdmin, superAdminMemberSearch, allOrganizations, organizations]);
 
   // =========================================================================
   // 8. AUDIT LOG STATE & FILTERS
@@ -432,6 +463,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setProvisionLoading(false);
 
     if (res.success && res.credentials) {
+      if (memberRole === 'super_admin') {
+        await addSuperAdminEmail(cleanEmail);
+      }
       const orgObj = displayOrgs.find(o => o.id === targetOrgId);
       setCreatedCredentials({
         name: memberName.trim(),
@@ -454,7 +488,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setEditMemberName(mem.userName);
     setEditMemberPhone(mem.phone || '');
     setEditMemberOrgId(mem.orgId || displayOrgs[0]?.id || '');
-    setEditMemberRole(mem.role);
+    const isMemberSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim()) || mem.role === 'super_admin';
+    setEditMemberRole(isMemberSuperAdmin ? 'super_admin' : mem.role);
     setEditMemberDept(mem.department || 'العمليات والتشغيل');
     setEditMemberJob(mem.jobTitle || 'موظف');
     setEditMemberActive(mem.active !== false);
@@ -467,6 +502,19 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setEditMemberLoading(true);
     try {
       const finalOrgId = editMemberOrgId || editingMember.orgId || displayOrgs[0]?.id || '';
+      const email = editingMember.userEmail?.toLowerCase().trim();
+      const wasSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === email) || editingMember.role === 'super_admin';
+
+      if (editMemberRole === 'super_admin') {
+        if (email) {
+          await addSuperAdminEmail(email);
+        }
+      } else if (wasSuperAdmin) {
+        if (email) {
+          await removeSuperAdminEmail(email);
+        }
+      }
+
       await updateMember(editingMember.id, {
         userName: editMemberName.trim(),
         phone: editMemberPhone.trim(),
@@ -845,10 +893,40 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
     try {
       await addSuperAdminEmail(email);
-      setAdminSuccessMsg(`تمت ترقية الحساب (${email}) كمشرف عام للمنصة.`);
+      const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === email);
+      if (memberRecord) {
+        await updateMember(memberRecord.id, { role: 'super_admin' });
+      }
+      setAdminSuccessMsg(`تمت ترقية الحساب (${email}) كمشرف عام للمنصة 👑.`);
       setNewAdminEmail('');
+      setSelectedMemberEmailForSuperAdmin('');
     } catch {
       setAdminErrorMsg('حدث خطأ أثناء حفظ المشرف العام.');
+    }
+  };
+
+  const handlePromoteSelectedMember = async () => {
+    if (!selectedMemberEmailForSuperAdmin) return;
+    setAdminSuccessMsg(null);
+    setAdminErrorMsg(null);
+
+    const email = selectedMemberEmailForSuperAdmin.trim().toLowerCase();
+    if (superAdminEmails.some(sa => sa.toLowerCase().trim() === email)) {
+      setAdminErrorMsg('هذا الموظف مسجل بالفعل كمشرف عام.');
+      return;
+    }
+
+    try {
+      await addSuperAdminEmail(email);
+      const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === email);
+      if (memberRecord) {
+        await updateMember(memberRecord.id, { role: 'super_admin' });
+      }
+      setAdminSuccessMsg(`تمت ترقية (${email}) إلى سوبر أدمن 👑 بنجاح.`);
+      setNewAdminEmail('');
+      setSelectedMemberEmailForSuperAdmin('');
+    } catch {
+      setAdminErrorMsg('حدث خطأ أثناء ترقية الموظف إلى سوبر أدمن.');
     }
   };
 
@@ -866,6 +944,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     try {
       setSuperAdminActionLoading(true);
       await removeSuperAdminEmail(cleanEmail);
+      const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === cleanEmail);
+      if (memberRecord) {
+        await updateMember(memberRecord.id, { role: 'employee' });
+      }
       setSuperAdminActionFeedback({ msg: `تم سحب صلاحيات السوبر أدمن عن (${cleanEmail}) بنجاح.` });
     } catch {
       setSuperAdminActionFeedback({ msg: 'حدث خطأ أثناء إزالة صلاحيات السوبر أدمن.', isError: true });
@@ -922,7 +1004,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const filteredMembers = useMemo(() => {
     return targetMembers.filter(m => {
       if (selectedOrgFilter !== 'all' && m.orgId !== selectedOrgFilter) return false;
-      if (selectedRoleFilter !== 'all' && m.role !== selectedRoleFilter) return false;
+      if (selectedRoleFilter !== 'all') {
+        const isMemSuper = superAdminEmails.some(e => e.toLowerCase().trim() === m.userEmail?.toLowerCase().trim()) || m.role === 'super_admin';
+        if (selectedRoleFilter === 'super_admin') {
+          if (!isMemSuper) return false;
+        } else {
+          if (m.role !== selectedRoleFilter) return false;
+        }
+      }
       if (selectedStatusFilter === 'active' && m.active === false) return false;
       if (selectedStatusFilter === 'inactive' && m.active !== false) return false;
 
@@ -936,7 +1025,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         (m.department && m.department.toLowerCase().includes(q))
       );
     });
-  }, [targetMembers, selectedOrgFilter, selectedRoleFilter, selectedStatusFilter, userSearch]);
+  }, [targetMembers, selectedOrgFilter, selectedRoleFilter, selectedStatusFilter, userSearch, superAdminEmails]);
 
   const filteredServices = useMemo(() => {
     const orgFiltered = targetServices.filter(s => selectedOrgFilter === 'all' || isServiceMatchingOrg(s, selectedOrgFilter));
@@ -1486,6 +1575,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-700 font-semibold outline-hidden"
               >
                 <option value="all">كل الرتب والأدوار</option>
+                <option value="super_admin">👑 مشرف عام (Super Admin)</option>
                 <option value="org_admin">مدير مؤسسة (Admin)</option>
                 <option value="finance">مسؤول الصرف والخزينة (Finance)</option>
                 <option value="employee">موظف (Employee)</option>
@@ -1534,6 +1624,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   {filteredMembers.map((mem) => {
                     const orgObj = displayOrgs.find(o => o.id === mem.orgId);
                     const isResetting = resettingPasswordEmail === mem.userEmail;
+                    const isThisSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim()) || mem.role === 'super_admin';
 
                     return (
                       <tr key={mem.id} className="hover:bg-slate-50/60 transition">
@@ -1588,17 +1679,24 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                         </td>
 
                         <td className="py-3 px-4">
-                          <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            mem.role === 'org_admin'
-                              ? 'bg-purple-100 text-purple-800'
-                              : mem.role === 'finance'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : mem.role === 'data_entry'
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-slate-100 text-slate-700'
-                          }`}>
-                            {mem.role === 'org_admin' ? 'مدير شركة' : mem.role === 'finance' ? 'مسؤول الصرف والخزينة' : mem.role === 'data_entry' ? 'مدخل بيانات' : 'موظف'}
-                          </span>
+                          {isThisSuperAdmin ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300">
+                              <Crown className="h-3 w-3 text-amber-600" />
+                              مشرف عام (Super Admin)
+                            </span>
+                          ) : (
+                            <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                              mem.role === 'org_admin'
+                                ? 'bg-purple-100 text-purple-800'
+                                : mem.role === 'finance'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : mem.role === 'data_entry'
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-slate-100 text-slate-700'
+                            }`}>
+                              {mem.role === 'org_admin' ? 'مدير شركة' : mem.role === 'finance' ? 'مسؤول الصرف والخزينة' : mem.role === 'data_entry' ? 'مدخل بيانات' : 'موظف'}
+                            </span>
+                          )}
                         </td>
 
                         <td className="py-3 px-4">
@@ -1628,6 +1726,42 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
                         <td className="py-3 px-4">
                           <div className="flex items-center justify-center gap-1.5">
+                            {isSuperAdmin && (
+                              isThisSuperAdmin ? (
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    if (mem.userEmail?.toLowerCase().trim() === 'mahmoud@tieapps.com') {
+                                      alert('لا يمكن سحب صلاحيات مشرف المنصة الأساسي.');
+                                      return;
+                                    }
+                                    if (window.confirm(`هل أنت متأكد من سحب صلاحيات السوبر أدمن عن ${mem.userName} (${mem.userEmail})؟`)) {
+                                      await removeSuperAdminEmail(mem.userEmail);
+                                      await updateMember(mem.id, { role: 'employee' });
+                                    }
+                                  }}
+                                  className="p-1.5 text-amber-600 bg-amber-50 hover:bg-rose-50 hover:text-rose-600 rounded-lg transition cursor-pointer border border-amber-200"
+                                  title="سحب صلاحيات السوبر أدمن"
+                                >
+                                  <Crown className="h-3.5 w-3.5 fill-amber-500" />
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    if (window.confirm(`هل أنت متأكد من ترقية ${mem.userName} (${mem.userEmail}) إلى سوبر أدمن للمنصة 👑؟`)) {
+                                      await addSuperAdminEmail(mem.userEmail);
+                                      await updateMember(mem.id, { role: 'super_admin' });
+                                    }
+                                  }}
+                                  className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition cursor-pointer"
+                                  title="ترقية لسوبر أدمن 👑"
+                                >
+                                  <Crown className="h-3.5 w-3.5" />
+                                </button>
+                              )
+                            )}
+
                             <button
                               type="button"
                               onClick={() => handleStartEditMember(mem)}
@@ -2209,21 +2343,83 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
               <span>إضافة مشرف عام جديد (Super Admin)</span>
             </h3>
 
-            <form onSubmit={handleAddAdmin} className="flex gap-2 max-w-md">
-              <input
-                type="email"
-                required
-                value={newAdminEmail}
-                onChange={(e) => setNewAdminEmail(e.target.value)}
-                placeholder="ادخل البريد الإلكتروني للمشرف..."
-                className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 outline-hidden"
-              />
-              <button
-                type="submit"
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
-              >
-                إضافة مشرف
-              </button>
+            {/* Dropdown selection */}
+            <div className="p-3.5 bg-gradient-to-br from-amber-50/70 to-amber-100/40 rounded-2xl border border-amber-200/80 space-y-2.5 mb-4">
+              <label className="block font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                <Crown className="h-4 w-4 text-amber-600 shrink-0" />
+                <span>اختيار موظف من المسجلين بالمنصة لترقيته لسوبر أدمن:</span>
+              </label>
+
+              <div className="relative max-w-md">
+                <input
+                  type="text"
+                  value={superAdminMemberSearch}
+                  onChange={(e) => setSuperAdminMemberSearch(e.target.value)}
+                  placeholder="بحث سريع بالاسم، الشركة، أو البريد لتصفية القائمة..."
+                  className="w-full pl-8 pr-3 py-1.5 bg-white border border-amber-200/80 rounded-xl text-xs text-slate-700 outline-hidden focus:border-amber-500 placeholder:text-slate-400"
+                />
+                <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2" />
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2 max-w-xl">
+                <select
+                  value={selectedMemberEmailForSuperAdmin}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSelectedMemberEmailForSuperAdmin(val);
+                    if (val) {
+                      setNewAdminEmail(val);
+                    }
+                  }}
+                  className="flex-1 p-2.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 outline-hidden focus:border-amber-500 font-semibold"
+                >
+                  <option value="">-- اختر موظفاً للترقية من المسجلين بالمنصة --</option>
+                  {filteredCandidateMembers.map((m) => {
+                    const org = (allOrganizations && allOrganizations.length > 0 ? allOrganizations : organizations).find(o => o.id === m.orgId);
+                    const orgName = org?.name || 'بدون شركة';
+                    const isAlreadySuper = superAdminEmails.some(sa => sa.toLowerCase().trim() === m.userEmail?.toLowerCase().trim());
+                    return (
+                      <option 
+                        key={`${m.id}-${m.userEmail}`} 
+                        value={m.userEmail}
+                        disabled={isAlreadySuper}
+                      >
+                        {m.userName} - {orgName} ({m.userEmail}) {isAlreadySuper ? '👑 (سوبر أدمن حالياً)' : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+
+                <button
+                  type="button"
+                  disabled={!selectedMemberEmailForSuperAdmin || superAdminEmails.some(sa => sa.toLowerCase().trim() === selectedMemberEmailForSuperAdmin.toLowerCase().trim())}
+                  onClick={handlePromoteSelectedMember}
+                  className="px-4 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-bold rounded-xl shadow-xs transition cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 shrink-0"
+                >
+                  <Crown className="h-4 w-4" />
+                  <span>ترقية إلى سوبر أدمن 👑</span>
+                </button>
+              </div>
+            </div>
+
+            <form onSubmit={handleAddAdmin} className="space-y-2 max-w-md">
+              <label className="block font-bold text-slate-700 text-xs">أو إدخال بريد سوبر أدمن يدوياً:</label>
+              <div className="flex gap-2">
+                <input
+                  type="email"
+                  required
+                  value={newAdminEmail}
+                  onChange={(e) => setNewAdminEmail(e.target.value)}
+                  placeholder="ادخل البريد الإلكتروني للمشرف..."
+                  className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 outline-hidden font-mono"
+                />
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
+                >
+                  إضافة مشرف
+                </button>
+              </div>
             </form>
 
             {adminSuccessMsg && <p className="text-xs text-emerald-700 mt-2 font-semibold">{adminSuccessMsg}</p>}
@@ -2784,6 +2980,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                       onChange={(e) => setMemberRole(e.target.value as Role)}
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
                     >
+                      {isSuperAdmin && (
+                        <option value="super_admin">👑 مشرف عام على المنصة (Super Admin)</option>
+                      )}
                       <option value="employee">موظف (Employee)</option>
                       <option value="finance">مسؤول الصرف والخزينة (Finance / Disburser)</option>
                       <option value="org_admin">مدير مؤسسة (Admin)</option>
@@ -2880,9 +3079,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                     onChange={(e) => setEditMemberRole(e.target.value as Role)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
                   >
-                    <option value="employee">موظف (Employee)</option>
-                    <option value="finance">مسؤول الصرف والخزينة (Finance / Disburser)</option>
+                    <option value="super_admin">👑 مشرف عام على المنصة (Super Admin)</option>
                     <option value="org_admin">مدير مؤسسة (Admin)</option>
+                    <option value="finance">مسؤول الصرف والخزينة (Finance / Disburser)</option>
+                    <option value="employee">موظف (Employee)</option>
                     <option value="data_entry">مدخل بيانات (Data Entry)</option>
                   </select>
                 </div>
@@ -3796,8 +3996,68 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </div>
 
             <div className="mt-4 space-y-4">
+              {/* Option 1: Select registered member */}
+              <div className="p-3.5 bg-gradient-to-br from-amber-50/70 to-amber-100/40 rounded-2xl border border-amber-200/80 space-y-2.5">
+                <label className="block font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                  <Crown className="h-4 w-4 text-amber-600 shrink-0" />
+                  <span>اختيار موظف من المسجلين بالمنصة لترقيته لسوبر أدمن:</span>
+                </label>
+
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={superAdminMemberSearch}
+                    onChange={(e) => setSuperAdminMemberSearch(e.target.value)}
+                    placeholder="بحث سريع بالاسم، الشركة، أو البريد لتصفية القائمة..."
+                    className="w-full pl-8 pr-3 py-1.5 bg-white border border-amber-200/80 rounded-xl text-xs text-slate-700 outline-hidden focus:border-amber-500 placeholder:text-slate-400"
+                  />
+                  <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2" />
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <select
+                    value={selectedMemberEmailForSuperAdmin}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setSelectedMemberEmailForSuperAdmin(val);
+                      if (val) {
+                        setNewAdminEmail(val);
+                      }
+                    }}
+                    className="flex-1 p-2.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 outline-hidden focus:border-amber-500 font-semibold"
+                  >
+                    <option value="">-- اختر موظفاً للترقية من المسجلين بالمنصة --</option>
+                    {filteredCandidateMembers.map((m) => {
+                      const org = (allOrganizations && allOrganizations.length > 0 ? allOrganizations : organizations).find(o => o.id === m.orgId);
+                      const orgName = org?.name || 'بدون شركة';
+                      const isAlreadySuper = superAdminEmails.some(sa => sa.toLowerCase().trim() === m.userEmail?.toLowerCase().trim());
+                      return (
+                        <option 
+                          key={`${m.id}-${m.userEmail}`} 
+                          value={m.userEmail}
+                          disabled={isAlreadySuper}
+                        >
+                          {m.userName} - {orgName} ({m.userEmail}) {isAlreadySuper ? '👑 (سوبر أدمن حالياً)' : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+
+                  <button
+                    type="button"
+                    disabled={!selectedMemberEmailForSuperAdmin || superAdminEmails.some(sa => sa.toLowerCase().trim() === selectedMemberEmailForSuperAdmin.toLowerCase().trim())}
+                    onClick={handlePromoteSelectedMember}
+                    className="px-4 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-bold rounded-xl shadow-xs transition cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 shrink-0"
+                  >
+                    <Crown className="h-4 w-4" />
+                    <span>ترقية إلى سوبر أدمن 👑</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Option 2: Add manually by typing email */}
               <form onSubmit={handleAddAdmin} className="space-y-2">
-                <label className="block font-bold text-slate-700">إضافة بريد سوبر أدمن جديد للمنصة:</label>
+                <label className="block font-bold text-slate-700">أو إدخال بريد سوبر أدمن يدوياً:</label>
                 <div className="flex gap-2">
                   <input
                     type="email"
@@ -3809,9 +4069,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   />
                   <button
                     type="submit"
-                    className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl shadow-xs transition cursor-pointer"
+                    className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1 shrink-0"
                   >
-                    إضافة
+                    <Plus className="h-4 w-4" />
+                    <span>إضافة</span>
                   </button>
                 </div>
                 {adminSuccessMsg && <p className="text-xs text-emerald-700 font-bold mt-1">{adminSuccessMsg}</p>}

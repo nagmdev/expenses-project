@@ -19,15 +19,20 @@ import {
   Landmark,
   Smartphone,
   Wallet,
-  Coins
+  Coins,
+  Pencil,
+  Receipt,
+  Eye
 } from 'lucide-react';
+import { NewRequestModal } from './NewRequestModal';
 
 interface RequestDetailModalProps {
   request: ExpenseRequest | null;
   onClose: () => void;
+  onEditRequest?: (request: ExpenseRequest) => void;
 }
 
-export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request, onClose }) => {
+export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request, onClose, onEditRequest }) => {
   const { 
     currentRole, 
     currentUser, 
@@ -40,7 +45,12 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     resolveParentBankAccount
   } = useApp();
 
+  const [isEditing, setIsEditing] = useState(false);
   const [activeAction, setActiveAction] = useState<'none' | 'approve' | 'reject' | 'clarify' | 'reply' | 'disburse'>('none');
+
+  const isSuperAdmin = currentRole === 'super_admin' || currentUser.role === 'super_admin';
+  const canEdit = request ? ((request.status === 'pending' || request.status === 'clarification_requested') &&
+    (currentUser.id === request.requesterId || currentUser.email === request.requesterEmail || isSuperAdmin || currentRole === 'org_admin')) : false;
   
   // Action form states
   const [approvalNote, setApprovalNote] = useState('');
@@ -239,37 +249,65 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-400">حالة الطلب:</span>
-              {request.status === 'pending' && (
-                <span className={`text-xs px-3 py-1 rounded-full font-bold ${
-                  request.requestType === 'income' 
-                    ? 'bg-amber-100 text-amber-900 border border-amber-300' 
-                    : 'bg-amber-100 text-amber-800'
-                }`}>
-                  {request.requestType === 'income' ? 'تحت المراجعة وبانتظار الاستلام' : 'قيد مراجعة الإدارة'}
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400">حالة الطلب:</span>
+                {request.status === 'pending' && (
+                  <span className={`text-xs px-3 py-1 rounded-full font-bold ${
+                    request.requestType === 'income' 
+                      ? 'bg-amber-100 text-amber-900 border border-amber-300' 
+                      : 'bg-amber-100 text-amber-800'
+                  }`}>
+                    {request.requestType === 'income' ? 'تحت المراجعة وبانتظار الاستلام' : 'قيد مراجعة الإدارة'}
+                  </span>
+                )}
+                {request.status === 'clarification_requested' && (
+                  <span className="bg-rose-100 text-rose-800 text-xs px-3 py-1 rounded-full font-bold">
+                    مطلوب استيضاح
+                  </span>
+                )}
+                {request.status === 'approved' && (
+                  <span className="bg-blue-100 text-blue-800 text-xs px-3 py-1 rounded-full font-bold">
+                    {request.requestType === 'income' ? 'معتمد وبانتظار تأكيد الاستلام والتوريد' : 'معتمد وبانتظار الصرف'}
+                  </span>
+                )}
+                {request.status === 'disbursed' && (
+                  <span className="bg-emerald-100 text-emerald-800 text-xs px-3 py-1 rounded-full font-bold">
+                    {request.requestType === 'income' ? 'تم استلام وتوريد المبلغ في الخزينة ✓' : 'تم الصرف المالي والتحويل ✓'}
+                  </span>
+                )}
+                {request.status === 'rejected' && (
+                  <span className="bg-slate-200 text-slate-800 text-xs px-3 py-1 rounded-full font-bold">
+                    مرفوض
+                  </span>
+                )}
+              </div>
+
+              {/* Edit Request Button or Non-editable Badge */}
+              {canEdit ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onEditRequest) {
+                      onEditRequest(request);
+                    } else {
+                      setIsEditing(true);
+                    }
+                  }}
+                  title="يمكنك تعديل بيانات الطلب طالما لم يتم اعتماده بعد"
+                  className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer active:scale-95"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  <span>✏️ تعديل الطلب</span>
+                </button>
+              ) : (request.status === 'approved' || request.status === 'disbursed') ? (
+                <span 
+                  title="لا يمكن تعديل الطلب بعد اعتماده أو صرفه"
+                  className="px-2.5 py-1 bg-slate-100 text-slate-500 rounded-lg text-[10px] font-semibold flex items-center gap-1 border border-slate-200 cursor-help"
+                >
+                  🔒 لا يمكن تعديل الطلب بعد اعتماده أو صرفه
                 </span>
-              )}
-              {request.status === 'clarification_requested' && (
-                <span className="bg-rose-100 text-rose-800 text-xs px-3 py-1 rounded-full font-bold">
-                  مطلوب استيضاح
-                </span>
-              )}
-              {request.status === 'approved' && (
-                <span className="bg-blue-100 text-blue-800 text-xs px-3 py-1 rounded-full font-bold">
-                  {request.requestType === 'income' ? 'معتمد وبانتظار تأكيد الاستلام والتوريد' : 'معتمد وبانتظار الصرف'}
-                </span>
-              )}
-              {request.status === 'disbursed' && (
-                <span className="bg-emerald-100 text-emerald-800 text-xs px-3 py-1 rounded-full font-bold">
-                  {request.requestType === 'income' ? 'تم استلام وتوريد المبلغ في الخزينة ✓' : 'تم الصرف المالي والتحويل ✓'}
-                </span>
-              )}
-              {request.status === 'rejected' && (
-                <span className="bg-slate-200 text-slate-800 text-xs px-3 py-1 rounded-full font-bold">
-                  مرفوض
-                </span>
-              )}
+              ) : null}
             </div>
           </div>
 
@@ -400,6 +438,70 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 </div>
               )}
             </>
+          )}
+
+          {/* Invoice & Personal Prepayment Details Card */}
+          {(request.isPrepaidByRequester || request.invoiceNumber || request.invoiceDate || request.invoiceAttachment) && (
+            <div className="bg-gradient-to-br from-amber-50/70 via-orange-50/20 to-white border-2 border-amber-200 rounded-2xl p-4 text-xs space-y-3 shadow-2xs">
+              <div className="flex items-center justify-between border-b border-amber-100 pb-2">
+                <div className="flex items-center gap-2 font-black text-amber-950 text-xs">
+                  <Receipt className="h-4 w-4 text-amber-600" />
+                  <span>بيانات الفاتورة وإثبات السداد المسبق</span>
+                </div>
+                {request.isPrepaidByRequester ? (
+                  <span className="text-[10px] font-black bg-amber-100 text-amber-900 border border-amber-300 px-2.5 py-0.5 rounded-full">
+                    💰 استرداد مصروفات شخصية (دفع مسبق من جيب الموظف)
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-bold bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">
+                    سداد مباشر من الشركة
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-slate-700">
+                {request.invoiceNumber && (
+                  <div className="bg-white/80 p-2.5 rounded-xl border border-amber-100">
+                    <span className="text-slate-400 block text-[10px] mb-0.5">رقم الفاتورة / الإيصال:</span>
+                    <span className="font-mono font-bold text-slate-900">{request.invoiceNumber}</span>
+                  </div>
+                )}
+                {request.invoiceDate && (
+                  <div className="bg-white/80 p-2.5 rounded-xl border border-amber-100">
+                    <span className="text-slate-400 block text-[10px] mb-0.5">تاريخ الفاتورة / السداد:</span>
+                    <span className="font-bold text-slate-900">{request.invoiceDate}</span>
+                  </div>
+                )}
+                {request.isPrepaidByRequester && (
+                  <div className="bg-white/80 p-2.5 rounded-xl border border-amber-100 sm:col-span-1">
+                    <span className="text-slate-400 block text-[10px] mb-0.5">طبيعة العملية:</span>
+                    <span className="font-bold text-amber-800">استرداد لمقدم الطلب</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Invoice Attachment Preview / Link */}
+              {request.invoiceAttachment && (
+                <div className="pt-2 border-t border-amber-100 flex items-center justify-between">
+                  <div className="flex items-center gap-2 truncate">
+                    <FileText className="h-4 w-4 text-amber-600 shrink-0" />
+                    <span className="font-bold text-slate-800 text-xs truncate max-w-xs">{request.invoiceAttachment.name}</span>
+                    <span className="text-[10px] text-slate-400 font-mono">({request.invoiceAttachment.size})</span>
+                  </div>
+                  {request.invoiceAttachment.url && (
+                    <a
+                      href={request.invoiceAttachment.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shrink-0"
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                      <span>معاينة الفاتورة ↗</span>
+                    </a>
+                  )}
+                </div>
+              )}
+            </div>
           )}
 
           {/* Attachments (Only shown if authentic non-dummy attachments exist) */}
@@ -922,6 +1024,15 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
         </div>
 
       </div>
+
+      {/* Edit Request Modal */}
+      {isEditing && request && (
+        <NewRequestModal
+          isOpen={isEditing}
+          onClose={() => setIsEditing(false)}
+          editingRequest={request}
+        />
+      )}
     </div>
   );
 };

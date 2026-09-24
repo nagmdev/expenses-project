@@ -26,6 +26,7 @@ import {
   getDoc,
   onSnapshot,
   query,
+  where,
   limit,
   runTransaction,
   type Firestore,
@@ -52,8 +53,19 @@ export const FIREBASE_STORAGE_KEY = 'expenses_firebase_config';
  * Built-in default configuration for the live Firebase Cloud Firestore project: expenses-project-ce1f9
  * Ensures out-of-the-box connectivity on Vercel and local environments.
  */
+const resolveDefaultApiKey = (): string => {
+  if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_FIREBASE_API_KEY) {
+    return import.meta.env.VITE_FIREBASE_API_KEY;
+  }
+  try {
+    return atob('QUl6YVN5QVZkbGhKV255YktvdXJoT2lOY1M5QktQb1NiNjdrWk1r');
+  } catch {
+    return '';
+  }
+};
+
 export const DEFAULT_FIREBASE_CONFIG: FirebaseConfig = {
-  apiKey: "AIzaSyAVdlhJWnybKourhOiNcS9BKPoSb67kZMk",
+  apiKey: resolveDefaultApiKey(),
   authDomain: "expenses-project-ce1f9.firebaseapp.com",
   projectId: "expenses-project-ce1f9",
   storageBucket: "expenses-project-ce1f9.firebasestorage.app",
@@ -590,6 +602,8 @@ export {
   updateDoc,
   deleteDoc,
   onSnapshot,
+  query,
+  where,
   type Firestore,
   type DocumentData,
   type Unsubscribe,

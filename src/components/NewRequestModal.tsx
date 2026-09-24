@@ -14,9 +14,24 @@ import {
   Smartphone,
   Wallet,
   Banknote,
-  CheckCircle2
+  CheckCircle2,
+  Receipt,
+  Upload,
+  Trash2,
+  Eye,
+  Paperclip,
+  Calendar,
+  Hash
 } from 'lucide-react';
-import { PaymentMethod, SUPPORTED_CURRENCIES, isServiceMatchingOrg, RequestType, ServiceCategory } from '../types';
+import { 
+  PaymentMethod, 
+  SUPPORTED_CURRENCIES, 
+  isServiceMatchingOrg, 
+  RequestType, 
+  ServiceCategory,
+  ExpenseRequest,
+  RequestAttachment 
+} from '../types';
 import { 
   sanitizeAmount, 
   sanitizeDigitalWallet, 
@@ -28,6 +43,7 @@ import {
 interface NewRequestModalProps {
   isOpen: boolean;
   onClose: () => void;
+  editingRequest?: ExpenseRequest | null;
 }
 
 export type IncomeShape = 'instapay' | 'wallet' | 'bank' | 'cash';
@@ -138,7 +154,7 @@ const EXPENSE_DESCRIPTION_TEMPLATES = [
   '✏️ كتابة تفاصيل ومواصفات مخصصة...',
 ];
 
-export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClose }) => {
+export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClose, editingRequest }) => {
   const { 
     organizations,
     allOrganizations,
@@ -152,8 +168,11 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     currentRole,
     activeOrg,
     activeOrgId,
-    createRequest 
+    createRequest,
+    updateRequest
   } = useApp();
+
+  const isEditMode = Boolean(editingRequest);
 
   const isSuperAdmin = currentRole === 'super_admin' || currentUser.role === 'super_admin';
   const orgList = useMemo(() => {
@@ -293,6 +312,51 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [paymentAccountDetails, setPaymentAccountDetails] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  // Dedicated Invoice & Prepayment States
+  const [isPrepaidByRequester, setIsPrepaidByRequester] = useState<boolean>(false);
+  const [invoiceNumber, setInvoiceNumber] = useState<string>('');
+  const [invoiceDate, setInvoiceDate] = useState<string>('');
+  const [invoiceAttachment, setInvoiceAttachment] = useState<RequestAttachment | null>(null);
+  const [previewModalUrl, setPreviewModalUrl] = useState<{ url: string; name: string; type: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 10 * 1024 * 1024) {
+      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 10 ميجابايت');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      const formatSize = (bytes: number) => {
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+      };
+
+      const now = new Date();
+      const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+      const newAttachment: RequestAttachment = {
+        id: `att-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        name: file.name,
+        size: formatSize(file.size),
+        type: file.type.includes('pdf') ? 'pdf' : (file.type.includes('png') ? 'png' : 'jpg'),
+        url: dataUrl,
+        uploadedAt: dateFormatted,
+      };
+
+      setInvoiceAttachment(newAttachment);
+    };
+
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
   // Helper to get auto-fill details from profile for a given payment method
   const getProfilePayoutDetail = useCallback((method: PaymentMethod | string) => {
     switch (method) {
@@ -312,17 +376,58 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
   }, [currentUser]);
 
-  // Auto-fill from profile when modal opens
+  // Auto-fill from profile when modal opens or prefill when editing
   useEffect(() => {
     if (isOpen) {
-      const defaultMethod = (currentUser.preferredPaymentMethod as PaymentMethod) || 'instapay';
-      setPreferredPaymentMethod(defaultMethod);
-      const detail = getProfilePayoutDetail(defaultMethod);
-      if (detail) {
-        setPaymentAccountDetails(detail);
+      if (editingRequest) {
+        setRequestType(editingRequest.requestType || 'expense');
+        setAmount(editingRequest.amount ? String(editingRequest.amount) : '');
+        setCurrency(editingRequest.currency || currentOrg?.currency || 'EGP');
+        setUrgency(editingRequest.urgency || 'medium');
+        if (editingRequest.orgId) setSelectedOrgId(editingRequest.orgId);
+        if (editingRequest.serviceCategoryId) setSelectedServiceId(editingRequest.serviceCategoryId);
+        if (editingRequest.providerId) setSelectedProviderId(editingRequest.providerId);
+        setItemsDetail(editingRequest.itemsDetail || '');
+        setTargetAccountId(editingRequest.targetAccountId || '');
+
+        setIsCustomTitle(true);
+        setCustomTitle(editingRequest.title || '');
+
+        setIsCustomJustification(true);
+        setCustomJustification(editingRequest.justification || '');
+
+        setIsCustomDescription(true);
+        setCustomDescription(editingRequest.description || '');
+
+        if (editingRequest.preferredPaymentMethod) {
+          setPreferredPaymentMethod(editingRequest.preferredPaymentMethod);
+        }
+        setPaymentAccountDetails(editingRequest.paymentAccountDetails || '');
+
+        setIsPrepaidByRequester(Boolean(editingRequest.isPrepaidByRequester));
+        setInvoiceNumber(editingRequest.invoiceNumber || '');
+        setInvoiceDate(editingRequest.invoiceDate || '');
+        if (editingRequest.invoiceAttachment) {
+          setInvoiceAttachment(editingRequest.invoiceAttachment);
+        } else if (editingRequest.attachments && editingRequest.attachments.length > 0) {
+          setInvoiceAttachment(editingRequest.attachments[0]);
+        } else {
+          setInvoiceAttachment(null);
+        }
+      } else {
+        const defaultMethod = (currentUser.preferredPaymentMethod as PaymentMethod) || 'instapay';
+        setPreferredPaymentMethod(defaultMethod);
+        const detail = getProfilePayoutDetail(defaultMethod);
+        if (detail) {
+          setPaymentAccountDetails(detail);
+        }
+        setIsPrepaidByRequester(false);
+        setInvoiceNumber('');
+        setInvoiceDate('');
+        setInvoiceAttachment(null);
       }
     }
-  }, [isOpen, currentUser, getProfilePayoutDetail]);
+  }, [isOpen, editingRequest, currentUser, getProfilePayoutDetail, currentOrg]);
 
   // Validation & Error Handling States
   const [formError, setFormError] = useState<string | null>(null);
@@ -500,6 +605,11 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setItemsDetail('');
     setTargetAccountId('');
     setPaymentAccountDetails('');
+    setIsPrepaidByRequester(false);
+    setInvoiceNumber('');
+    setInvoiceDate('');
+    setInvoiceAttachment(null);
+    setPreviewModalUrl(null);
     setFormError(null);
     setFieldHighlight(null);
     onClose();
@@ -509,6 +619,101 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     e.preventDefault();
     setFormError(null);
     setFieldHighlight(null);
+
+    // ==========================================
+    // 0. EDIT MODE SUBMISSION (تعديل طلب موجود)
+    // ==========================================
+    if (isEditMode && editingRequest) {
+      if (!amount || Number(amount) <= 0) {
+        setFormError('⚠️ يرجى إدخال المبلغ أولاً للمتابعة');
+        setFieldHighlight('amount');
+        amountInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        amountInputRef.current?.focus();
+        return;
+      }
+
+      const activeTitle = requestType === 'income'
+        ? (paymentAccountDetails.trim() ? `توريد مالي - ${paymentAccountDetails.trim()}` : `توريد مالي (+ IN)`)
+        : effectiveTitle.trim();
+
+      if (!activeTitle) {
+        setFormError('⚠️ يرجى كتابة أو اختيار موضوع وعنوان الطلب');
+        setFieldHighlight('title');
+        titleInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        titleInputRef.current?.focus();
+        return;
+      }
+
+      if (requestType === 'expense' && preferredPaymentMethod !== 'cash' && !paymentAccountDetails.trim()) {
+        setFormError(
+          preferredPaymentMethod === 'instapay'
+            ? '⚠️ يرجى إدخال عنوان إنستاباي أو رقم الهاتف للمستفيد'
+            : preferredPaymentMethod === 'digital_wallet'
+            ? '⚠️ يرجى إدخال رقم المحفظة الإلكترونية للمستفيد'
+            : '⚠️ يرجى إدخال رقم الحساب البنكي / الآيبان للمستفيد'
+        );
+        setFieldHighlight('paymentDetails');
+        paymentInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        paymentInputRef.current?.focus();
+        return;
+      }
+
+      if (submitting) return;
+
+      const selectedService = effectiveServices.find(s => s.id === selectedServiceId) || effectiveServices[0];
+      const serviceId = selectedService?.id || editingRequest.serviceCategoryId;
+      const serviceName = selectedService?.name || editingRequest.serviceCategoryName;
+
+      const selectedProvider = effectiveProviders.find(p => p.id === selectedProviderId) || effectiveProviders[0];
+      const providerId = selectedProvider?.id || editingRequest.providerId;
+      const providerName = selectedProvider?.name || editingRequest.providerName;
+
+      const otherAttachments = (editingRequest.attachments || []).filter(
+        a => !invoiceAttachment || a.id !== invoiceAttachment.id
+      );
+      const finalAttachments = invoiceAttachment 
+        ? [invoiceAttachment, ...otherAttachments] 
+        : otherAttachments;
+
+      setSubmitting(true);
+      try {
+        await updateRequest(editingRequest.id, {
+          title: activeTitle,
+          description: requestType === 'income'
+            ? `طلب توريد مالي بقيمة ${Number(amount).toLocaleString()} ${currency}`
+            : (effectiveDescription.trim() || editingRequest.description),
+          justification: requestType === 'income'
+            ? 'إيداع وتوريد مالي مباشر'
+            : (effectiveJustification.trim() || editingRequest.justification),
+          amount: Number(amount),
+          currency: currency || currentOrg?.currency || 'EGP',
+          serviceCategoryId: serviceId,
+          serviceCategoryName: serviceName,
+          providerId: providerId,
+          providerName: providerName,
+          urgency,
+          requestType,
+          targetAccountId: targetAccountId || undefined,
+          itemsDetail: itemsDetail.trim() || undefined,
+          isPrepaidByRequester,
+          invoiceNumber: invoiceNumber.trim() || undefined,
+          invoiceDate: invoiceDate || undefined,
+          invoiceAttachment: invoiceAttachment || undefined,
+          attachments: finalAttachments,
+          preferredPaymentMethod,
+          paymentAccountDetails: paymentAccountDetails.trim(),
+          orgId: selectedOrgId,
+        });
+
+        handleClose();
+      } catch (err: any) {
+        console.error('[NewRequestModal] Error updating request:', err);
+        setFormError(err?.message || 'حدث خطأ أثناء حفظ التعديلات على الطلب، يرجى المحاولة ثانية');
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
 
     // ==========================================
     // 1. INFLOW (توريد مالي مباشر)
@@ -547,7 +752,11 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           urgency: 'medium',
           requestType: 'income',
           targetAccountId: matchingAccount?.id || targetAccountId || undefined,
-          attachmentNames: [],
+          isPrepaidByRequester,
+          invoiceNumber: invoiceNumber.trim() || undefined,
+          invoiceDate: invoiceDate || undefined,
+          invoiceAttachment: invoiceAttachment || undefined,
+          attachments: invoiceAttachment ? [invoiceAttachment] : [],
           preferredPaymentMethod: shapeObj.method,
           paymentAccountDetails: paymentAccountDetails.trim(),
           orgId: selectedOrgId,
@@ -627,7 +836,11 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         requestType: 'expense',
         targetAccountId: targetAccountId || undefined,
         itemsDetail: itemsDetail.trim() || undefined,
-        attachmentNames: [],
+        isPrepaidByRequester,
+        invoiceNumber: invoiceNumber.trim() || undefined,
+        invoiceDate: invoiceDate || undefined,
+        invoiceAttachment: invoiceAttachment || undefined,
+        attachments: invoiceAttachment ? [invoiceAttachment] : [],
         preferredPaymentMethod,
         paymentAccountDetails: paymentAccountDetails.trim(),
         orgId: selectedOrgId,
@@ -655,25 +868,33 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       >
         {/* Header */}
         <div className={`shrink-0 flex items-center justify-between p-4 sm:p-5 border-b sticky top-0 z-10 transition-colors ${
-          requestType === 'income'
+          isEditMode
+            ? 'border-indigo-100 bg-gradient-to-r from-indigo-50/95 via-purple-50/50 to-white'
+            : requestType === 'income'
             ? 'border-emerald-100 bg-gradient-to-r from-emerald-50/95 via-teal-50/50 to-white'
             : 'border-rose-100 bg-gradient-to-r from-rose-50/95 via-pink-50/40 to-white'
         }`}>
           <div>
             <div className="flex items-center gap-2">
               <h3 id="new-request-modal-title" className="text-base font-bold text-slate-900">
-                {requestType === 'income' ? '📥 توريد وتحصيل مالي (Inflow)' : '💸 طلب صرف ومطالبة مالية (Outflow)'}
+                {isEditMode 
+                  ? `✏️ تعديل طلب المصروفات (${editingRequest?.requestNumber})` 
+                  : (requestType === 'income' ? '📥 توريد وتحصيل مالي (Inflow)' : '💸 طلب صرف ومطالبة مالية (Outflow)')}
               </h3>
               <span className={`px-2 py-0.5 rounded-md text-[10px] font-black ${
-                requestType === 'income'
+                isEditMode
+                  ? 'bg-indigo-100 text-indigo-800 border border-indigo-300'
+                  : requestType === 'income'
                   ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                   : 'bg-rose-100 text-rose-800 border border-rose-300'
               }`}>
-                {requestType === 'income' ? '+ إيداع وتوريد' : '- منصرف مالي'}
+                {isEditMode ? 'وضع التعديل' : (requestType === 'income' ? '+ إيداع وتوريد' : '- منصرف مالي')}
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              {requestType === 'income'
+              {isEditMode
+                ? 'يمكنك تعديل تفاصيل ومبالغ وبنود الطلب والمرفقات قبل اعتماده وصرفه'
+                : requestType === 'income'
                 ? 'حدد المبلغ وشكل التوريد لإيداعه في كارت الخزينة وتحديث الرصيد فور الاستلام'
                 : 'اكتب المبلغ والبيانات المطلوبة لتقديم طلب الصرف للاعتماد الفوري'}
             </p>
@@ -1294,6 +1515,205 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   </div>
                 </div>
 
+                {/* 🧾 DEDICATED INVOICE / RECEIPT ATTACHMENT SECTION */}
+                <div className="bg-gradient-to-br from-amber-50/80 via-orange-50/30 to-white p-4 sm:p-5 rounded-2xl border-2 border-amber-300 shadow-xs space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-amber-200/70">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-2.5 bg-amber-500 text-white rounded-xl shadow-xs shrink-0">
+                        <Receipt className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h4 className="font-black text-slate-900 text-xs sm:text-sm">
+                          🧾 إرفاق فاتورة / إيصال سداد (في حال الدفع المسبق من طرفك)
+                        </h4>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          إثبات للمصداقية وحفظ حقوق السداد في حال قيامك بدفع القيمة مقدماً لصالح الشركة
+                        </p>
+                      </div>
+                    </div>
+                    
+                    {/* Toggle: Personal Payment / Reimbursement */}
+                    <div className="flex items-center gap-2 self-start sm:self-auto bg-white/95 p-1.5 px-2.5 rounded-xl border border-amber-200 shadow-2xs">
+                      <span className="text-[11px] font-bold text-slate-700">سداد من جيبي الخاص:</span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={isPrepaidByRequester}
+                        onClick={() => setIsPrepaidByRequester(!isPrepaidByRequester)}
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                          isPrepaidByRequester ? 'bg-amber-600' : 'bg-slate-300'
+                        }`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                            isPrepaidByRequester ? 'translate-x-0' : '-translate-x-5'
+                          }`}
+                        />
+                      </button>
+                      <span className={`text-[10px] font-black px-2 py-0.5 rounded-md ${
+                        isPrepaidByRequester ? 'bg-amber-100 text-amber-900 border border-amber-300' : 'bg-slate-100 text-slate-600'
+                      }`}>
+                        {isPrepaidByRequester ? 'نعم (استرداد شخصي)' : 'لا (دفع مباشر)'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Clarification banner when personal payment is toggled */}
+                  {isPrepaidByRequester && (
+                    <div className="p-3 bg-amber-100/90 border border-amber-300 rounded-xl text-xs text-amber-950 flex items-start gap-2 animate-in fade-in">
+                      <AlertCircle className="h-4 w-4 text-amber-700 shrink-0 mt-0.5" />
+                      <div>
+                        <strong className="block font-black">طلب استرداد مصروفات شخصية (Reimbursement):</strong>
+                        <span>أنت تؤكد أنك قمت بسداد المبلغ من جيبك الخاص، وسيتم تحويل قيمة الفاتورة لحسابك الموضح كاسترداد للمصروفات بعد الاعتماد.</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Invoice Fields: Number & Date */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    {/* 1. Invoice / Receipt Number */}
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5 text-xs">
+                        <Hash className="h-3.5 w-3.5 text-amber-600" />
+                        <span>رقم الفاتورة / الإيصال (اختياري)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={invoiceNumber}
+                        onChange={(e) => setInvoiceNumber(e.target.value)}
+                        placeholder="مثال: INV-2026-0899 أو رقم إيصال الدفع..."
+                        className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-medium text-slate-900 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                      />
+                    </div>
+
+                    {/* 2. Invoice Date */}
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5 text-xs">
+                        <Calendar className="h-3.5 w-3.5 text-amber-600" />
+                        <span>تاريخ الفاتورة / السداد (اختياري)</span>
+                      </label>
+                      <input
+                        type="date"
+                        value={invoiceDate}
+                        onChange={(e) => setInvoiceDate(e.target.value)}
+                        className="w-full p-2.5 bg-white border border-slate-200 rounded-xl font-medium text-slate-900 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                      />
+                    </div>
+                  </div>
+
+                  {/* 3. File Upload Button & Preview / Delete Area */}
+                  <div className="pt-1">
+                    <label className="block font-bold text-slate-700 mb-1.5 flex items-center justify-between text-xs">
+                      <span className="flex items-center gap-1.5">
+                        <Paperclip className="h-3.5 w-3.5 text-amber-600" />
+                        <span>مرفق الفاتورة أو إيصال السداد (صورة JPG, PNG أو مستند PDF)</span>
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-semibold">بحد أقصى 10 ميجابايت</span>
+                    </label>
+
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                      id="invoice-file-upload-input"
+                    />
+
+                    {!invoiceAttachment ? (
+                      <div 
+                        onClick={() => fileInputRef.current?.click()}
+                        className="border-2 border-dashed border-amber-300 hover:border-amber-500 bg-amber-50/40 hover:bg-amber-50/80 rounded-2xl p-4 sm:p-5 text-center transition cursor-pointer flex flex-col items-center justify-center gap-2"
+                      >
+                        <div className="p-3 bg-amber-100 text-amber-700 rounded-2xl shadow-2xs">
+                          <Upload className="h-6 w-6" />
+                        </div>
+                        <div>
+                          <span className="text-xs font-bold text-slate-800 block">
+                            انقر هنا لرفع وتحديد ملف الفاتورة أو الإيصال
+                          </span>
+                          <span className="text-[11px] text-slate-500 mt-0.5 block">
+                            يدعم صور الفواتير الورقية (JPG, PNG) والمستندات الإلكترونية (PDF)
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fileInputRef.current?.click();
+                          }}
+                          className="mt-1 px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Upload className="h-3.5 w-3.5" />
+                          <span>اختيار ملف الفاتورة</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="bg-white border-2 border-emerald-300 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+                        <div className="flex items-center gap-3 min-w-0">
+                          {/* Thumbnail / Icon */}
+                          {invoiceAttachment.url && (invoiceAttachment.type === 'png' || invoiceAttachment.type === 'jpg' || invoiceAttachment.type.startsWith('image/')) ? (
+                            <img 
+                              src={invoiceAttachment.url} 
+                              alt="معاينة الفاتورة" 
+                              className="w-12 h-12 rounded-xl object-cover border border-slate-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
+                              onClick={() => setPreviewModalUrl({ url: invoiceAttachment.url!, name: invoiceAttachment.name, type: invoiceAttachment.type })}
+                              title="انقر للمعاينة بحجم كبير"
+                            />
+                          ) : (
+                            <div className="w-12 h-12 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center font-bold text-xs shrink-0">
+                              PDF
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-slate-900 text-xs truncate block max-w-[200px] sm:max-w-xs" title={invoiceAttachment.name}>
+                                {invoiceAttachment.name}
+                              </span>
+                              <span className="text-[10px] font-black text-emerald-800 bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded-full shrink-0">
+                                مرفق جاهز ✓
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
+                              <span>الحجم: {invoiceAttachment.size}</span>
+                              <span>•</span>
+                              <span>النوع: {invoiceAttachment.type.toUpperCase()}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Action Buttons: Preview & Delete */}
+                        <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                          {invoiceAttachment.url && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (invoiceAttachment.url) {
+                                  setPreviewModalUrl({ url: invoiceAttachment.url, name: invoiceAttachment.name, type: invoiceAttachment.type });
+                                }
+                              }}
+                              className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs rounded-xl border border-indigo-200 flex items-center gap-1.5 transition cursor-pointer"
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                              <span>معاينة المرفق</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => setInvoiceAttachment(null)}
+                            className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
+                            title="حذف هذا المرفق"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            <span>حذف</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
                 {/* 6. Items Detail (Optional) */}
                 <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80">
                   <label className="block font-bold text-slate-800 mb-1">
@@ -1440,13 +1860,20 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                 type="submit"
                 disabled={submitting}
                 className={`px-6 py-2.5 text-white font-bold rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${
-                  requestType === 'income'
+                  isEditMode
+                    ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-500/20'
+                    : requestType === 'income'
                     ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20'
                     : 'bg-rose-600 hover:bg-rose-700 shadow-rose-500/20'
                 }`}
               >
                 {submitting ? (
-                  'جاري الإرسال...'
+                  'جاري الحفظ...'
+                ) : isEditMode ? (
+                  <>
+                    <CheckCircle2 className="h-4 w-4" />
+                    <span>حفظ التعديلات على الطلب</span>
+                  </>
                 ) : requestType === 'income' ? (
                   <>
                     <ArrowDownLeft className="h-4 w-4" />
@@ -1464,6 +1891,58 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
         </form>
       </div>
+
+      {/* Preview Modal for Invoice Attachment */}
+      {previewModalUrl && (
+        <div 
+          className="fixed inset-0 z-60 flex items-center justify-center bg-slate-950/80 backdrop-blur-xs p-4 animate-in fade-in"
+          onClick={() => setPreviewModalUrl(null)}
+        >
+          <div 
+            className="bg-white rounded-3xl max-w-3xl w-full max-h-[90vh] overflow-hidden shadow-2xl flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 border-b border-slate-200 bg-slate-50">
+              <div className="flex items-center gap-2">
+                <Receipt className="h-5 w-5 text-amber-600" />
+                <span className="font-bold text-slate-800 text-sm truncate max-w-md">{previewModalUrl.name}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={previewModalUrl.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1 text-xs font-bold text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 rounded-lg transition"
+                >
+                  فتح في نافذة منفصلة ↗
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setPreviewModalUrl(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-lg transition cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+            <div className="p-4 flex-1 overflow-auto flex items-center justify-center bg-slate-100 min-h-[300px]">
+              {previewModalUrl.type === 'pdf' || previewModalUrl.name.toLowerCase().endsWith('.pdf') ? (
+                <iframe
+                  src={previewModalUrl.url}
+                  title="PDF Preview"
+                  className="w-full h-[65vh] rounded-xl border border-slate-300"
+                />
+              ) : (
+                <img
+                  src={previewModalUrl.url}
+                  alt="Preview"
+                  className="max-h-[70vh] max-w-full object-contain rounded-xl shadow-md"
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

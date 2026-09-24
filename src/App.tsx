@@ -17,9 +17,10 @@ import { FirebaseConfigModal } from './components/FirebaseConfigModal';
 import { UserProfileModal } from './components/UserProfileModal';
 import { SettingsManagement } from './components/SettingsManagement';
 import { ProfileManagement } from './components/ProfileManagement';
-import { ExpenseRequest, SUPPORTED_CURRENCIES } from './types';
+import { ExpenseRequest, SUPPORTED_CURRENCIES, Organization, OrganizationMember } from './types';
 import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
+import { initFirebase, getDoc, getDocs, doc, collection, query, where } from './lib/firebase';
 
 const MainApp: React.FC = () => {
   const { 
@@ -37,12 +38,141 @@ const MainApp: React.FC = () => {
     openFirebaseModal,
     firebaseError,
     clearFirebaseError,
+    effectiveOrgId,
+    setActiveOrgId,
+    forceRefreshUserState,
+    setUserDocProfile,
+    setRawMembers,
+    setRawOrganizations,
   } = useApp();
 
   const [isNewRequestModalOpen, setIsNewRequestModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [selectedRequest, setSelectedRequest] = useState<ExpenseRequest | null>(null);
   
+  // Status check state for pending assignment screen
+  const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Direct fetch and immediate admission into organization without page refresh
+  const handleCheckStatusNow = async () => {
+    if (!firebaseUser || isRefreshingStatus) return;
+    setIsRefreshingStatus(true);
+    setStatusMessage(null);
+
+    try {
+      const { db } = initFirebase();
+      if (!db) {
+        await forceRefreshUserState();
+        return;
+      }
+
+      let foundOrgId = '';
+      let profileData: any = null;
+      const fetchedMembers: OrganizationMember[] = [];
+
+      // 1. Directly fetch getDoc(doc(db, 'users', firebaseUser.uid))
+      try {
+        const userDocRef = doc(db, 'users', firebaseUser.uid);
+        const userSnap = await getDoc(userDocRef);
+        if (userSnap.exists()) {
+          profileData = userSnap.data();
+          if (profileData?.orgId) {
+            foundOrgId = profileData.orgId;
+          }
+        }
+      } catch (err) {
+        console.warn('[Status Check] user doc fetch warning:', err);
+      }
+
+      // 2. Directly fetch getDocs(query(collection(db, 'members'), where('userId', '==', firebaseUser.uid)))
+      try {
+        const membersQueryByUid = query(collection(db, 'members'), where('userId', '==', firebaseUser.uid));
+        const membersByUidSnap = await getDocs(membersQueryByUid);
+        membersByUidSnap.docs.forEach(d => {
+          fetchedMembers.push({ id: d.id, ...d.data() } as OrganizationMember);
+        });
+      } catch (err) {
+        console.warn('[Status Check] members by uid fetch warning:', err);
+      }
+
+      // 3. Check by email where('userEmail', '==', firebaseUser.email)
+      if (firebaseUser.email) {
+        const uEmail = firebaseUser.email.toLowerCase().trim();
+        try {
+          const membersQueryByEmail = query(collection(db, 'members'), where('userEmail', '==', uEmail));
+          const membersByEmailSnap = await getDocs(membersQueryByEmail);
+          membersByEmailSnap.docs.forEach(d => {
+            if (!fetchedMembers.some(m => m.id === d.id)) {
+              fetchedMembers.push({ id: d.id, ...d.data() } as OrganizationMember);
+            }
+          });
+
+          if (firebaseUser.email !== uEmail) {
+            const membersByOrigEmailSnap = await getDocs(query(collection(db, 'members'), where('userEmail', '==', firebaseUser.email)));
+            membersByOrigEmailSnap.docs.forEach(d => {
+              if (!fetchedMembers.some(m => m.id === d.id)) {
+                fetchedMembers.push({ id: d.id, ...d.data() } as OrganizationMember);
+              }
+            });
+          }
+        } catch (err) {
+          console.warn('[Status Check] members by email fetch warning:', err);
+        }
+      }
+
+      if (!foundOrgId && fetchedMembers.length > 0) {
+        const memWithOrg = fetchedMembers.find(m => m.orgId && m.orgId.trim());
+        if (memWithOrg) foundOrgId = memWithOrg.orgId;
+      }
+
+      // If found, immediately update userDocProfile, rawMembers, effectiveOrgId, and activeOrgId in state and localStorage
+      if (foundOrgId) {
+        // Fetch organization details immediately so company is displayed without reload
+        try {
+          const orgSnap = await getDoc(doc(db, 'organizations', foundOrgId));
+          if (orgSnap.exists()) {
+            const orgData = { id: orgSnap.id, ...orgSnap.data() } as Organization;
+            setRawOrganizations([orgData]);
+            try {
+              localStorage.setItem('expenses_organizations_v3', JSON.stringify([orgData]));
+            } catch {}
+          }
+        } catch (err) {
+          console.warn('[Status Check] org fetch warning:', err);
+        }
+
+        if (profileData) {
+          setUserDocProfile(profileData);
+        }
+        if (fetchedMembers.length > 0) {
+          setRawMembers(fetchedMembers);
+          try {
+            localStorage.setItem('expenses_members_v3', JSON.stringify(fetchedMembers));
+          } catch {}
+        }
+
+        setActiveOrgId(foundOrgId);
+        try {
+          localStorage.setItem('expenses_active_org_id_v3', foundOrgId);
+        } catch {}
+
+        await forceRefreshUserState();
+      } else {
+        // Run forceRefreshUserState as secondary attempt
+        const ok = await forceRefreshUserState();
+        if (!ok) {
+          setStatusMessage('لم يتم ربط الحساب بشركة حتى الآن. يرجى التأكد من قيام مسؤول الشركة بإضافة بريدك الإلكتروني في قائمة الأعضاء.');
+        }
+      }
+    } catch (e: any) {
+      console.error('[Status Check Error]', e);
+      await forceRefreshUserState();
+    } finally {
+      setIsRefreshingStatus(false);
+    }
+  };
+
   // Quick Org modal for super admin
   const [isQuickOrgModalOpen, setIsQuickOrgModalOpen] = useState(false);
   const [newOrgName, setNewOrgName] = useState('');
@@ -177,14 +307,27 @@ const MainApp: React.FC = () => {
               <br />
               لم يتم ربط حسابك بأي شركة أو مؤسسة بعد، أو أن الحساب بانتظار تفعيل المسؤول. يرجى التواصل مع مدير شركتك لإضافتك وتفعيل صلاحياتك.
             </p>
-            <div className="mt-6 flex justify-center">
+            <div className="mt-6 flex flex-col items-center gap-3">
               <button
                 type="button"
-                onClick={() => window.location.reload()}
-                className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl transition cursor-pointer"
+                disabled={isRefreshingStatus}
+                onClick={handleCheckStatusNow}
+                className="px-6 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition cursor-pointer flex items-center gap-2 shadow-sm"
               >
-                تحديث الحالة الآن
+                {isRefreshingStatus ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin text-emerald-400" />
+                    <span>جاري فحص الصلاحيات وربط المؤسسة فورياً...</span>
+                  </>
+                ) : (
+                  <span>تحديث الحالة الآن</span>
+                )}
               </button>
+              {statusMessage && (
+                <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg max-w-sm">
+                  {statusMessage}
+                </p>
+              )}
             </div>
           </div>
         ) : currentRole === 'employee' ? (

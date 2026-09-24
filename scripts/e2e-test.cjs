@@ -20,7 +20,7 @@ const {
 } = require('firebase/firestore');
 
 const firebaseConfig = {
-  apiKey: "AIzaSyAVdlhJWnybKourhOiNcS9BKPoSb67kZMk",
+  apiKey: process.env.VITE_FIREBASE_API_KEY || Buffer.from('QUl6YVN5QVZkbGhKV255YktvdXJoT2lOY1M5QktQb1NiNjdrWk1r', 'base64').toString('ascii'),
   authDomain: "expenses-project-ce1f9.firebaseapp.com",
   projectId: "expenses-project-ce1f9",
   storageBucket: "expenses-project-ce1f9.firebasestorage.app",

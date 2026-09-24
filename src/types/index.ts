@@ -184,6 +184,10 @@ export interface ExpenseRequest {
   requestType?: RequestType; // 'expense' (صرف - فلوس خارجة) أو 'income' (توريد / تحصيل مالي وارد)
   targetAccountId?: string; // الخزينة أو الحساب المالي المرتبط
   itemsDetail?: string; // تفاصيل البضاعة أو الأصناف (اسم الصنف، الكمية، السعر)
+  isPrepaidByRequester?: boolean; // هل تم سداد المبلغ من الجيب الخاص مسبقاً (استرداد مصروفات / دفع شخصي)
+  invoiceNumber?: string; // رقم الفاتورة أو الإيصال
+  invoiceDate?: string; // تاريخ الفاتورة
+  invoiceAttachment?: RequestAttachment; // المرفق الرئيسي للفاتورة أو إيصال السداد
   attachments: RequestAttachment[];
   comments: RequestComment[];
   timeline: TimelineEvent[];
