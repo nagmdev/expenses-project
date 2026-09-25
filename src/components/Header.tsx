@@ -104,7 +104,7 @@ export const Header: React.FC<HeaderProps> = ({
                       {activeOrgId === 'all' ? 'جميع المؤسسات' : (activeOrg?.name || 'Tie-Tanta')}
                     </span>
                     <span className="block text-[10px] text-slate-400 font-medium leading-none mt-0.5">
-                      (Dropdown)
+                      اضغط لتبديل المؤسسة
                     </span>
                   </div>
                   <div className="h-7 w-7 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
@@ -183,8 +183,19 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Left Section (in RTL): Bell & New Request Button */}
-          <div className="flex items-center gap-3">
+          {/* Left Section (in RTL): Logout + Bell + New Request Button */}
+          <div className="flex items-center gap-2 sm:gap-3">
+            {/* 🔴 FIX: Logout button visible on ALL screen sizes */}
+            <button
+              type="button"
+              onClick={handleLogout}
+              disabled={isAuthProcessing}
+              className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition cursor-pointer disabled:opacity-50"
+              title="تسجيل خروج"
+            >
+              <LogOut className="h-5 w-5" />
+            </button>
+
             {/* Notification Bell with Dropdown Popover */}
             <div className="relative">
               <button
@@ -199,11 +210,14 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <div className="relative">
                   <Bell className={`h-4 w-4 ${isNotificationsOpen ? 'text-emerald-600' : 'text-slate-500'}`} />
-                  <span className="absolute -top-1.5 -left-1.5 h-4 min-w-[16px] px-1 rounded-full bg-rose-500 text-white text-[9px] font-black flex items-center justify-center animate-pulse">
-                    {pendingCount > 0 ? pendingCount : 1}
-                  </span>
+                  {/* 🟡 FIX: Only show badge when pendingCount > 0 */}
+                  {pendingCount > 0 && (
+                    <span className="absolute -top-1.5 -left-1.5 h-4 min-w-[16px] px-1 rounded-full bg-rose-500 text-white text-[9px] font-black flex items-center justify-center animate-pulse">
+                      {pendingCount > 9 ? '9+' : pendingCount}
+                    </span>
+                  )}
                 </div>
-                <span>الجرس</span>
+                <span className="hidden sm:inline">التنبيهات</span>
               </button>
 
               <NotificationsDropdown

@@ -674,10 +674,59 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 </div>
               </div>
 
-              {/* Sub-form: Approve Form */}
+              {/* Sub-form: Approve Form — with Treasury Balance Alert */}
               {activeAction === 'approve' && (
                 <form onSubmit={handleApprove} className="mt-4 p-4 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-3">
                   <h5 className="font-bold text-emerald-900 text-xs">تأكيد اعتماد الطلب بمبلغ {request.amount.toLocaleString()} {request.currency}</h5>
+                  
+                  {/* 🟡 NEW: Treasury Balance Warning */}
+                  {request.requestType !== 'income' && (() => {
+                    const totalBalance = companyAccounts.reduce((sum, acc) => sum + Number(acc.currentBalance ?? acc.balance ?? 0), 0);
+                    const isInsufficient = totalBalance < request.amount;
+                    const matchingAcc = companyAccounts.find(a => {
+                      const methodType = request.preferredPaymentMethod === 'instapay' ? 'instapay' 
+                        : request.preferredPaymentMethod === 'digital_wallet' ? 'wallet'
+                        : request.preferredPaymentMethod === 'bank_transfer' ? 'bank'
+                        : request.preferredPaymentMethod === 'cash' ? 'cash' : null;
+                      return methodType && a.type === methodType;
+                    });
+                    const matchingBalance = matchingAcc ? Number(matchingAcc.currentBalance ?? matchingAcc.balance ?? 0) : null;
+                    const isMatchingInsufficient = matchingBalance !== null && matchingBalance < request.amount;
+
+                    return (
+                      <div className={`p-3 rounded-xl border text-xs flex items-start gap-2.5 ${
+                        isInsufficient || isMatchingInsufficient
+                          ? 'bg-rose-50 border-rose-300 text-rose-900' 
+                          : 'bg-teal-50 border-teal-200 text-teal-900'
+                      }`}>
+                        <AlertTriangle className={`h-4 w-4 shrink-0 mt-0.5 ${
+                          isInsufficient || isMatchingInsufficient ? 'text-rose-600' : 'text-teal-600'
+                        }`} />
+                        <div className="space-y-1">
+                          <div className="font-bold">
+                            {isInsufficient 
+                              ? '⚠️ تنبيه: رصيد الخزينة قد لا يكفي لتنفيذ هذا الصرف!'
+                              : isMatchingInsufficient
+                              ? `⚠️ تنبيه: رصيد حساب ${matchingAcc?.name || 'الصرف'} قد لا يكفي`
+                              : '✅ رصيد الخزينة كافٍ لتنفيذ هذا الصرف'}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+                            <span>إجمالي الرصيد المتاح: <strong>{totalBalance.toLocaleString()} {request.currency}</strong></span>
+                            {matchingAcc && (
+                              <span>رصيد {matchingAcc.name}: <strong>{matchingBalance?.toLocaleString()} {request.currency}</strong></span>
+                            )}
+                            <span>المبلغ المطلوب: <strong>{request.amount.toLocaleString()} {request.currency}</strong></span>
+                          </div>
+                          {(isInsufficient || isMatchingInsufficient) && (
+                            <div className="text-[11px] font-bold text-rose-700 mt-1">
+                              يمكنك الاعتماد لكن قد يتعذر التنفيذ الفعلي عند الصرف لعدم كفاية الرصيد.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <input
                     type="text"
                     value={approvalNote}
