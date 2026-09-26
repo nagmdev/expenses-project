@@ -10,6 +10,7 @@ import {
   PaymentMethod,
   SUPPORTED_CURRENCIES
 } from '../types';
+import { compressImage } from '../utils/fileUpload';
 import { 
   Plane, 
   Plus, 
@@ -57,14 +58,23 @@ export const VisaManagement: React.FC = () => {
     organizations
   } = useApp();
 
+  // Modal states
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [selectedVisa, setSelectedVisa] = useState<VisaRequest | null>(null);
+
   // Search & Filter state
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedTypeFilter, setSelectedTypeFilter] = useState<string>('all');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<string>('all');
 
-  // Modal states
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [selectedVisa, setSelectedVisa] = useState<VisaRequest | null>(null);
+  // User Permissions
+  const isPrivilegedUser = currentRole === 'org_admin' || currentRole === 'finance' || currentRole === 'super_admin';
+  const canApprove = isPrivilegedUser || Boolean(
+    currentUser?.name && 
+    selectedVisa?.assignedApprover && 
+    currentUser.name.trim().toLowerCase().includes(selectedVisa.assignedApprover.trim().toLowerCase())
+  );
+  const canManagePayments = isPrivilegedUser;
 
   // Form State for New Visa Request
   const [travelerName, setTravelerName] = useState('');
@@ -165,6 +175,37 @@ export const VisaManagement: React.FC = () => {
     const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'];
     if (!allowedTypes.includes(file.type)) {
       setFormErrors(prev => ({ ...prev, visaAttachment: 'صيغة الملف غير مدعومة. يسمح فقط بـ PDF أو الصور (PNG, JPG)' }));
+      return;
+    }
+
+    // Auto-compress phone images before saving
+    if (file.type.startsWith('image/')) {
+      compressImage(file)
+        .then(compressed => {
+          setVisaAttachmentUrl(compressed.dataUrl);
+          setVisaAttachmentName(file.name);
+          setVisaAttachmentSize(compressed.byteSize);
+          setFormErrors(prev => {
+            const copy = { ...prev };
+            delete copy.visaAttachment;
+            return copy;
+          });
+        })
+        .catch(err => {
+          console.warn('[Visa Upload] Image compression fallback to FileReader:', err);
+          const reader = new FileReader();
+          reader.onload = () => {
+            setVisaAttachmentUrl(reader.result as string);
+            setVisaAttachmentName(file.name);
+            setVisaAttachmentSize(file.size);
+            setFormErrors(prev => {
+              const copy = { ...prev };
+              delete copy.visaAttachment;
+              return copy;
+            });
+          };
+          reader.readAsDataURL(file);
+        });
       return;
     }
 
@@ -389,10 +430,12 @@ export const VisaManagement: React.FC = () => {
           </div>
           <div>
             <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 tracking-tight">
-              إدارة طلبات وإصدار التأشيرات ومصروفاتها
+              {currentRole === 'employee' ? 'طلبات وإصدار التأشيرات' : 'إدارة طلبات وإصدار التأشيرات ومصروفاتها'}
             </h1>
             <p className="text-xs text-slate-500 font-medium mt-0.5">
-              متابعة إصدار التأشيرات، الموردين المعتمدين، واعتماد الصرف وجدول الأقساط
+              {currentRole === 'employee' 
+                ? 'تقديم طلبات استخراج التأشيرات، رفع وثائق السفر، ومتابعة حالة الاعتماد والدفعات' 
+                : 'متابعة إصدار التأشيرات، الموردين المعتمدين، واعتماد الصرف وجدول الأقساط'}
             </p>
           </div>
         </div>
@@ -1129,25 +1172,31 @@ export const VisaManagement: React.FC = () => {
                     </div>
                     
                     {/* Action buttons for Approver */}
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handleApprove(selectedVisa.id)}
-                        className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-2xs transition flex items-center gap-1 cursor-pointer"
-                      >
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        <span>اعتماد الطلب</span>
-                      </button>
+                    {canApprove ? (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleApprove(selectedVisa.id)}
+                          className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-2xs transition flex items-center gap-1 cursor-pointer"
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          <span>اعتماد الطلب</span>
+                        </button>
 
-                      <button
-                        type="button"
-                        onClick={() => setIsRejecting(!isRejecting)}
-                        className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-2xs transition flex items-center gap-1 cursor-pointer"
-                      >
-                        <XCircle className="h-3.5 w-3.5" />
-                        <span>رفض</span>
-                      </button>
-                    </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsRejecting(!isRejecting)}
+                          className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-2xs transition flex items-center gap-1 cursor-pointer"
+                        >
+                          <XCircle className="h-3.5 w-3.5" />
+                          <span>رفض</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-xs font-bold text-amber-800 bg-amber-100/80 px-2.5 py-1 rounded-lg">
+                        قيد انتظار الموافقة ⏳
+                      </span>
+                    )}
                   </div>
                 ) : selectedVisa.status === 'rejected' ? (
                   <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl space-y-1">
@@ -1257,7 +1306,7 @@ export const VisaManagement: React.FC = () => {
                     <span className="text-[11px] text-slate-400 block">
                       {selectedVisa.status === 'rejected' 
                         ? 'الطلب مرفوض، لا يمكن تسجيل أي مدفوعات مالية.' 
-                        : 'يتطلب اعتماد محمود أولاً لفتح إمكانية تسجيل المدفوعات والأقساط.'}
+                        : 'يتطلب اعتماد الإدارة أولاً لتفعيل تسجيل الصرف المالي والدفعات.'}
                     </span>
                   </div>
                 ) : (
@@ -1270,7 +1319,7 @@ export const VisaManagement: React.FC = () => {
                         سجل الدفعات المسددة ({selectedVisa.payments?.length || 0})
                       </span>
 
-                      {selectedVisa.remainingBalance > 0 && !isAddingPayment && (
+                      {canManagePayments && selectedVisa.remainingBalance > 0 && !isAddingPayment && (
                         <button
                           type="button"
                           onClick={() => {
@@ -1455,8 +1504,8 @@ export const VisaManagement: React.FC = () => {
                 إغلاق النافذة
               </button>
 
-              {/* Delete button (Super admin or requester) */}
-              {(currentRole === 'super_admin' || selectedVisa.requesterId === currentUser.id) && (
+              {/* Delete button (Super admin or requester while pending) */}
+              {(currentRole === 'super_admin' || (selectedVisa.requesterId === currentUser.id && selectedVisa.status === 'pending')) && (
                 <button
                   type="button"
                   onClick={async () => {
