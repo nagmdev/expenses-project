@@ -145,7 +145,7 @@ export interface TimelineEvent {
 
 export type PaymentMethod = 'instapay' | 'bank_transfer' | 'digital_wallet' | 'cash' | 'cheque' | 'wallet';
 
-export type RequestType = 'expense' | 'income';
+export type RequestType = 'expense' | 'income' | 'advance';
 
 export interface DisbursementDetails {
   disbursedAt: string;
@@ -181,18 +181,107 @@ export interface ExpenseRequest {
   currency: string;
   status: RequestStatus;
   urgency: 'low' | 'medium' | 'high';
-  requestType?: RequestType; // 'expense' (صرف - فلوس خارجة) أو 'income' (توريد / تحصيل مالي وارد)
+  requestType?: RequestType; // 'expense' (صرف) أو 'income' (توريد) أو 'advance' (سلفة)
   targetAccountId?: string; // الخزينة أو الحساب المالي المرتبط
   itemsDetail?: string; // تفاصيل البضاعة أو الأصناف (اسم الصنف، الكمية، السعر)
   isPrepaidByRequester?: boolean; // هل تم سداد المبلغ من الجيب الخاص مسبقاً (استرداد مصروفات / دفع شخصي)
   invoiceNumber?: string; // رقم الفاتورة أو الإيصال
   invoiceDate?: string; // تاريخ الفاتورة
   invoiceAttachment?: RequestAttachment; // المرفق الرئيسي للفاتورة أو إيصال السداد
+  // Loan & Advance specifics
+  installmentsCount?: number;
+  installmentAmount?: number;
+  settledAmount?: number;
   attachments: RequestAttachment[];
   comments: RequestComment[];
   timeline: TimelineEvent[];
   disbursement?: DisbursementDetails;
   rejectionReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ==========================================
+// VISA ISSUANCE & EXPENSE MODULE TYPES
+// ==========================================
+
+export type VisaType = 'tourist' | 'umrah_barcode' | 'external_umrah';
+
+export const VISA_TYPE_LABELS: Record<VisaType, string> = {
+  tourist: 'سياحية (Tourist)',
+  umrah_barcode: 'عمرة باركود (Umrah Barcode)',
+  external_umrah: 'عمرة خارجي (External Umrah)',
+};
+
+export type VisaStatus = 'pending' | 'approved' | 'partially_paid' | 'paid' | 'rejected';
+
+export const VISA_STATUS_LABELS: Record<VisaStatus, { label: string; color: string; bg: string }> = {
+  pending: { label: 'قيد الاعتماد', color: 'text-amber-700', bg: 'bg-amber-50 border-amber-200' },
+  approved: { label: 'معتمد (بانتظار السداد)', color: 'text-blue-700', bg: 'bg-blue-50 border-blue-200' },
+  partially_paid: { label: 'مسدد جزئياً', color: 'text-indigo-700', bg: 'bg-indigo-50 border-indigo-200' },
+  paid: { label: 'تم السداد بالكامل', color: 'text-emerald-700', bg: 'bg-emerald-50 border-emerald-200' },
+  rejected: { label: 'مرفوض', color: 'text-rose-700', bg: 'bg-rose-50 border-rose-200' },
+};
+
+export interface VisaPaymentRecord {
+  id: string;
+  visaRequestId: string;
+  amount: number;
+  currency: string;
+  date: string;
+  paymentMethod: PaymentMethod;
+  accountId?: string;
+  accountName?: string;
+  receiptReference?: string;
+  receiptUrl?: string;
+  receiptFileName?: string;
+  notes?: string;
+  recordedBy: string;
+  recordedByName?: string;
+  recordedAt: string;
+}
+
+export interface VisaRequest {
+  id: string;
+  requestNumber: string; // e.g. VISA-2026-0001
+  orgId: string;
+  requestDate: string; // System Timestamp / Read-only
+  
+  // Passenger / Traveler Information
+  travelerName: string;
+  passportNumber: string;
+  hasTraveledBefore: boolean;
+  expectedTravelDate: string; // YYYY-MM-DD (must be in future)
+  visaType: VisaType;
+  
+  // Service Provider & Processing
+  visaAttachmentUrl?: string;
+  visaAttachmentName?: string;
+  visaAttachmentSize?: number;
+  serviceProviderId: string;
+  serviceProviderName: string;
+  
+  // Approval Workflow
+  status: VisaStatus;
+  assignedApprover: string; // Assigned to "Mahmoud"
+  approvedBy?: string;
+  approvedByName?: string;
+  approvedAt?: string;
+  rejectionReason?: string;
+  
+  // Expense & Financial Processing
+  totalAmount: number;
+  currency: string;
+  paymentMode: 'full' | 'installments';
+  paidAmount: number;
+  remainingBalance: number;
+  payments: VisaPaymentRecord[];
+  
+  // Metadata & Audit
+  requesterId: string;
+  requesterName: string;
+  requesterEmail?: string;
+  notes?: string;
   createdAt: string;
   updatedAt: string;
 }

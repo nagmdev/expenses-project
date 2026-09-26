@@ -17,6 +17,7 @@ import { FirebaseConfigModal } from './components/FirebaseConfigModal';
 import { UserProfileModal } from './components/UserProfileModal';
 import { SettingsManagement } from './components/SettingsManagement';
 import { ProfileManagement } from './components/ProfileManagement';
+import { VisaManagement } from './components/VisaManagement';
 import { Sidebar } from './components/Sidebar';
 import { UsersManagement } from './components/UsersManagement';
 import { ExpenseRequest, SUPPORTED_CURRENCIES, Organization, OrganizationMember } from './types';
@@ -341,9 +342,11 @@ const MainApp: React.FC = () => {
               </div>
             </div>
           ) : currentRole === 'employee' ? (
-            /* Employee Experience: Dedicated Banking Tracker, Profile, or Petty Cash Custodies */
+            /* Employee Experience: Dedicated Banking Tracker, Profile, Visas, or Petty Cash Custodies */
             activeTab === 'profile' ? (
               <ProfileManagement />
+            ) : activeTab === 'visas' ? (
+              <VisaManagement />
             ) : activeTab === 'custody' ? (
               <CustodyManagement />
             ) : (
@@ -371,6 +374,10 @@ const MainApp: React.FC = () => {
                   onSelectRequest={setSelectedRequest}
                   onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
                 />
+              )}
+
+              {activeTab === 'visas' && (
+                <VisaManagement />
               )}
 
               {activeTab === 'my-requests' && (

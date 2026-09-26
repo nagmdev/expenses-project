@@ -25,7 +25,10 @@ import {
   PettyCashCustody,
   CustodySettlementItem,
   CustodyStatus,
-  TimelineEvent
+  TimelineEvent,
+  VisaRequest,
+  VisaPaymentRecord,
+  VisaStatus
 } from '../types';
 import { 
   DEFAULT_EMAIL_SETTINGS, 
@@ -80,14 +83,12 @@ export const resolveParentBankAccount = (
   if (!account || (account.type !== 'instapay' && account.type !== 'wallet')) {
     return null;
   }
-  // 1. Explicit parent account ID if set
+  // Strictly resolve explicit parent bank account to prevent deducting from the wrong account
   if (account.parentAccountId) {
     const parent = allAccounts.find(a => a.id === account.parentAccountId);
     if (parent && parent.id !== account.id) return parent;
   }
-  // 2. Intelligent fallback: find the primary active bank account of the same organization
-  const orgBank = allAccounts.find(a => a.orgId === account.orgId && a.type === 'bank' && a.id !== account.id);
-  return orgBank || null;
+  return null;
 };
 
 const STORAGE_KEYS = {
@@ -107,6 +108,7 @@ const STORAGE_KEYS = {
   ACCOUNT_TRANSACTIONS: 'expenses_account_transactions_v3',
   PETTY_CASH_CUSTODIES: 'expense_system_custodies',
   CUSTODY_SETTLEMENTS: 'expense_system_custody_settlements',
+  VISA_REQUESTS: 'expenses_visa_requests_v3',
 };
 
 // Immediate purge of all legacy v1 and v2 localStorage keys
@@ -393,6 +395,16 @@ interface AppContextType {
   sendTestEmail: (recipientEmail: string, templateType?: EmailEventType) => Promise<{ success: boolean; message: string }>;
   clearEmailLogs: () => Promise<void>;
 
+  // Visa Issuance & Expense Management (طلبات وإصدار التأشيرات ومصروفاتها)
+  visaRequests: VisaRequest[];
+  allVisaRequests: VisaRequest[];
+  createVisaRequest: (data: Omit<VisaRequest, 'id' | 'requestNumber' | 'status' | 'paidAmount' | 'remainingBalance' | 'payments' | 'createdAt' | 'updatedAt'>) => Promise<VisaRequest>;
+  updateVisaRequest: (id: string, updates: Partial<VisaRequest>) => Promise<void>;
+  approveVisaRequest: (id: string, approverName?: string) => Promise<void>;
+  rejectVisaRequest: (id: string, reason: string, approverName?: string) => Promise<void>;
+  addVisaPayment: (visaId: string, payment: Omit<VisaPaymentRecord, 'id' | 'visaRequestId' | 'recordedBy' | 'recordedByName' | 'recordedAt'>) => Promise<void>;
+  deleteVisaRequest: (id: string) => Promise<void>;
+
   refreshData: () => Promise<void>;
   resetToSampleData: () => void;
 }
@@ -432,6 +444,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [rawRequests, setRawRequests] = useState<ExpenseRequest[]>(() => {
     return safeGetLocal<ExpenseRequest[]>(STORAGE_KEYS.REQUESTS, []);
+  });
+
+  const [rawVisaRequests, setRawVisaRequests] = useState<VisaRequest[]>(() => {
+    return safeGetLocal<VisaRequest[]>(STORAGE_KEYS.VISA_REQUESTS, []);
   });
 
   const [rawAuditLogs, setRawAuditLogs] = useState<AuditLogEntry[]>(() => {
@@ -1065,6 +1081,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   }, [firebaseUser, resolvedRole, rawRequests, effectiveOrgId, userEmail, currentUser]);
 
+  const scopedVisaRequests = useMemo(() => {
+    if (!firebaseUser) return [];
+    let list: VisaRequest[] = [];
+    if (resolvedRole === 'super_admin') {
+      if (effectiveOrgId && effectiveOrgId !== 'all') {
+        list = rawVisaRequests.filter(r => r.orgId === effectiveOrgId || !r.orgId);
+      } else {
+        list = rawVisaRequests;
+      }
+    } else if (resolvedRole === 'org_admin' || resolvedRole === 'finance') {
+      list = rawVisaRequests.filter(r => r.orgId === effectiveOrgId || (!r.orgId && rawOrganizations[0]?.id === effectiveOrgId));
+    } else {
+      const myUid = firebaseUser?.uid;
+      const myEmail = userEmail.toLowerCase().trim();
+      list = rawVisaRequests.filter(r => {
+        return (
+          r.requesterId === myUid || 
+          r.requesterId === currentUser.id || 
+          (Boolean(r.requesterEmail && myEmail) && r.requesterEmail!.toLowerCase().trim() === myEmail)
+        );
+      });
+    }
+
+    return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [firebaseUser, resolvedRole, rawVisaRequests, effectiveOrgId, userEmail, currentUser, rawOrganizations]);
+
   const scopedPaymentAccounts = useMemo(() => {
     if (!firebaseUser) return [];
     if (resolvedRole === 'super_admin') {
@@ -1448,6 +1490,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }, handleListenerError('Requests by Raw Email')));
         }
       }
+    }
+
+    // 6b. Visa Requests Listener
+    const parseVisaSnap = (snapshot: any): VisaRequest[] => {
+      return snapshot.docs
+        .map((d: any) => ({ id: d.id, ...d.data() } as VisaRequest))
+        .filter((v: any) => !DUMMY_IDS.has(v.id) && !DUMMY_IDS.has(v.orgId));
+    };
+
+    const commitVisaRequests = (incomingList: VisaRequest[], shouldReplaceAll: boolean) => {
+      setRawVisaRequests(prev => {
+        const baseList = shouldReplaceAll ? incomingList : [...incomingList, ...prev];
+        const seenIds = new Set<string>();
+        const deduped: VisaRequest[] = [];
+        for (const item of baseList) {
+          if (!seenIds.has(item.id)) {
+            seenIds.add(item.id);
+            deduped.push(item);
+          }
+        }
+        safeSetLocal(STORAGE_KEYS.VISA_REQUESTS, deduped);
+        return deduped;
+      });
+    };
+
+    try {
+      if (isSuperAdmin) {
+        unsubs.push(onSnapshot(collection(db, 'visaRequests'), (snapshot) => {
+          commitVisaRequests(parseVisaSnap(snapshot), true);
+        }, handleListenerError('Visa Requests (Super Admin)')));
+      } else if ((resolvedRole === 'org_admin' || resolvedRole === 'finance') && effectiveOrgId) {
+        unsubs.push(onSnapshot(query(collection(db, 'visaRequests'), where('orgId', '==', effectiveOrgId)), (snapshot) => {
+          commitVisaRequests(parseVisaSnap(snapshot), true);
+        }, handleListenerError('Visa Requests (Org Admin/Finance)')));
+      } else {
+        unsubs.push(onSnapshot(query(collection(db, 'visaRequests'), where('requesterId', '==', firebaseUser.uid)), (snapshot) => {
+          commitVisaRequests(parseVisaSnap(snapshot), false);
+        }, handleListenerError('Visa Requests by UID')));
+      }
+    } catch (e) {
+      console.warn('[Firebase] Visa Requests listener setup warning:', e);
     }
 
     // 7. Payment Accounts Listener (Finance & Org Admin only)
@@ -2517,9 +2600,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    const memberId = memberData.userId ? `${memberData.userId}_${memberData.orgId}` : `mem-${Date.now()}`;
+    // 2. Resolve User ID (reuse existing userId if the same email exists in another org, else create stable usr_ id)
+    const existingUserAnywhere = rawMembers.find(m => m.userEmail?.trim().toLowerCase() === normalizedEmail);
+    const resolvedUserId = memberData.userId && !memberData.userId.startsWith('temp_')
+      ? memberData.userId
+      : (existingUserAnywhere ? existingUserAnywhere.userId : `usr_${Date.now()}`);
+
+    const memberId = `${resolvedUserId}_${memberData.orgId}`;
     const newMember: OrganizationMember = {
       ...memberData,
+      userId: resolvedUserId,
+      userEmail: normalizedEmail || '',
       id: memberId,
       joinedAt: new Date().toISOString().split('T')[0],
     };
@@ -4835,6 +4926,286 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // ==========================================
+  // VISA ISSUANCE & EXPENSE MANAGEMENT
+  // ==========================================
+
+  const createVisaRequest = async (
+    data: Omit<VisaRequest, 'id' | 'requestNumber' | 'status' | 'paidAmount' | 'remainingBalance' | 'payments' | 'createdAt' | 'updatedAt'>
+  ): Promise<VisaRequest> => {
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const countForYear = rawVisaRequests.filter(r => r.createdAt && r.createdAt.startsWith(String(currentYear))).length + 1;
+    const requestNumber = `VISA-${currentYear}-${String(countForYear).padStart(4, '0')}`;
+    const id = `visa_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+
+    const newVisa: VisaRequest = {
+      ...data,
+      id,
+      requestNumber,
+      status: 'pending',
+      paidAmount: 0,
+      remainingBalance: data.totalAmount,
+      payments: [],
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+
+    setRawVisaRequests(prev => {
+      const updated = [newVisa, ...prev];
+      safeSetLocal(STORAGE_KEYS.VISA_REQUESTS, updated);
+      return updated;
+    });
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('visaRequests', newVisa.id, newVisa);
+      } catch (err) {
+        console.error('[Firebase] Error saving visa request:', err);
+      }
+    }
+
+    await logAuditAction({
+      actionType: 'create',
+      entityType: 'visa_request' as any,
+      entityId: newVisa.id,
+      entityName: `طلب تأشيرة: ${newVisa.travelerName} (${newVisa.requestNumber})`,
+      orgId: newVisa.orgId,
+      details: `تم إنشاء طلب تأشيرة جديد للمسافر "${newVisa.travelerName}" برقم جواز (${newVisa.passportNumber}) بمبلغ ${newVisa.totalAmount.toLocaleString()} ${newVisa.currency} - المورد: ${newVisa.serviceProviderName}`,
+    });
+
+    return newVisa;
+  };
+
+  const updateVisaRequest = async (id: string, updates: Partial<VisaRequest>) => {
+    const now = new Date().toISOString();
+    let updatedVisa: VisaRequest | null = null;
+
+    setRawVisaRequests(prev => {
+      const list = prev.map(v => {
+        if (v.id !== id) return v;
+        const upd = { ...v, ...updates, updatedAt: now };
+        updatedVisa = upd;
+        return upd;
+      });
+      safeSetLocal(STORAGE_KEYS.VISA_REQUESTS, list);
+      return list;
+    });
+
+    if (updatedVisa && isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('visaRequests', id, updatedVisa);
+      } catch (err) {
+        console.error('[Firebase] Error updating visa request:', err);
+      }
+    }
+  };
+
+  const approveVisaRequest = async (id: string, approverName?: string) => {
+    const target = rawVisaRequests.find(v => v.id === id);
+    if (!target) return;
+
+    const finalApproverName = approverName || currentUser.name || 'محمود';
+    const now = new Date().toISOString();
+
+    const updates: Partial<VisaRequest> = {
+      status: target.paidAmount >= target.totalAmount ? 'paid' : (target.paidAmount > 0 ? 'partially_paid' : 'approved'),
+      approvedBy: currentUser.id,
+      approvedByName: finalApproverName,
+      approvedAt: now,
+      rejectionReason: undefined,
+      updatedAt: now,
+    };
+
+    await updateVisaRequest(id, updates);
+
+    await logAuditAction({
+      actionType: 'approve' as any,
+      entityType: 'visa_request' as any,
+      entityId: id,
+      entityName: `اعتماد تأشيرة: ${target.travelerName}`,
+      orgId: target.orgId,
+      details: `قام "${finalApproverName}" باعتماد طلب التأشيرة للمسافر "${target.travelerName}" (${target.requestNumber})`,
+    });
+  };
+
+  const rejectVisaRequest = async (id: string, reason: string, approverName?: string) => {
+    const target = rawVisaRequests.find(v => v.id === id);
+    if (!target) return;
+
+    const finalApproverName = approverName || currentUser.name || 'محمود';
+    const now = new Date().toISOString();
+
+    const updates: Partial<VisaRequest> = {
+      status: 'rejected',
+      approvedBy: currentUser.id,
+      approvedByName: finalApproverName,
+      approvedAt: now,
+      rejectionReason: reason.trim(),
+      updatedAt: now,
+    };
+
+    await updateVisaRequest(id, updates);
+
+    await logAuditAction({
+      actionType: 'reject' as any,
+      entityType: 'visa_request' as any,
+      entityId: id,
+      entityName: `رفض تأشيرة: ${target.travelerName}`,
+      orgId: target.orgId,
+      details: `تم رفض طلب التأشيرة للمسافر "${target.travelerName}" بسبب: "${reason}" بواسطة ${finalApproverName}`,
+    });
+  };
+
+  const addVisaPayment = async (
+    visaId: string, 
+    paymentData: Omit<VisaPaymentRecord, 'id' | 'visaRequestId' | 'recordedBy' | 'recordedByName' | 'recordedAt'>
+  ) => {
+    const target = rawVisaRequests.find(v => v.id === visaId);
+    if (!target) throw new Error('طلب التأشيرة غير موجود.');
+
+    if (target.status !== 'approved' && target.status !== 'partially_paid') {
+      throw new Error('لا يمكن تسجيل دفعات مالية إلا بعد اعتماد الطلب من الإدارة.');
+    }
+
+    if (paymentData.amount <= 0) {
+      throw new Error('مبلغ الدفعة يجب أن يكون أكبر من الصفر.');
+    }
+
+    const currentPaid = Number(target.paidAmount || 0);
+    const newTotalPaid = currentPaid + Number(paymentData.amount);
+
+    if (newTotalPaid > target.totalAmount) {
+      throw new Error(`إجمالي الدفعات المسددة (${newTotalPaid.toLocaleString()} ${target.currency}) لا يمكن أن يتجاوز إجمالي تكلفة التأشيرة (${target.totalAmount.toLocaleString()} ${target.currency}).`);
+    }
+
+    const now = new Date();
+    const paymentId = `vpay_${Date.now()}_${Math.floor(100 + Math.random() * 900)}`;
+    const newPayment: VisaPaymentRecord = {
+      ...paymentData,
+      id: paymentId,
+      visaRequestId: visaId,
+      recordedBy: currentUser.id,
+      recordedByName: currentUser.name,
+      recordedAt: now.toISOString(),
+    };
+
+    const newRemaining = Math.max(0, target.totalAmount - newTotalPaid);
+    const newStatus: VisaStatus = newRemaining === 0 ? 'paid' : 'partially_paid';
+
+    const updatedVisa: VisaRequest = {
+      ...target,
+      paidAmount: newTotalPaid,
+      remainingBalance: newRemaining,
+      status: newStatus,
+      payments: [...(target.payments || []), newPayment],
+      updatedAt: now.toISOString(),
+    };
+
+    setRawVisaRequests(prev => {
+      const list = prev.map(v => v.id === visaId ? updatedVisa : v);
+      safeSetLocal(STORAGE_KEYS.VISA_REQUESTS, list);
+      return list;
+    });
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await setFirestoreDoc('visaRequests', visaId, updatedVisa);
+      } catch (err) {
+        console.error('[Firebase] Error recording visa payment:', err);
+      }
+    }
+
+    // Deduct from Treasury Account if accountId provided
+    if (paymentData.accountId) {
+      try {
+        const sourceAcc = rawPaymentAccounts.find(a => a.id === paymentData.accountId);
+        if (sourceAcc) {
+          const curBal = Number(sourceAcc.currentBalance ?? sourceAcc.balance ?? 0);
+          const newBal = curBal - paymentData.amount;
+          const updatedAcc: PaymentAccount = {
+            ...sourceAcc,
+            currentBalance: newBal,
+            totalOut: Number(sourceAcc.totalOut || 0) + paymentData.amount,
+          };
+          setRawPaymentAccounts(prev => {
+            const list = prev.map(a => a.id === sourceAcc.id ? updatedAcc : a);
+            safeSetLocal(STORAGE_KEYS.PAYMENT_ACCOUNTS, list);
+            return list;
+          });
+          if (isFirebaseConfigured() && getDb()) {
+            await setFirestoreDoc('paymentAccounts', sourceAcc.id, updatedAcc);
+          }
+
+          const txn: AccountTransaction = {
+            id: `tx_visa_${paymentId}`,
+            accountId: sourceAcc.id,
+            accountName: sourceAcc.name,
+            orgId: target.orgId,
+            type: 'out',
+            amount: paymentData.amount,
+            balanceBefore: curBal,
+            balanceAfter: newBal,
+            referenceType: 'request',
+            referenceId: target.id,
+            referenceNumber: target.requestNumber,
+            description: `سداد دفعة تأشيرة للمسافر: ${target.travelerName} (${target.requestNumber})`,
+            actorName: currentUser.name,
+            actorId: currentUser.id,
+            createdAt: now.toISOString(),
+          };
+          setRawTransactions(prev => {
+            const list = [txn, ...prev];
+            safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, list);
+            return list;
+          });
+          if (isFirebaseConfigured() && getDb()) {
+            await setFirestoreDoc('transactions', txn.id, txn);
+          }
+        }
+      } catch (accErr) {
+        console.warn('[Treasury deduction for visa payment]', accErr);
+      }
+    }
+
+    await logAuditAction({
+      actionType: 'create',
+      entityType: 'payment' as any,
+      entityId: paymentId,
+      entityName: `دفعة تأشيرة: ${paymentData.amount} ${target.currency}`,
+      orgId: target.orgId,
+      details: `تم تسجيل سداد دفعة بقيمة ${paymentData.amount.toLocaleString()} ${target.currency} للمسافر "${target.travelerName}" (المتبقي: ${newRemaining.toLocaleString()} ${target.currency})`,
+    });
+  };
+
+  const deleteVisaRequest = async (id: string) => {
+    const target = rawVisaRequests.find(v => v.id === id);
+    setRawVisaRequests(prev => {
+      const list = prev.filter(v => v.id !== id);
+      safeSetLocal(STORAGE_KEYS.VISA_REQUESTS, list);
+      return list;
+    });
+
+    if (isFirebaseConfigured() && getDb()) {
+      try {
+        await deleteFirestoreDoc('visaRequests', id);
+      } catch (err) {
+        console.error('[Firebase] Error deleting visa request:', err);
+      }
+    }
+
+    if (target) {
+      await logAuditAction({
+        actionType: 'delete',
+        entityType: 'visa_request' as any,
+        entityId: id,
+        entityName: `حذف تأشيرة: ${target.travelerName}`,
+        orgId: target.orgId,
+        details: `تم حذف طلب التأشيرة الخاص بالمسافر "${target.travelerName}" (${target.requestNumber})`,
+      });
+    }
+  };
+
   const updateEmailSettings = async (partial: Partial<EmailNotificationSettings>) => {
     const updated = { ...emailSettings, ...partial };
     setEmailSettings(updated);
@@ -5140,6 +5511,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         requestClarification,
         replyClarification,
         disburseRequest,
+        visaRequests: scopedVisaRequests,
+        allVisaRequests: rawVisaRequests,
+        createVisaRequest,
+        updateVisaRequest,
+        approveVisaRequest,
+        rejectVisaRequest,
+        addVisaPayment,
+        deleteVisaRequest,
         paymentAccounts: scopedPaymentAccounts,
         allPaymentAccounts: rawPaymentAccounts,
         transactions: scopedTransactions,

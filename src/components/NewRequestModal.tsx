@@ -820,6 +820,19 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     const providerId = selectedProvider?.id || 'prov-direct-purchase';
     const providerName = selectedProvider?.name || 'شراء مباشر / بدون مورد محدد';
 
+    // 🟡 Validation: Service Budget Limit Check
+    if (selectedService && Number(selectedService.budgetLimit) > 0) {
+      const numericAmount = Number(amount);
+      const currentSpent = Number(selectedService.spentAmount || 0);
+      const remaining = Number(selectedService.budgetLimit) - currentSpent;
+      if (numericAmount > remaining) {
+        setFormError(`⚠️ الميزانية المتبقية لبند (${selectedService.name}): ${remaining.toLocaleString()} ${currency || 'EGP'}، ولا تكفي لتغطية مبلغ الطلب (${numericAmount.toLocaleString()}). يرجى تعديل المبلغ أو مراجعة الإدارة.`);
+        setFieldHighlight('amount');
+        amountInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+    }
+
     setSubmitting(true);
     try {
       await createRequest({

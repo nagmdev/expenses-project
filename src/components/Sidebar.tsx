@@ -14,6 +14,7 @@ import {
   Clock3, 
   UserCheck, 
   User as UserIcon,
+  Plane,
   X
 } from 'lucide-react';
 
@@ -129,6 +130,21 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = true, onClose }) => {
 
               <button
                 type="button"
+                onClick={() => { setActiveTab('visas'); onClose?.(); }}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                  activeTab === 'visas'
+                    ? 'bg-slate-100 text-slate-900 shadow-2xs font-extrabold'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <Plane className="h-4 w-4 text-slate-500" />
+                  <span>طلبات وإصدار التأشيرات</span>
+                </div>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => { setActiveTab('profile'); onClose?.(); }}
                 className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
                   activeTab === 'profile'
@@ -236,6 +252,22 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = true, onClose }) => {
                     <div className="flex items-center gap-2.5">
                       <CreditCard className="h-4 w-4 text-slate-500" />
                       <span>الخزائن وحسابات الدفع</span>
+                    </div>
+                  </button>
+
+                  {/* 6. Visa Requests & Expense Ledger */}
+                  <button
+                    type="button"
+                    onClick={() => { setActiveTab('visas'); onClose?.(); }}
+                    className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                      activeTab === 'visas'
+                        ? 'bg-slate-100 text-slate-900 shadow-2xs font-extrabold'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <Plane className="h-4 w-4 text-slate-500" />
+                      <span>طلبات وإصدار التأشيرات</span>
                     </div>
                   </button>
                 </div>
