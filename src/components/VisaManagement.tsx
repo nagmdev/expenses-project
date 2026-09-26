@@ -11,6 +11,7 @@ import {
   SUPPORTED_CURRENCIES
 } from '../types';
 import { compressImage } from '../utils/fileUpload';
+import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
 import { 
   Plane, 
   Plus, 
@@ -92,6 +93,7 @@ export const VisaManagement: React.FC = () => {
   const [visaAttachmentSize, setVisaAttachmentSize] = useState<number>(0);
   const [serviceProviderId, setServiceProviderId] = useState('');
   const [notes, setNotes] = useState('');
+  const [previewVisaDoc, setPreviewVisaDoc] = useState<InvoiceViewerAttachment | null>(null);
 
   // Validation & feedback state for create modal
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
@@ -935,18 +937,33 @@ export const VisaManagement: React.FC = () => {
                           <span className="text-[10px] text-slate-400">{(visaAttachmentSize / 1024).toFixed(1)} KB • جاهز للمراجعة</span>
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setVisaAttachmentUrl('');
-                          setVisaAttachmentName('');
-                          setVisaAttachmentSize(0);
-                        }}
-                        className="text-rose-500 hover:text-rose-700 p-1.5 rounded-lg hover:bg-rose-50 transition cursor-pointer"
-                        title="حذف المرفق"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setPreviewVisaDoc({
+                            url: visaAttachmentUrl,
+                            name: visaAttachmentName,
+                            size: `${(visaAttachmentSize / 1024).toFixed(1)} KB`,
+                            type: visaAttachmentName.toLowerCase().endsWith('.pdf') ? 'pdf' : 'jpg'
+                          })}
+                          className="text-teal-600 hover:text-teal-800 p-1.5 rounded-lg hover:bg-teal-50 transition cursor-pointer"
+                          title="معاينة المستند"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setVisaAttachmentUrl('');
+                            setVisaAttachmentName('');
+                            setVisaAttachmentSize(0);
+                          }}
+                          className="text-rose-500 hover:text-rose-700 p-1.5 rounded-lg hover:bg-rose-50 transition cursor-pointer"
+                          title="حذف المرفق"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
                     </div>
                   )}
                   {formErrors.visaAttachment && (
@@ -1297,15 +1314,19 @@ export const VisaManagement: React.FC = () => {
                       </span>
                     </div>
                     {selectedVisa.visaAttachmentUrl && (
-                      <a
-                        href={selectedVisa.visaAttachmentUrl}
-                        target="_blank"
-                        rel="noreferrer"
+                      <button
+                        type="button"
+                        onClick={() => setPreviewVisaDoc({
+                          url: selectedVisa.visaAttachmentUrl!,
+                          name: selectedVisa.visaAttachmentName || 'مستند_التأشيرة',
+                          size: selectedVisa.visaAttachmentSize ? `${(selectedVisa.visaAttachmentSize / 1024).toFixed(1)} KB` : undefined,
+                          type: selectedVisa.visaAttachmentName?.toLowerCase().endsWith('.pdf') ? 'pdf' : 'jpg'
+                        })}
                         className="px-3 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-700 font-bold text-xs rounded-lg transition flex items-center gap-1 cursor-pointer"
                       >
                         <Eye className="h-3.5 w-3.5" />
                         <span>معاينة</span>
-                      </a>
+                      </button>
                     )}
                   </div>
                 </div>
@@ -1698,6 +1719,13 @@ export const VisaManagement: React.FC = () => {
         </div>
       )}
 
+      {/* Visa Document In-App Lightbox Viewer */}
+      {previewVisaDoc && (
+        <InvoiceViewerModal
+          attachment={previewVisaDoc}
+          onClose={() => setPreviewVisaDoc(null)}
+        />
+      )}
     </div>
   );
 };

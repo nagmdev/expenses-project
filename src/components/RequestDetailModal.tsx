@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { processAndUploadInvoice } from '../utils/fileUpload';
 import { NewRequestModal } from './NewRequestModal';
+import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
 
 interface RequestDetailModalProps {
   request: ExpenseRequest | null;
@@ -51,6 +52,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
   const [isEditing, setIsEditing] = useState(false);
   const [activeAction, setActiveAction] = useState<'none' | 'approve' | 'reject' | 'clarify' | 'reply' | 'disburse'>('none');
+  const [previewInvoice, setPreviewInvoice] = useState<InvoiceViewerAttachment | null>(null);
 
   const isSuperAdmin = currentRole === 'super_admin' || currentUser.role === 'super_admin';
   const canEdit = request ? ((request.status === 'pending' || request.status === 'clarification_requested') &&
@@ -518,22 +520,37 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 <div className="pt-2 border-t border-amber-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="flex items-center gap-2.5 truncate">
                     {request.invoiceAttachment.url && (request.invoiceAttachment.type === 'png' || request.invoiceAttachment.type === 'jpg' || request.invoiceAttachment.type.startsWith('image/')) ? (
-                      <a
-                        href={request.invoiceAttachment.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block shrink-0"
+                      <button
+                        type="button"
+                        onClick={() => setPreviewInvoice({
+                          url: request.invoiceAttachment!.url,
+                          name: request.invoiceAttachment!.name,
+                          size: request.invoiceAttachment!.size,
+                          type: request.invoiceAttachment!.type
+                        })}
+                        className="block shrink-0 cursor-pointer group"
+                        title="معاينة الفاتورة بملء الشاشة"
                       >
                         <img 
                           src={request.invoiceAttachment.url} 
                           alt="فاتورة" 
-                          className="w-10 h-10 rounded-lg object-cover border border-amber-200 shadow-2xs hover:scale-105 transition" 
+                          className="w-10 h-10 rounded-lg object-cover border border-amber-200 shadow-2xs group-hover:scale-105 group-hover:border-amber-400 transition" 
                         />
-                      </a>
+                      </button>
                     ) : (
-                      <div className="w-10 h-10 rounded-lg bg-amber-100 text-amber-800 flex items-center justify-center font-bold text-xs shrink-0 border border-amber-200">
+                      <button
+                        type="button"
+                        onClick={() => request.invoiceAttachment?.url && setPreviewInvoice({
+                          url: request.invoiceAttachment.url,
+                          name: request.invoiceAttachment.name,
+                          size: request.invoiceAttachment.size,
+                          type: request.invoiceAttachment.type
+                        })}
+                        className="w-10 h-10 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-800 flex items-center justify-center font-bold text-xs shrink-0 border border-amber-200 cursor-pointer transition"
+                        title="معاينة ملف PDF"
+                      >
                         PDF
-                      </div>
+                      </button>
                     )}
                     <div className="min-w-0">
                       <span className="font-bold text-slate-800 text-xs truncate block max-w-xs">{request.invoiceAttachment.name}</span>
@@ -543,15 +560,19 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
                   <div className="flex items-center gap-2 shrink-0">
                     {request.invoiceAttachment.url && (
-                      <a
-                        href={request.invoiceAttachment.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs"
+                      <button
+                        type="button"
+                        onClick={() => setPreviewInvoice({
+                          url: request.invoiceAttachment!.url,
+                          name: request.invoiceAttachment!.name,
+                          size: request.invoiceAttachment!.size,
+                          type: request.invoiceAttachment!.type
+                        })}
+                        className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer"
                       >
                         <Eye className="h-3.5 w-3.5" />
-                        <span>معاينة الفاتورة ↗</span>
-                      </a>
+                        <span>معاينة الفاتورة</span>
+                      </button>
                     )}
                     <label className="cursor-pointer px-2.5 py-1 bg-white hover:bg-amber-50 text-amber-800 border border-amber-200 rounded-lg text-xs font-bold transition flex items-center gap-1">
                       {isUploadingInvoice ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
@@ -606,12 +627,34 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 <h4 className="font-bold text-slate-700 text-xs mb-2">المرفقات والفواتير ({realAttachments.length})</h4>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {realAttachments.map((att) => (
-                    <div key={att.id} className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs">
-                      <div className="flex items-center gap-2 truncate">
+                    <div 
+                      key={att.id} 
+                      className={`flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs transition ${
+                        att.url ? 'hover:border-emerald-300 hover:bg-emerald-50/40 cursor-pointer' : ''
+                      }`}
+                      onClick={() => {
+                        if (att.url) {
+                          setPreviewInvoice({
+                            url: att.url,
+                            name: att.name,
+                            size: att.size,
+                            type: att.type,
+                          });
+                        }
+                      }}
+                    >
+                      <div className="flex items-center gap-2 truncate min-w-0">
                         <FileText className="h-4 w-4 text-emerald-600 shrink-0" />
-                        <span className="font-medium text-slate-800 truncate">{att.name}</span>
+                        <span className="font-medium text-slate-800 truncate" title={att.name}>{att.name}</span>
                       </div>
-                      <span className="text-slate-400 text-[10px] shrink-0">{att.size}</span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-slate-400 text-[10px]">{att.size}</span>
+                        {att.url && (
+                          <span className="text-emerald-700 bg-emerald-100 p-1 rounded hover:bg-emerald-200 transition" title="معاينة الملف">
+                            <Eye className="h-3.5 w-3.5" />
+                          </span>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1168,6 +1211,14 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
           isOpen={isEditing}
           onClose={() => setIsEditing(false)}
           editingRequest={request}
+        />
+      )}
+
+      {/* Invoice and Document Full-Screen In-App Lightbox Viewer */}
+      {previewInvoice && (
+        <InvoiceViewerModal
+          attachment={previewInvoice}
+          onClose={() => setPreviewInvoice(null)}
         />
       )}
     </div>

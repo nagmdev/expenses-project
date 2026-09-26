@@ -89,9 +89,9 @@ export async function compressImage(
 }
 
 /**
- * Convert base64 DataURL to Blob for Firebase Storage upload
+ * Convert base64 DataURL to Blob
  */
-function dataUrlToBlob(dataUrl: string): Blob {
+export function dataUrlToBlob(dataUrl: string): Blob {
   const parts = dataUrl.split(',');
   const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
   const bstr = atob(parts[1]);
@@ -101,6 +101,60 @@ function dataUrlToBlob(dataUrl: string): Blob {
     u8arr[n] = bstr.charCodeAt(n);
   }
   return new Blob([u8arr], { type: mime });
+}
+
+/**
+ * Safely open any file/attachment in a new browser window/tab.
+ * If it's a base64 Data URL, converts it to an in-memory Blob URL first,
+ * completely avoiding modern Chromium's "Not allowed to navigate top frame to data URL" block.
+ */
+export function openFileSafely(url: string, fileName = 'document'): void {
+  if (!url) return;
+  if (url.startsWith('data:')) {
+    try {
+      const blob = dataUrlToBlob(url);
+      const blobUrl = URL.createObjectURL(blob);
+      const newWin = window.open(blobUrl, '_blank');
+      if (!newWin || newWin.closed || typeof newWin.closed === 'undefined') {
+        // Fallback if popup blocked
+        downloadFileSafely(url, fileName);
+      }
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 120000);
+      return;
+    } catch (err) {
+      console.warn('[openFileSafely] Blob URL generation failed, falling back:', err);
+    }
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+/**
+ * Safely trigger browser download for any file/attachment.
+ * Works seamlessly with both remote URLs and base64 Data URLs.
+ */
+export function downloadFileSafely(url: string, fileName = 'attachment'): void {
+  if (!url) return;
+  try {
+    let downloadHref = url;
+    let shouldRevoke = false;
+    if (url.startsWith('data:')) {
+      const blob = dataUrlToBlob(url);
+      downloadHref = URL.createObjectURL(blob);
+      shouldRevoke = true;
+    }
+    const a = document.createElement('a');
+    a.href = downloadHref;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    if (shouldRevoke) {
+      setTimeout(() => URL.revokeObjectURL(downloadHref), 45000);
+    }
+  } catch (err) {
+    console.error('[downloadFileSafely] Download failed:', err);
+    window.open(url, '_blank');
+  }
 }
 
 /**
@@ -167,6 +221,9 @@ export async function processAndUploadInvoice(
     if (fallbackDataUrl) {
       finalUrl = fallbackDataUrl;
     } else {
+      if (file.size > 800 * 1024) {
+        throw new Error(`حجم ملف المستند كبير (${formatFileSize(file.size)}). لضمان حفظ الملف بشكل دائم ومؤكد، يرجى رفع ملف PDF أقل من 750 كيلوبايت أو تصوير الفاتورة كصورة عادية (حيث تُضغط الصور تلقائياً لأعلى جودة وأصغر حجم).`);
+      }
       // Read raw as DataURL
       finalUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();

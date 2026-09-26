@@ -38,6 +38,7 @@ import {
   sanitizeAmount, 
   sanitizePhone 
 } from '../utils/validation';
+import { InvoiceViewerModal } from './InvoiceViewerModal';
 
 export const CustodyManagement: React.FC = () => {
   const {
@@ -1653,44 +1654,10 @@ export const CustodyManagement: React.FC = () => {
       {/* MODAL 5: معاينة الفاتورة أو المستند الإلكتروني */}
       {/* ========================================================================= */}
       {previewReceiptUrl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl max-w-xl w-full p-6 text-center">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
-              <h3 className="text-sm font-bold text-slate-900">معاينة مستند الفاتورة</h3>
-              <button
-                type="button"
-                onClick={() => setPreviewReceiptUrl(null)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded-xl hover:bg-slate-100 cursor-pointer"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="max-h-[70vh] overflow-auto flex items-center justify-center bg-slate-100 rounded-2xl p-2 border border-slate-200">
-              {previewReceiptUrl.startsWith('data:image') || previewReceiptUrl.includes('firebasestorage') || previewReceiptUrl.match(/\.(jpeg|jpg|gif|png|webp)/i) ? (
-                <img 
-                  src={previewReceiptUrl} 
-                  alt="مستند الفاتورة" 
-                  className="max-h-[60vh] max-w-full rounded-xl object-contain shadow-xs" 
-                />
-              ) : (
-                <div className="p-8 text-center">
-                  <FileText className="h-12 w-12 text-slate-400 mx-auto mb-2" />
-                  <p className="text-xs font-bold text-slate-700 mb-3">مستند خارجي أو ملف PDF</p>
-                  <a
-                    href={previewReceiptUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold"
-                  >
-                    <ExternalLink className="h-4 w-4" />
-                    <span>فتح الرابط في نافذة جديدة</span>
-                  </a>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+        <InvoiceViewerModal
+          attachment={{ url: previewReceiptUrl, name: 'مستند_إيصال_العهدة' }}
+          onClose={() => setPreviewReceiptUrl(null)}
+        />
       )}
 
     </div>

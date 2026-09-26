@@ -18,10 +18,12 @@ import {
   ShieldCheck,
   Receipt,
   Pencil,
-  Download
+  Download,
+  Eye
 } from 'lucide-react';
 import { ExpenseRequest } from '../types';
 import { NewRequestModal } from './NewRequestModal';
+import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
 
 interface RequesterTrackerProps {
   onOpenNewRequest: () => void;
@@ -39,6 +41,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
   const [replyText, setReplyText] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [previewInvoice, setPreviewInvoice] = useState<InvoiceViewerAttachment | null>(null);
 
   // Strictly filter to personal requests with absolute deduplication (Zero duplicates, Zero data leakage)
   const myRequests = React.useMemo(() => {
@@ -686,26 +689,53 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
 
                   {activeRequest.invoiceAttachment && (
                     <div className="bg-white p-3 rounded-xl border border-amber-200 flex items-center justify-between flex-wrap gap-2">
-                      <div className="flex items-center gap-2">
-                        <FileText className="h-5 w-5 text-amber-600" />
-                        <div>
-                          <div className="font-bold text-slate-800">{activeRequest.invoiceAttachment.name}</div>
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        {activeRequest.invoiceAttachment.url && (activeRequest.invoiceAttachment.type === 'png' || activeRequest.invoiceAttachment.type === 'jpg' || activeRequest.invoiceAttachment.type?.startsWith('image/')) ? (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewInvoice({
+                              url: activeRequest.invoiceAttachment!.url,
+                              name: activeRequest.invoiceAttachment!.name,
+                              size: activeRequest.invoiceAttachment!.size,
+                              type: activeRequest.invoiceAttachment!.type
+                            })}
+                            className="cursor-pointer group shrink-0"
+                            title="معاينة الفاتورة"
+                          >
+                            <img 
+                              src={activeRequest.invoiceAttachment.url} 
+                              alt="فاتورة" 
+                              className="w-10 h-10 rounded-lg object-cover border border-amber-200 shadow-2xs group-hover:scale-105 group-hover:border-amber-400 transition" 
+                            />
+                          </button>
+                        ) : (
+                          <div className="w-10 h-10 rounded-lg bg-amber-100 text-amber-800 flex items-center justify-center font-bold text-xs shrink-0 border border-amber-200">
+                            PDF
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <div className="font-bold text-slate-800 text-xs truncate max-w-xs">{activeRequest.invoiceAttachment.name}</div>
                           <div className="text-[10px] text-slate-400">
-                            {activeRequest.invoiceAttachment.size} • {activeRequest.invoiceAttachment.type}
+                            {activeRequest.invoiceAttachment.size} • {activeRequest.invoiceAttachment.type?.toUpperCase()}
                           </div>
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        <a
-                          href={activeRequest.invoiceAttachment.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          download={activeRequest.invoiceAttachment.name}
-                          className="inline-flex items-center gap-1 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-xs shadow-2xs transition"
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                          <span>تحميل / معاينة الفاتورة</span>
-                        </a>
+                        {activeRequest.invoiceAttachment.url && (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewInvoice({
+                              url: activeRequest.invoiceAttachment!.url,
+                              name: activeRequest.invoiceAttachment!.name,
+                              size: activeRequest.invoiceAttachment!.size,
+                              type: activeRequest.invoiceAttachment!.type
+                            })}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-xs shadow-2xs transition cursor-pointer"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            <span>معاينة وتكبير الفاتورة</span>
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}
@@ -716,6 +746,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
               {(() => {
                 const realAttachments = (activeRequest.attachments || []).filter(att => 
                   att && att.name && 
+                  (!activeRequest.invoiceAttachment || att.id !== activeRequest.invoiceAttachment.id) &&
                   !String(att.name).includes('فاتورة_عرض_سعر') && 
                   String(att.name).trim() !== 'fdvbgfbgfb' &&
                   String(att.name).trim().length > 0
@@ -728,11 +759,26 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                       {realAttachments.map((att) => (
                         <div
                           key={att.id}
-                          className="flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+                          className={`flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs transition ${
+                            att.url ? 'hover:border-emerald-300 hover:bg-emerald-50/40 cursor-pointer' : ''
+                          }`}
+                          onClick={() => {
+                            if (att.url) {
+                              setPreviewInvoice({
+                                url: att.url,
+                                name: att.name,
+                                size: att.size,
+                                type: att.type,
+                              });
+                            }
+                          }}
                         >
                           <FileText className="h-4 w-4 text-emerald-600" />
                           <span className="font-medium text-slate-800">{att.name}</span>
                           <span className="text-slate-400 text-[10px]">({att.size})</span>
+                          {att.url && (
+                            <Eye className="h-3.5 w-3.5 text-emerald-600 mr-1" />
+                          )}
                         </div>
                       ))}
                     </div>
@@ -780,6 +826,13 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
         />
       )}
 
+      {/* Invoice and Document Full-Screen In-App Lightbox Viewer */}
+      {previewInvoice && (
+        <InvoiceViewerModal
+          attachment={previewInvoice}
+          onClose={() => setPreviewInvoice(null)}
+        />
+      )}
     </div>
   );
 };

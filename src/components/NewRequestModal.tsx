@@ -25,6 +25,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { processAndUploadInvoice } from '../utils/fileUpload';
+import { InvoiceViewerModal } from './InvoiceViewerModal';
 import { 
   PaymentMethod, 
   SUPPORTED_CURRENCIES, 
@@ -1931,54 +1932,10 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
       {/* Preview Modal for Invoice Attachment */}
       {previewModalUrl && (
-        <div 
-          className="fixed inset-0 z-60 flex items-center justify-center bg-slate-950/80 backdrop-blur-xs p-4 animate-in fade-in"
-          onClick={() => setPreviewModalUrl(null)}
-        >
-          <div 
-            className="bg-white rounded-3xl max-w-3xl w-full max-h-[90vh] overflow-hidden shadow-2xl flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between p-4 border-b border-slate-200 bg-slate-50">
-              <div className="flex items-center gap-2">
-                <Receipt className="h-5 w-5 text-amber-600" />
-                <span className="font-bold text-slate-800 text-sm truncate max-w-md">{previewModalUrl.name}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <a
-                  href={previewModalUrl.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-3 py-1 text-xs font-bold text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 rounded-lg transition"
-                >
-                  فتح في نافذة منفصلة ↗
-                </a>
-                <button
-                  type="button"
-                  onClick={() => setPreviewModalUrl(null)}
-                  className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                >
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-            </div>
-            <div className="p-4 flex-1 overflow-auto flex items-center justify-center bg-slate-100 min-h-[300px]">
-              {previewModalUrl.type === 'pdf' || previewModalUrl.name.toLowerCase().endsWith('.pdf') ? (
-                <iframe
-                  src={previewModalUrl.url}
-                  title="PDF Preview"
-                  className="w-full h-[65vh] rounded-xl border border-slate-300"
-                />
-              ) : (
-                <img
-                  src={previewModalUrl.url}
-                  alt="Preview"
-                  className="max-h-[70vh] max-w-full object-contain rounded-xl shadow-md"
-                />
-              )}
-            </div>
-          </div>
-        </div>
+        <InvoiceViewerModal
+          attachment={previewModalUrl}
+          onClose={() => setPreviewModalUrl(null)}
+        />
       )}
     </div>
   );
