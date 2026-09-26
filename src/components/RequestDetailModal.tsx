@@ -22,8 +22,11 @@ import {
   Coins,
   Pencil,
   Receipt,
-  Eye
+  Eye,
+  Upload,
+  Loader2
 } from 'lucide-react';
+import { processAndUploadInvoice } from '../utils/fileUpload';
 import { NewRequestModal } from './NewRequestModal';
 
 interface RequestDetailModalProps {
@@ -36,6 +39,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
   const { 
     currentRole, 
     currentUser, 
+    updateRequest,
     approveRequest, 
     rejectRequest, 
     requestClarification, 
@@ -66,6 +70,35 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
   const [bankName, setBankName] = useState('المصرف الرئيسي');
   const [disbursementNotes, setDisbursementNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isUploadingInvoice, setIsUploadingInvoice] = useState(false);
+
+  const handleDirectInvoiceUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !request) return;
+
+    if (file.size > 15 * 1024 * 1024) {
+      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 15 ميجابايت');
+      return;
+    }
+
+    setIsUploadingInvoice(true);
+    try {
+      const att = await processAndUploadInvoice(file, request.orgId || 'org-main', request.id);
+      const otherAttachments = (request.attachments || []).filter(
+        a => !request.invoiceAttachment || a.id !== request.invoiceAttachment.id
+      );
+      await updateRequest(request.id, {
+        invoiceAttachment: att,
+        attachments: [att, ...otherAttachments],
+      });
+    } catch (err: any) {
+      console.error('[DirectInvoiceUpload]', err);
+      alert('تعذر إرفاق صورة الفاتورة: ' + (err?.message || 'خطأ غير متوقع'));
+    } finally {
+      setIsUploadingInvoice(false);
+      e.target.value = '';
+    }
+  };
 
   // Sync state whenever request changes
   useEffect(() => {
@@ -480,25 +513,80 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 )}
               </div>
 
-              {/* Invoice Attachment Preview / Link */}
-              {request.invoiceAttachment && (
-                <div className="pt-2 border-t border-amber-100 flex items-center justify-between">
-                  <div className="flex items-center gap-2 truncate">
-                    <FileText className="h-4 w-4 text-amber-600 shrink-0" />
-                    <span className="font-bold text-slate-800 text-xs truncate max-w-xs">{request.invoiceAttachment.name}</span>
-                    <span className="text-[10px] text-slate-400 font-mono">({request.invoiceAttachment.size})</span>
+              {/* Invoice Attachment Preview / Action */}
+              {request.invoiceAttachment ? (
+                <div className="pt-2 border-t border-amber-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 truncate">
+                    {request.invoiceAttachment.url && (request.invoiceAttachment.type === 'png' || request.invoiceAttachment.type === 'jpg' || request.invoiceAttachment.type.startsWith('image/')) ? (
+                      <a
+                        href={request.invoiceAttachment.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block shrink-0"
+                      >
+                        <img 
+                          src={request.invoiceAttachment.url} 
+                          alt="فاتورة" 
+                          className="w-10 h-10 rounded-lg object-cover border border-amber-200 shadow-2xs hover:scale-105 transition" 
+                        />
+                      </a>
+                    ) : (
+                      <div className="w-10 h-10 rounded-lg bg-amber-100 text-amber-800 flex items-center justify-center font-bold text-xs shrink-0 border border-amber-200">
+                        PDF
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <span className="font-bold text-slate-800 text-xs truncate block max-w-xs">{request.invoiceAttachment.name}</span>
+                      <span className="text-[10px] text-slate-400 font-mono">حجم الملف: {request.invoiceAttachment.size}</span>
+                    </div>
                   </div>
-                  {request.invoiceAttachment.url && (
-                    <a
-                      href={request.invoiceAttachment.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shrink-0"
-                    >
-                      <Eye className="h-3.5 w-3.5" />
-                      <span>معاينة الفاتورة ↗</span>
-                    </a>
-                  )}
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {request.invoiceAttachment.url && (
+                      <a
+                        href={request.invoiceAttachment.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs"
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        <span>معاينة الفاتورة ↗</span>
+                      </a>
+                    )}
+                    <label className="cursor-pointer px-2.5 py-1 bg-white hover:bg-amber-50 text-amber-800 border border-amber-200 rounded-lg text-xs font-bold transition flex items-center gap-1">
+                      {isUploadingInvoice ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+                      <span>تحديث</span>
+                      <input
+                        type="file"
+                        disabled={isUploadingInvoice}
+                        accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+                        onChange={handleDirectInvoiceUpload}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+                </div>
+              ) : (
+                <div className="pt-2 border-t border-amber-100 flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-slate-500">
+                    <FileText className="h-4 w-4 text-amber-600/70 shrink-0" />
+                    <span className="text-xs">مستند الفاتورة: لم يتم إرفاق ملف بعد (اختياري)</span>
+                  </div>
+                  <label className="cursor-pointer px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-2xs">
+                    {isUploadingInvoice ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-800" />
+                    ) : (
+                      <Upload className="h-3.5 w-3.5 text-amber-800" />
+                    )}
+                    <span>{isUploadingInvoice ? 'جاري الرفع...' : 'إرفاق صورة الفاتورة الآن'}</span>
+                    <input
+                      type="file"
+                      disabled={isUploadingInvoice}
+                      accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+                      onChange={handleDirectInvoiceUpload}
+                      className="hidden"
+                    />
+                  </label>
                 </div>
               )}
             </div>

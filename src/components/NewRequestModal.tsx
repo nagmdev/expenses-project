@@ -21,8 +21,10 @@ import {
   Eye,
   Paperclip,
   Calendar,
-  Hash
+  Hash,
+  Loader2
 } from 'lucide-react';
+import { processAndUploadInvoice } from '../utils/fileUpload';
 import { 
   PaymentMethod, 
   SUPPORTED_CURRENCIES, 
@@ -318,43 +320,29 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [invoiceDate, setInvoiceDate] = useState<string>('');
   const [invoiceAttachment, setInvoiceAttachment] = useState<RequestAttachment | null>(null);
   const [previewModalUrl, setPreviewModalUrl] = useState<{ url: string; name: string; type: string } | null>(null);
+  const [isUploadingInvoice, setIsUploadingInvoice] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 10 * 1024 * 1024) {
-      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 10 ميجابايت');
+    if (file.size > 15 * 1024 * 1024) {
+      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 15 ميجابايت');
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result as string;
-      const formatSize = (bytes: number) => {
-        if (bytes < 1024) return `${bytes} B`;
-        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-      };
-
-      const now = new Date();
-      const dateFormatted = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-
-      const newAttachment: RequestAttachment = {
-        id: `att-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-        name: file.name,
-        size: formatSize(file.size),
-        type: file.type.includes('pdf') ? 'pdf' : (file.type.includes('png') ? 'png' : 'jpg'),
-        url: dataUrl,
-        uploadedAt: dateFormatted,
-      };
-
-      setInvoiceAttachment(newAttachment);
-    };
-
-    reader.readAsDataURL(file);
-    e.target.value = '';
+    setIsUploadingInvoice(true);
+    try {
+      const attachment = await processAndUploadInvoice(file, selectedOrgId || 'org-main');
+      setInvoiceAttachment(attachment);
+    } catch (err: any) {
+      console.error('[FileUpload Error]', err);
+      alert(err?.message || 'تعذر معالجة أو رفع الملف، يرجى المحاولة ثانية');
+    } finally {
+      setIsUploadingInvoice(false);
+      e.target.value = '';
+    }
   };
 
   // Helper to get auto-fill details from profile for a given payment method
@@ -1541,31 +1529,39 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                     {!invoiceAttachment ? (
                       <div 
-                        onClick={() => fileInputRef.current?.click()}
-                        className="border-2 border-dashed border-slate-200 hover:border-teal-500 bg-slate-50/60 hover:bg-teal-50/30 rounded-2xl p-6 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-2 group"
+                        onClick={() => !isUploadingInvoice && fileInputRef.current?.click()}
+                        className={`border-2 border-dashed border-slate-200 hover:border-teal-500 bg-slate-50/60 hover:bg-teal-50/30 rounded-2xl p-6 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-2 group ${
+                          isUploadingInvoice ? 'opacity-70 pointer-events-none' : ''
+                        }`}
                       >
                         <div className="w-12 h-12 rounded-2xl bg-teal-50 group-hover:bg-teal-100 text-teal-700 flex items-center justify-center transition-colors shadow-2xs">
-                          <Upload className="h-5 w-5" />
+                          {isUploadingInvoice ? (
+                            <Loader2 className="h-5 w-5 animate-spin" />
+                          ) : (
+                            <Upload className="h-5 w-5" />
+                          )}
                         </div>
                         <div className="space-y-0.5">
                           <span className="text-xs font-bold text-slate-800 block group-hover:text-teal-900 transition-colors">
-                            انقر هنا لرفع صورة الفاتورة أو إيصال السداد
+                            {isUploadingInvoice ? 'جاري ضغط ورفع مستند الفاتورة...' : 'انقر هنا لرفع صورة الفاتورة أو إيصال السداد'}
                           </span>
                           <span className="text-[11px] text-slate-500 block">
                             يدعم ملفات الصور (JPG, PNG) والمستندات الإلكترونية (PDF)
                           </span>
                         </div>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            fileInputRef.current?.click();
-                          }}
-                          className="mt-1 px-4 py-1.5 bg-white hover:bg-slate-50 text-slate-700 hover:text-slate-900 font-bold text-xs rounded-xl border border-slate-200 shadow-2xs transition flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <Paperclip className="h-3.5 w-3.5 text-slate-500" />
-                          <span>اختيار ملف من جهازك</span>
-                        </button>
+                        {!isUploadingInvoice && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              fileInputRef.current?.click();
+                            }}
+                            className="mt-1 px-4 py-1.5 bg-white hover:bg-slate-50 text-slate-700 hover:text-slate-900 font-bold text-xs rounded-xl border border-slate-200 shadow-2xs transition flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Paperclip className="h-3.5 w-3.5 text-slate-500" />
+                            <span>اختيار ملف من جهازك</span>
+                          </button>
+                        )}
                       </div>
                     ) : (
                       <div className="bg-white border-2 border-teal-300 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">

@@ -36,6 +36,13 @@ import {
   type Unsubscribe,
   type CollectionReference,
 } from 'firebase/firestore';
+import {
+  getStorage,
+  ref,
+  uploadBytes,
+  getDownloadURL,
+  type FirebaseStorage
+} from 'firebase/storage';
 
 export interface FirebaseConfig {
   apiKey: string;
@@ -148,23 +155,25 @@ export function isFirebaseConfigured(): boolean {
 // Singleton instances
 let appInstance: FirebaseApp | null = null;
 let dbInstance: Firestore | null = null;
+let storageInstance: FirebaseStorage | null = null;
 let currentConfigString = '';
 
 /**
  * Initialize or retrieve Firebase and Firestore instances
  */
-export function initFirebase(): { app: FirebaseApp | null; db: Firestore | null } {
+export function initFirebase(): { app: FirebaseApp | null; db: Firestore | null; storage: FirebaseStorage | null } {
   const config = getFirebaseConfig();
   if (!config || !config.apiKey || !config.projectId) {
     appInstance = null;
     dbInstance = null;
+    storageInstance = null;
     currentConfigString = '';
-    return { app: null, db: null };
+    return { app: null, db: null, storage: null };
   }
 
   const newConfigString = JSON.stringify(config);
   if (appInstance && dbInstance && currentConfigString === newConfigString) {
-    return { app: appInstance, db: dbInstance };
+    return { app: appInstance, db: dbInstance, storage: storageInstance };
   }
 
   try {
@@ -175,11 +184,17 @@ export function initFirebase(): { app: FirebaseApp | null; db: Firestore | null 
       appInstance = initializeApp(config as FirebaseOptions);
     }
     dbInstance = getFirestore(appInstance);
+    try {
+      storageInstance = getStorage(appInstance);
+    } catch (storageErr) {
+      console.warn('[Firebase] Storage initialization notice:', storageErr);
+      storageInstance = null;
+    }
     currentConfigString = newConfigString;
-    return { app: appInstance, db: dbInstance };
+    return { app: appInstance, db: dbInstance, storage: storageInstance };
   } catch (err) {
     console.error('[Firebase] Failed to initialize Firebase app:', err);
-    return { app: null, db: null };
+    return { app: null, db: null, storage: null };
   }
 }
 
@@ -195,12 +210,21 @@ export async function resetFirebaseApp(): Promise<void> {
   }
   appInstance = null;
   dbInstance = null;
+  storageInstance = null;
   currentConfigString = '';
 }
 
 // Initial bootstrap
-const { app, db } = initFirebase();
-export { app, db };
+const { app, db, storage } = initFirebase();
+export { app, db, storage };
+
+export function getStorageInstance(): FirebaseStorage | null {
+  if (storageInstance) return storageInstance;
+  const { storage: s } = initFirebase();
+  return s;
+}
+
+export { ref, uploadBytes, getDownloadURL };
 
 // Firebase Authentication
 export const auth = app ? getAuth(app) : getAuth();
