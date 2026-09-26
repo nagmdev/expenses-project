@@ -2506,6 +2506,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // 2. MEMBERS
   const addMember = async (memberData: Omit<OrganizationMember, 'id' | 'joinedAt'>) => {
+    // 🔴 FIX: Check for duplicate email in the same org BEFORE creating
+    const normalizedEmail = memberData.userEmail?.toLowerCase().trim();
+    if (normalizedEmail) {
+      const existingInOrg = rawMembers.find(m => 
+        m.userEmail?.toLowerCase().trim() === normalizedEmail && m.orgId === memberData.orgId
+      );
+      if (existingInOrg) {
+        throw new Error(`البريد الإلكتروني (${memberData.userEmail}) مسجل بالفعل في هذه المؤسسة باسم "${existingInOrg.userName}"`);
+      }
+    }
+
     const memberId = memberData.userId ? `${memberData.userId}_${memberData.orgId}` : `mem-${Date.now()}`;
     const newMember: OrganizationMember = {
       ...memberData,
@@ -2593,20 +2604,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (isFirebaseConfigured() && getDb()) {
       try {
         await updateFirestoreDoc('members', memberId, updatedMember);
-        if (mem.userId) {
-          await setFirestoreDoc('users', mem.userId, {
-            orgId: updatedMember.orgId,
-            role: updatedMember.role,
-            userName: updatedMember.userName,
-            phone: updatedMember.phone || '',
-            instapay: updatedMember.instapay || '',
-            wallet: updatedMember.wallet || '',
-            walletProvider: updatedMember.walletProvider || '',
-            bankName: updatedMember.bankName || '',
-            iban: updatedMember.iban || '',
-            preferredPaymentMethod: updatedMember.preferredPaymentMethod || 'instapay',
-            updatedAt: updatedMember.updatedAt
-          });
+        
+        // Update the user profile document with the new role
+        const userDocPayload = {
+          orgId: updatedMember.orgId,
+          role: updatedMember.role,
+          userName: updatedMember.userName,
+          phone: updatedMember.phone || '',
+          instapay: updatedMember.instapay || '',
+          wallet: updatedMember.wallet || '',
+          walletProvider: updatedMember.walletProvider || '',
+          bankName: updatedMember.bankName || '',
+          iban: updatedMember.iban || '',
+          preferredPaymentMethod: updatedMember.preferredPaymentMethod || 'instapay',
+          updatedAt: updatedMember.updatedAt
+        };
+
+        if (mem.userId && !mem.userId.startsWith('temp_')) {
+          // Real Firebase UID — update directly
+          await setFirestoreDoc('users', mem.userId, userDocPayload);
+        } else if (updatedMember.userEmail) {
+          // 🔴 FIX: temp_ userId means user was provisioned before login.
+          // Search for real user doc by email and update that too.
+          try {
+            const { db } = initFirebase();
+            if (db) {
+              const usersSnap = await getDocs(query(collection(db, 'users'), where('email', '==', updatedMember.userEmail.toLowerCase().trim())));
+              if (!usersSnap.empty) {
+                for (const userDoc of usersSnap.docs) {
+                  await setFirestoreDoc('users', userDoc.id, userDocPayload);
+                  // Also fix the member record's userId to the real UID for future updates
+                  if (userDoc.id !== mem.userId) {
+                    updatedMember.userId = userDoc.id;
+                    await updateFirestoreDoc('members', memberId, { userId: userDoc.id });
+                  }
+                }
+              }
+            }
+          } catch (emailErr) {
+            console.warn('[Firebase] Could not find user by email for role update:', emailErr);
+          }
         }
       } catch (err) {
         console.error('[Firebase] Error updating member:', err);

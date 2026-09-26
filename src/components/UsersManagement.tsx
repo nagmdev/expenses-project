@@ -230,6 +230,24 @@ export const UsersManagement: React.FC = () => {
       return;
     }
 
+    // 🔴 FIX: Duplicate email check — prevent adding the same email twice
+    const normalizedEmail = provEmail.trim().toLowerCase();
+    const existingMember = members.find(m => 
+      m.userEmail?.toLowerCase().trim() === normalizedEmail && m.orgId === targetOrgId
+    );
+    if (existingMember) {
+      setProvError(`هذا البريد الإلكتروني (${provEmail}) مسجل بالفعل باسم "${existingMember.userName}" في هذه المؤسسة. لا يمكن إضافته مرة أخرى.`);
+      return;
+    }
+    // Also check across ALL orgs for awareness
+    const existingAnywhere = members.find(m => 
+      m.userEmail?.toLowerCase().trim() === normalizedEmail && m.orgId !== targetOrgId
+    );
+    if (existingAnywhere) {
+      // Allow but warn — user might belong to multiple orgs
+      console.warn(`[Users] Email ${normalizedEmail} exists in another org (${existingAnywhere.orgId}), adding to ${targetOrgId}`);
+    }
+
     setIsProvisioning(true);
     try {
       const isSuper = provRole === 'super_admin';
