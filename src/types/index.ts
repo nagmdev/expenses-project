@@ -205,12 +205,21 @@ export interface ExpenseRequest {
 // VISA ISSUANCE & EXPENSE MODULE TYPES
 // ==========================================
 
-export type VisaType = 'tourist' | 'umrah_barcode' | 'external_umrah';
+export type VisaType = 
+  | 'tourist' 
+  | 'umrah_barcode' 
+  | 'external_umrah'
+  | 'work'
+  | 'family_visit'
+  | 'transit';
 
 export const VISA_TYPE_LABELS: Record<VisaType, string> = {
   tourist: 'سياحية (Tourist)',
   umrah_barcode: 'عمرة باركود (Umrah Barcode)',
   external_umrah: 'عمرة خارجي (External Umrah)',
+  work: 'عمل / إقامة (Work / Residence)',
+  family_visit: 'زيارة عائلية / شخصية (Family Visit)',
+  transit: 'ترانزيت / مرور (Transit)',
 };
 
 export type VisaStatus = 'pending' | 'approved' | 'partially_paid' | 'paid' | 'rejected';
@@ -250,6 +259,7 @@ export interface VisaRequest {
   // Passenger / Traveler Information
   travelerName: string;
   passportNumber: string;
+  destinationCountry: string; // البلد (الوجهة)
   hasTraveledBefore: boolean;
   expectedTravelDate: string; // YYYY-MM-DD (must be in future)
   visaType: VisaType;
@@ -270,7 +280,8 @@ export interface VisaRequest {
   rejectionReason?: string;
   
   // Expense & Financial Processing
-  totalAmount: number;
+  totalAmount: number; // تكلفة التأشيرة الإجمالية
+  initialPayment?: number; // دفعة السداد (المطلوب سدادها)
   currency: string;
   paymentMode: 'full' | 'installments';
   paidAmount: number;

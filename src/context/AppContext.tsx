@@ -4971,7 +4971,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       entityId: newVisa.id,
       entityName: `طلب تأشيرة: ${newVisa.travelerName} (${newVisa.requestNumber})`,
       orgId: newVisa.orgId,
-      details: `تم إنشاء طلب تأشيرة جديد للمسافر "${newVisa.travelerName}" برقم جواز (${newVisa.passportNumber}) بمبلغ ${newVisa.totalAmount.toLocaleString()} ${newVisa.currency} - المورد: ${newVisa.serviceProviderName}`,
+      details: `تم إنشاء طلب تأشيرة جديد للمسافر "${newVisa.travelerName}" برقم جواز (${newVisa.passportNumber}) إلى (${newVisa.destinationCountry || 'غير محدد'}) بمبلغ ${newVisa.totalAmount.toLocaleString()} ${newVisa.currency} - المورد: ${newVisa.serviceProviderName}`,
     });
 
     return newVisa;

@@ -79,10 +79,12 @@ export const VisaManagement: React.FC = () => {
   // Form State for New Visa Request
   const [travelerName, setTravelerName] = useState('');
   const [passportNumber, setPassportNumber] = useState('');
+  const [destinationCountry, setDestinationCountry] = useState('');
   const [hasTraveledBefore, setHasTraveledBefore] = useState(false);
   const [expectedTravelDate, setExpectedTravelDate] = useState('');
   const [visaType, setVisaType] = useState<VisaType>('tourist');
   const [totalAmount, setTotalAmount] = useState<number | ''>('');
+  const [initialPayment, setInitialPayment] = useState<number | ''>('');
   const [currency, setCurrency] = useState('EGP');
   const [paymentMode, setPaymentMode] = useState<'full' | 'installments'>('full');
   const [visaAttachmentUrl, setVisaAttachmentUrl] = useState<string>('');
@@ -126,6 +128,7 @@ export const VisaManagement: React.FC = () => {
         !searchTerm.trim() ||
         req.travelerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
         req.passportNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (req.destinationCountry && req.destinationCountry.toLowerCase().includes(searchTerm.toLowerCase())) ||
         req.requestNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
         req.serviceProviderName.toLowerCase().includes(searchTerm.toLowerCase());
 
@@ -227,10 +230,12 @@ export const VisaManagement: React.FC = () => {
   const resetCreateForm = () => {
     setTravelerName('');
     setPassportNumber('');
+    setDestinationCountry('');
     setHasTraveledBefore(false);
     setExpectedTravelDate('');
     setVisaType('tourist');
     setTotalAmount('');
+    setInitialPayment('');
     setCurrency('EGP');
     setPaymentMode('full');
     setVisaAttachmentUrl('');
@@ -246,38 +251,55 @@ export const VisaManagement: React.FC = () => {
     e.preventDefault();
     const errors: Record<string, string> = {};
 
-    // 1. Traveler Name
+    // 1. Traveler Name (إجباري)
     if (!travelerName.trim()) {
-      errors.travelerName = 'يرجى إدخال اسم المسافر بالكامل';
+      errors.travelerName = 'يرجى إدخال اسم المسافر بالكامل (إجباري)';
     }
 
-    // 2. Passport Number
+    // 2. Passport Number (رقم الباسبور - إجباري)
     if (!passportNumber.trim()) {
-      errors.passportNumber = 'يرجى إدخال رقم جواز السفر';
+      errors.passportNumber = 'رقم جواز السفر مطلوب للمسافر (إجباري)';
     } else if (!validatePassport(passportNumber)) {
       errors.passportNumber = 'رقم جواز السفر غير صالح (يجب أن يتكون من 6-12 حرفاً ورقم بدون رموز)';
     }
 
-    // 3. Expected Travel Date (Must be future)
+    // 3. Destination Country (البلد / الوجهة - إجباري)
+    if (!destinationCountry.trim()) {
+      errors.destinationCountry = 'البلد (الوجهة) مطلوبة للمسافر (إجباري)';
+    }
+
+    // 4. Visa Type (نوع التأشيرة - إجباري)
+    if (!visaType) {
+      errors.visaType = 'نوع التأشيرة مطلوب (إجباري)';
+    }
+
+    // 5. Expected Travel Date (تاريخ السفر المتوقع - إجباري)
     if (!expectedTravelDate) {
-      errors.expectedTravelDate = 'يرجى تحديد تاريخ السفر المتوقع';
+      errors.expectedTravelDate = 'يرجى تحديد تاريخ السفر المتوقع (إجباري)';
     } else if (expectedTravelDate <= todayStr) {
       errors.expectedTravelDate = 'تاريخ السفر يجب أن يكون في المستقبل (بعد اليوم)';
     }
 
-    // 4. Visa File Upload (Mandatory before submission)
+    // 6. Visa File Upload (صورة مستند التأشيرة أو الجواز - إجباري)
     if (!visaAttachmentUrl) {
-      errors.visaAttachment = 'مرفق التأشيرة/الجواز مطلوب قبل إتمام تسجيل الطلب';
+      errors.visaAttachment = 'صورة مستند التأشيرة أو الجواز مطلوبة (إجباري)';
     }
 
-    // 5. Service Provider
+    // 7. Service Provider (مورد التأشيرات المختص - إجباري)
     if (!serviceProviderId) {
-      errors.serviceProviderId = 'يرجى اختيار مورد التأشيرات المختص';
+      errors.serviceProviderId = 'يرجى اختيار مورد التأشيرات المختص (إجباري)';
     }
 
-    // 6. Total Amount
+    // 8. Total Amount (تكلفة التأشيرة الإجمالية - إجباري)
     if (!totalAmount || Number(totalAmount) <= 0) {
-      errors.totalAmount = 'يرجى إدخال تكلفة التأشيرة الصحيحة (> 0)';
+      errors.totalAmount = 'تكلفة التأشيرة الإجمالية مطلوبة ويجب أن تكون أكبر من 0 (إجباري)';
+    }
+
+    // 9. Initial Payment (دفعة السداد - إجباري)
+    if (!initialPayment || Number(initialPayment) <= 0) {
+      errors.initialPayment = 'قيمة دفعة السداد مطلوبة ويجب أن تكون أكبر من 0 (إجباري)';
+    } else if (totalAmount && Number(initialPayment) > Number(totalAmount)) {
+      errors.initialPayment = 'قيمة دفعة السداد لا يمكن أن تتجاوز تكلفة التأشيرة الإجمالية';
     }
 
     if (Object.keys(errors).length > 0) {
@@ -295,6 +317,7 @@ export const VisaManagement: React.FC = () => {
         requestDate: new Date().toISOString(),
         travelerName: travelerName.trim(),
         passportNumber: passportNumber.trim().toUpperCase(),
+        destinationCountry: destinationCountry.trim(),
         hasTraveledBefore,
         expectedTravelDate,
         visaType,
@@ -305,6 +328,7 @@ export const VisaManagement: React.FC = () => {
         serviceProviderName: selectedProviderObj?.name || 'مورد تأشيرات معتمد',
         assignedApprover: 'محمود', // Explicitly assigned to Mahmoud
         totalAmount: Number(totalAmount),
+        initialPayment: Number(initialPayment),
         currency,
         paymentMode,
         requesterId: currentUser.id,
@@ -602,14 +626,21 @@ export const VisaManagement: React.FC = () => {
                       </td>
                       <td className="py-3 px-4">
                         <div className="font-bold text-slate-900">{req.travelerName}</div>
-                        {req.hasTraveledBefore && (
-                          <span className="text-[10px] text-teal-600 bg-teal-50 px-1.5 py-0.5 rounded-sm">سافر مسبقاً</span>
-                        )}
+                        <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                          {req.destinationCountry && (
+                            <span className="text-[10px] font-bold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded">
+                              ✈️ {req.destinationCountry}
+                            </span>
+                          )}
+                          {req.hasTraveledBefore && (
+                            <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">سافر مسبقاً</span>
+                          )}
+                        </div>
                       </td>
-                      <td className="py-3 px-4 font-mono uppercase text-slate-700">
+                      <td className="py-3 px-4 font-mono uppercase text-slate-700 font-bold">
                         {req.passportNumber}
                       </td>
-                      <td className="py-3 px-4 text-slate-700">
+                      <td className="py-3 px-4 text-slate-700 font-semibold">
                         {VISA_TYPE_LABELS[req.visaType] || req.visaType}
                       </td>
                       <td className="py-3 px-4 text-slate-700">
@@ -620,8 +651,15 @@ export const VisaManagement: React.FC = () => {
                       <td className="py-3 px-4 text-slate-600 font-mono">
                         {req.expectedTravelDate}
                       </td>
-                      <td className="py-3 px-4 font-bold text-slate-900">
-                        {req.totalAmount.toLocaleString()} {req.currency}
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-slate-900">
+                          {req.totalAmount.toLocaleString()} {req.currency}
+                        </div>
+                        {req.initialPayment !== undefined && req.initialPayment > 0 && (
+                          <div className="text-[10px] text-teal-700 font-semibold mt-0.5">
+                            دفعة: {req.initialPayment.toLocaleString()} {req.currency}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-1.5">
@@ -701,7 +739,7 @@ export const VisaManagement: React.FC = () => {
                   {/* Traveler Name */}
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
-                      اسم المسافر بالكامل <span className="text-rose-500">*</span>
+                      اسم المسافر بالكامل <span className="text-rose-500 font-extrabold">* (إجباري)</span>
                     </label>
                     <input
                       type="text"
@@ -724,7 +762,7 @@ export const VisaManagement: React.FC = () => {
                   {/* Passport Number */}
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
-                      رقم جواز السفر <span className="text-rose-500">*</span>
+                      رقم جواز السفر <span className="text-rose-500 font-extrabold">* (إجباري)</span>
                     </label>
                     <input
                       type="text"
@@ -746,10 +784,71 @@ export const VisaManagement: React.FC = () => {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Destination Country / البلد (الوجهة) */}
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      البلد (الوجهة) <span className="text-rose-500 font-extrabold">* (إجباري)</span>
+                    </label>
+                    <input
+                      type="text"
+                      list="country-suggestions"
+                      required
+                      value={destinationCountry}
+                      onChange={(e) => {
+                        setDestinationCountry(e.target.value);
+                        if (formErrors.destinationCountry) setFormErrors(prev => ({ ...prev, destinationCountry: '' }));
+                      }}
+                      placeholder="مثال: المملكة العربية السعودية، الإمارات، تركيا..."
+                      className={`w-full px-3 py-2 bg-white border rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-teal-500/20 ${
+                        formErrors.destinationCountry ? 'border-rose-400 bg-rose-50/20' : 'border-slate-200 focus:border-teal-500'
+                      }`}
+                    />
+                    <datalist id="country-suggestions">
+                      <option value="المملكة العربية السعودية" />
+                      <option value="الإمارات العربية المتحدة" />
+                      <option value="قطر" />
+                      <option value="الكويت" />
+                      <option value="سلطنة عمان" />
+                      <option value="تركيا" />
+                      <option value="الأردن" />
+                      <option value="المملكة المتحدة (بريطانيا)" />
+                      <option value="دول الاتحاد الأوروبي (شنغن)" />
+                      <option value="الولايات المتحدة الأمريكية" />
+                      <option value="الصين" />
+                      <option value="روسيا" />
+                      <option value="ماليزيا" />
+                      <option value="تايلاند" />
+                    </datalist>
+                    {formErrors.destinationCountry && (
+                      <span className="text-[10px] text-rose-600 font-bold mt-1 block">{formErrors.destinationCountry}</span>
+                    )}
+                  </div>
+
+                  {/* Visa Type */}
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      نوع التأشيرة <span className="text-rose-500 font-extrabold">* (إجباري)</span>
+                    </label>
+                    <select
+                      value={visaType}
+                      onChange={(e) => setVisaType(e.target.value as VisaType)}
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none focus:border-teal-500"
+                    >
+                      <option value="tourist">سياحية (Tourist)</option>
+                      <option value="umrah_barcode">عمرة باركود (Umrah Barcode)</option>
+                      <option value="external_umrah">عمرة خارجي (External Umrah)</option>
+                      <option value="work">عمل / إقامة (Work / Residence)</option>
+                      <option value="family_visit">زيارة عائلية / شخصية (Family Visit)</option>
+                      <option value="transit">ترانزيت / مرور (Transit)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {/* Expected Travel Date */}
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
-                      تاريخ السفر المتوقع <span className="text-rose-500">*</span>
+                      تاريخ السفر المتوقع <span className="text-rose-500 font-extrabold">* (إجباري)</span>
                     </label>
                     <input
                       type="date"
@@ -767,22 +866,6 @@ export const VisaManagement: React.FC = () => {
                     {formErrors.expectedTravelDate && (
                       <span className="text-[10px] text-rose-600 font-bold mt-1 block">{formErrors.expectedTravelDate}</span>
                     )}
-                  </div>
-
-                  {/* Visa Type */}
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
-                      نوع التأشيرة <span className="text-rose-500">*</span>
-                    </label>
-                    <select
-                      value={visaType}
-                      onChange={(e) => setVisaType(e.target.value as VisaType)}
-                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none focus:border-teal-500"
-                    >
-                      <option value="tourist">سياحية (Tourist)</option>
-                      <option value="umrah_barcode">عمرة باركود (Umrah Barcode)</option>
-                      <option value="external_umrah">عمرة خارجي (External Umrah)</option>
-                    </select>
                   </div>
                 </div>
 
@@ -819,7 +902,7 @@ export const VisaManagement: React.FC = () => {
                 {/* Visa File Upload Dropzone */}
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    مرفق التأشيرة / الجواز (PDF أو صورة) <span className="text-rose-500">*</span>
+                    صورة مستند التأشيرة أو الجواز (PDF أو صورة) <span className="text-rose-500 font-extrabold">* (إجباري)</span>
                   </label>
                   
                   <input
@@ -839,7 +922,7 @@ export const VisaManagement: React.FC = () => {
                     >
                       <UploadCloud className="h-7 w-7 text-slate-400 mx-auto mb-1.5" />
                       <span className="text-xs font-bold text-slate-700 block">انقر لرفع مستند التأشيرة أو الجواز</span>
-                      <span className="text-[10px] text-slate-400">ملفات PDF أو صور (PNG, JPG) حتى 5 ميجابايت كحد أقصى</span>
+                      <span className="text-[10px] text-slate-400">ملفات PDF أو صور (PNG, JPG) حتى 5 ميجابايت كحد أقصى (ضغط تلقائي للصور)</span>
                     </div>
                   ) : (
                     <div className="flex items-center justify-between p-3 bg-white rounded-xl border border-teal-200">
@@ -874,7 +957,7 @@ export const VisaManagement: React.FC = () => {
                 {/* Service Provider Selection */}
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    شركة / مورد التأشيرات المختص <span className="text-rose-500">*</span>
+                    شركة / مورد التأشيرات المختص <span className="text-rose-500 font-extrabold">* (إجباري)</span>
                   </label>
                   <select
                     disabled={!visaAttachmentUrl}
@@ -914,7 +997,7 @@ export const VisaManagement: React.FC = () => {
                   {/* Total Amount & Currency */}
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
-                      إجمالي تكلفة التأشيرة <span className="text-rose-500">*</span>
+                      تكلفة التأشيرة الإجمالية <span className="text-rose-500 font-extrabold">* (إجباري)</span>
                     </label>
                     <div className="flex items-center gap-2">
                       <input
@@ -926,6 +1009,9 @@ export const VisaManagement: React.FC = () => {
                         onChange={(e) => {
                           const val = e.target.value === '' ? '' : Number(e.target.value);
                           setTotalAmount(val);
+                          if (paymentMode === 'full') {
+                            setInitialPayment(val);
+                          }
                           if (formErrors.totalAmount) setFormErrors(prev => ({ ...prev, totalAmount: '' }));
                         }}
                         placeholder="0.00"
@@ -951,36 +1037,107 @@ export const VisaManagement: React.FC = () => {
                   {/* Payment Mode */}
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
-                      نظام سداد المصروفات <span className="text-rose-500">*</span>
+                      نظام سداد المصروفات <span className="text-rose-500 font-extrabold">*</span>
                     </label>
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
-                        onClick={() => setPaymentMode('full')}
+                        onClick={() => {
+                          setPaymentMode('full');
+                          if (totalAmount) setInitialPayment(totalAmount);
+                        }}
                         className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer flex items-center justify-center gap-1.5 ${
                           paymentMode === 'full' 
-                            ? 'bg-teal-50 border-teal-500 text-teal-800' 
+                            ? 'bg-teal-50 border-teal-500 text-teal-800 shadow-2xs' 
                             : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
                         }`}
                       >
                         <CreditCard className="h-3.5 w-3.5" />
-                        <span>دفعة كاملة</span>
+                        <span>سداد كامل</span>
                       </button>
 
                       <button
                         type="button"
-                        onClick={() => setPaymentMode('installments')}
+                        onClick={() => {
+                          setPaymentMode('installments');
+                          if (totalAmount && initialPayment === totalAmount) {
+                            setInitialPayment(Math.round(Number(totalAmount) / 2));
+                          }
+                        }}
                         className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer flex items-center justify-center gap-1.5 ${
                           paymentMode === 'installments' 
-                            ? 'bg-teal-50 border-teal-500 text-teal-800' 
+                            ? 'bg-teal-50 border-teal-500 text-teal-800 shadow-2xs' 
                             : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
                         }`}
                       >
                         <Wallet className="h-3.5 w-3.5" />
-                        <span>دفعات متعددة</span>
+                        <span>أقساط / دفعات</span>
                       </button>
                     </div>
                   </div>
+                </div>
+
+                {/* Initial Payment / دفعة السداد (إجباري) */}
+                <div className="bg-white p-3.5 rounded-xl border border-slate-200/80 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-bold text-slate-800">
+                      قيمة دفعة السداد <span className="text-rose-500 font-extrabold">* (إجباري)</span>
+                    </label>
+                    <span className="text-[11px] text-slate-400 font-medium">
+                      {paymentMode === 'full' ? 'سداد كامل المبلغ دفعة واحدة' : 'المبلغ المطلوب سداده كدفعة أولى'}
+                    </span>
+                  </div>
+                  
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min="1"
+                      max={totalAmount || undefined}
+                      step="any"
+                      required
+                      value={initialPayment}
+                      onChange={(e) => {
+                        const val = e.target.value === '' ? '' : Number(e.target.value);
+                        setInitialPayment(val);
+                        if (val && totalAmount && Number(val) < Number(totalAmount)) {
+                          setPaymentMode('installments');
+                        } else if (val && totalAmount && Number(val) === Number(totalAmount)) {
+                          setPaymentMode('full');
+                        }
+                        if (formErrors.initialPayment) setFormErrors(prev => ({ ...prev, initialPayment: '' }));
+                      }}
+                      placeholder="0.00"
+                      className={`flex-1 px-3 py-2 bg-slate-50 border rounded-xl text-xs font-bold focus:outline-none focus:ring-2 focus:ring-teal-500/20 ${
+                        formErrors.initialPayment ? 'border-rose-400 bg-rose-50/20' : 'border-slate-200 focus:border-teal-500'
+                      }`}
+                    />
+                    <span className="px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-xs font-bold text-slate-700">
+                      {currency}
+                    </span>
+                  </div>
+                  {formErrors.initialPayment && (
+                    <span className="text-[10px] text-rose-600 font-bold mt-1 block">{formErrors.initialPayment}</span>
+                  )}
+
+                  {/* Financial calculation breakdown */}
+                  {totalAmount && initialPayment !== '' && (
+                    <div className="mt-2 pt-2 border-t border-slate-100 grid grid-cols-3 gap-2 text-center text-[11px]">
+                      <div className="bg-slate-50 p-2 rounded-lg">
+                        <span className="text-slate-400 block text-[10px]">التكلفة الإجمالية</span>
+                        <strong className="text-slate-800">{Number(totalAmount).toLocaleString()} {currency}</strong>
+                      </div>
+                      <div className="bg-teal-50 p-2 rounded-lg">
+                        <span className="text-teal-700 block text-[10px]">دفعة السداد</span>
+                        <strong className="text-teal-900">{Number(initialPayment).toLocaleString()} {currency}</strong>
+                      </div>
+                      <div className="bg-amber-50 p-2 rounded-lg">
+                        <span className="text-amber-700 block text-[10px]">المتبقي بعد الدفعة</span>
+                        <strong className="text-amber-900">
+                          {Math.max(0, Number(totalAmount) - Number(initialPayment)).toLocaleString()} {currency}
+                        </strong>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Additional Notes */}
@@ -1089,7 +1246,7 @@ export const VisaManagement: React.FC = () => {
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
                   <div>
                     <span className="text-slate-400 text-[11px] block">اسم المسافر:</span>
                     <span className="font-bold text-slate-800">{selectedVisa.travelerName}</span>
@@ -1099,7 +1256,13 @@ export const VisaManagement: React.FC = () => {
                     <span className="font-mono font-bold text-slate-800">{selectedVisa.passportNumber}</span>
                   </div>
                   <div>
-                    <span className="text-slate-400 text-[11px] block">تاريخ السفر المتوقع:</span>
+                    <span className="text-slate-400 text-[11px] block">البلد (الوجهة):</span>
+                    <span className="font-bold text-teal-800 bg-teal-50 px-2 py-0.5 rounded-md inline-block">
+                      ✈️ {selectedVisa.destinationCountry || 'غير محدد'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 text-[11px] block">تاريخ السفر:</span>
                     <span className="font-mono font-bold text-slate-800">{selectedVisa.expectedTravelDate}</span>
                   </div>
                   <div>
@@ -1270,10 +1433,16 @@ export const VisaManagement: React.FC = () => {
 
                 {/* Progress Card */}
                 <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2">
-                  <div className="flex items-center justify-between text-xs">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                     <div>
                       <span className="text-slate-400 block text-[10px]">إجمالي التكلفة:</span>
                       <span className="font-bold text-slate-900 text-sm">{selectedVisa.totalAmount.toLocaleString()} {selectedVisa.currency}</span>
+                    </div>
+                    <div>
+                      <span className="text-teal-700 block text-[10px]">دفعة السداد المحددة:</span>
+                      <span className="font-bold text-teal-800 text-sm">
+                        {(selectedVisa.initialPayment !== undefined ? selectedVisa.initialPayment : selectedVisa.totalAmount).toLocaleString()} {selectedVisa.currency}
+                      </span>
                     </div>
                     <div>
                       <span className="text-emerald-600 block text-[10px]">المسدد حتى الآن:</span>
@@ -1290,7 +1459,7 @@ export const VisaManagement: React.FC = () => {
                     <div 
                       className={`h-full transition-all duration-300 ${
                         selectedVisa.remainingBalance === 0 ? 'bg-emerald-500' : 'bg-teal-500'
-                      }`}
+                      }`} 
                       style={{ 
                         width: `${selectedVisa.totalAmount > 0 ? Math.min(100, Math.round((selectedVisa.paidAmount / selectedVisa.totalAmount) * 100)) : 0}%` 
                       }}
@@ -1323,7 +1492,10 @@ export const VisaManagement: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => {
-                            setPaymentAmount(selectedVisa.remainingBalance);
+                            const defaultPay = selectedVisa.initialPayment && selectedVisa.paidAmount === 0
+                              ? Math.min(selectedVisa.initialPayment, selectedVisa.remainingBalance)
+                              : selectedVisa.remainingBalance;
+                            setPaymentAmount(defaultPay);
                             setPaymentError('');
                             setIsAddingPayment(true);
                           }}
