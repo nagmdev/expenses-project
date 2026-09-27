@@ -639,22 +639,222 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                   <span className="font-mono font-bold text-slate-800">
                     {activeRequest.paymentAccountDetails || 'الحساب المسجل لدى الإدارة'}
                   </span>
+                  {activeRequest.beneficiaryName && (
+                    <div className="text-[11px] font-bold text-indigo-700 mt-1 flex items-center gap-1">
+                      <span>👤 اسم المستفيد:</span>
+                      <span className="text-slate-900 font-semibold">{activeRequest.beneficiaryName}</span>
+                    </div>
+                  )}
                 </div>
                 <div className="sm:col-span-2 pt-2 border-t border-slate-200/60">
                   <span className="text-slate-400 block mb-0.5">تفاصيل وموضوع الطلب:</span>
                   <p className="text-slate-700 leading-relaxed">{activeRequest.description}</p>
                 </div>
-                <div className="sm:col-span-2">
-                  <span className="text-slate-400 block mb-0.5">المبرر المالي:</span>
-                  <p className="text-slate-700 leading-relaxed">{activeRequest.justification}</p>
-                </div>
+                {!activeRequest.visaDocumentAttachment && !activeRequest.title?.includes('تأشيرة') && !activeRequest.serviceCategoryName?.includes('تأشيرة') && (
+                  <div className="sm:col-span-2">
+                    <span className="text-slate-400 block mb-0.5">المبرر المالي:</span>
+                    <p className="text-slate-700 leading-relaxed">{activeRequest.justification}</p>
+                  </div>
+                )}
+                {activeRequest.installmentDeviceType && (
+                  <div className="sm:col-span-2 bg-indigo-50/70 p-3 rounded-xl border border-indigo-200/80">
+                    <span className="text-indigo-900 font-bold block mb-0.5">☕ بيانات ومواصفات الجهاز المقسط:</span>
+                    <p className="text-indigo-950 font-bold text-xs">{activeRequest.installmentDeviceType}</p>
+                    {activeRequest.installmentDeviceDescription && (
+                      <p className="text-slate-700 text-xs mt-1">{activeRequest.installmentDeviceDescription}</p>
+                    )}
+                  </div>
+                )}
                 {activeRequest.itemsDetail && (
                   <div className="sm:col-span-2 bg-amber-50/70 p-3 rounded-xl border border-amber-200/80">
-                    <span className="text-amber-900 font-bold block mb-0.5">📦 بيانات البضاعة أو الأصناف:</span>
+                    <span className="text-amber-900 font-bold block mb-0.5">
+                      {activeRequest.visaDocumentAttachment || activeRequest.title?.includes('تأشيرة') || activeRequest.serviceCategoryName?.includes('تأشيرة')
+                        ? '✈️ نوع التأشيرة وبيانات المسافر:' 
+                        : '📦 بيانات البضاعة أو الأصناف:'}
+                    </span>
                     <p className="text-slate-800 font-medium">{activeRequest.itemsDetail}</p>
                   </div>
                 )}
               </div>
+
+              {/* Dedicated Attachments: Visa Document, Installment Transfer, Wallet Transfer */}
+              {(activeRequest.visaDocumentAttachment || activeRequest.installmentTransferAttachment || activeRequest.walletTransferAttachment) && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  {/* Visa Document Attachment Card */}
+                  {activeRequest.visaDocumentAttachment && (
+                    <div className="bg-teal-50/70 border-2 border-teal-200 rounded-2xl p-3.5 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-black text-teal-950 flex items-center gap-1.5 text-xs">
+                          <span>✈️ مستند التأشيرة أو جواز السفر</span>
+                        </span>
+                        <span className="text-[10px] bg-teal-100 text-teal-800 font-bold px-2 py-0.5 rounded-full">
+                          مستند تأشيرة
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-1 border-t border-teal-100">
+                        <div className="flex items-center gap-2 truncate">
+                          {activeRequest.visaDocumentAttachment.url && (activeRequest.visaDocumentAttachment.type === 'png' || activeRequest.visaDocumentAttachment.type === 'jpg' || activeRequest.visaDocumentAttachment.type?.startsWith('image/')) ? (
+                            <button
+                              type="button"
+                              onClick={() => setPreviewInvoice({
+                                url: activeRequest.visaDocumentAttachment!.url,
+                                name: activeRequest.visaDocumentAttachment!.name,
+                                size: activeRequest.visaDocumentAttachment!.size,
+                                type: activeRequest.visaDocumentAttachment!.type,
+                              })}
+                              className="cursor-pointer shrink-0"
+                              title="معاينة المستند"
+                            >
+                              <img src={activeRequest.visaDocumentAttachment.url} alt="تأشيرة" className="w-10 h-10 rounded-lg object-cover border border-teal-300 shadow-2xs" />
+                            </button>
+                          ) : (
+                            <div className="w-10 h-10 rounded-lg bg-teal-100 text-teal-800 font-bold text-xs flex items-center justify-center border border-teal-200 shrink-0">
+                              PDF
+                            </div>
+                          )}
+                          <div className="truncate">
+                            <span className="font-bold text-slate-800 truncate block text-xs">{activeRequest.visaDocumentAttachment.name}</span>
+                            <span className="text-[10px] text-slate-400 font-mono">{activeRequest.visaDocumentAttachment.size}</span>
+                          </div>
+                        </div>
+
+                        {activeRequest.visaDocumentAttachment.url && (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewInvoice({
+                              url: activeRequest.visaDocumentAttachment!.url,
+                              name: activeRequest.visaDocumentAttachment!.name,
+                              size: activeRequest.visaDocumentAttachment!.size,
+                              type: activeRequest.visaDocumentAttachment!.type,
+                            })}
+                            className="px-2.5 py-1 bg-teal-700 hover:bg-teal-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            <span>معاينة</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Installment Transfer Screenshot Card */}
+                  {activeRequest.installmentTransferAttachment && (
+                    <div className="bg-blue-50/70 border-2 border-blue-200 rounded-2xl p-3.5 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-black text-blue-950 flex items-center gap-1.5 text-xs">
+                          <span>📅 سكرين شوت سداد مبلغ القسط</span>
+                        </span>
+                        <span className="text-[10px] bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded-full">
+                          سداد القسط
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-1 border-t border-blue-100">
+                        <div className="flex items-center gap-2 truncate">
+                          {activeRequest.installmentTransferAttachment.url && (activeRequest.installmentTransferAttachment.type === 'png' || activeRequest.installmentTransferAttachment.type === 'jpg' || activeRequest.installmentTransferAttachment.type?.startsWith('image/')) ? (
+                            <button
+                              type="button"
+                              onClick={() => setPreviewInvoice({
+                                url: activeRequest.installmentTransferAttachment!.url,
+                                name: activeRequest.installmentTransferAttachment!.name,
+                                size: activeRequest.installmentTransferAttachment!.size,
+                                type: activeRequest.installmentTransferAttachment!.type,
+                              })}
+                              className="cursor-pointer shrink-0"
+                              title="معاينة السكرين"
+                            >
+                              <img src={activeRequest.installmentTransferAttachment.url} alt="قسط" className="w-10 h-10 rounded-lg object-cover border border-blue-300 shadow-2xs" />
+                            </button>
+                          ) : (
+                            <div className="w-10 h-10 rounded-lg bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center border border-blue-200 shrink-0">
+                              PDF
+                            </div>
+                          )}
+                          <div className="truncate">
+                            <span className="font-bold text-slate-800 truncate block text-xs">{activeRequest.installmentTransferAttachment.name}</span>
+                            <span className="text-[10px] text-slate-400 font-mono">{activeRequest.installmentTransferAttachment.size}</span>
+                          </div>
+                        </div>
+
+                        {activeRequest.installmentTransferAttachment.url && (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewInvoice({
+                              url: activeRequest.installmentTransferAttachment!.url,
+                              name: activeRequest.installmentTransferAttachment!.name,
+                              size: activeRequest.installmentTransferAttachment!.size,
+                              type: activeRequest.installmentTransferAttachment!.type,
+                            })}
+                            className="px-2.5 py-1 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            <span>معاينة</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Wallet Transfer Screenshot Card */}
+                  {activeRequest.walletTransferAttachment && (
+                    <div className="bg-emerald-50/70 border-2 border-emerald-200 rounded-2xl p-3.5 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-black text-emerald-950 flex items-center gap-1.5 text-xs">
+                          <span>📱 سكرين شوت شحن وتحويل المحفظة</span>
+                        </span>
+                        <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">
+                          شحن محفظة
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-1 border-t border-emerald-100">
+                        <div className="flex items-center gap-2 truncate">
+                          {activeRequest.walletTransferAttachment.url && (activeRequest.walletTransferAttachment.type === 'png' || activeRequest.walletTransferAttachment.type === 'jpg' || activeRequest.walletTransferAttachment.type?.startsWith('image/')) ? (
+                            <button
+                              type="button"
+                              onClick={() => setPreviewInvoice({
+                                url: activeRequest.walletTransferAttachment!.url,
+                                name: activeRequest.walletTransferAttachment!.name,
+                                size: activeRequest.walletTransferAttachment!.size,
+                                type: activeRequest.walletTransferAttachment!.type,
+                              })}
+                              className="cursor-pointer shrink-0"
+                              title="معاينة التحويل"
+                            >
+                              <img src={activeRequest.walletTransferAttachment.url} alt="محفظة" className="w-10 h-10 rounded-lg object-cover border border-emerald-300 shadow-2xs" />
+                            </button>
+                          ) : (
+                            <div className="w-10 h-10 rounded-lg bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center justify-center border border-emerald-200 shrink-0">
+                              PDF
+                            </div>
+                          )}
+                          <div className="truncate">
+                            <span className="font-bold text-slate-800 truncate block text-xs">{activeRequest.walletTransferAttachment.name}</span>
+                            <span className="text-[10px] text-slate-400 font-mono">{activeRequest.walletTransferAttachment.size}</span>
+                          </div>
+                        </div>
+
+                        {activeRequest.walletTransferAttachment.url && (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewInvoice({
+                              url: activeRequest.walletTransferAttachment!.url,
+                              name: activeRequest.walletTransferAttachment!.name,
+                              size: activeRequest.walletTransferAttachment!.size,
+                              type: activeRequest.walletTransferAttachment!.type,
+                            })}
+                            className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            <span>معاينة</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Invoice & Personal Prepayment Details Card */}
               {(activeRequest.isPrepaidByRequester || activeRequest.invoiceNumber || activeRequest.invoiceDate || activeRequest.invoiceAttachment) && (
@@ -744,9 +944,16 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
 
               {/* Attachments (Only shown if authentic non-dummy attachments exist) */}
               {(() => {
+                const dedicatedAttIds = new Set([
+                  activeRequest.invoiceAttachment?.id,
+                  activeRequest.visaDocumentAttachment?.id,
+                  activeRequest.installmentTransferAttachment?.id,
+                  activeRequest.walletTransferAttachment?.id
+                ].filter(Boolean));
+
                 const realAttachments = (activeRequest.attachments || []).filter(att => 
                   att && att.name && 
-                  (!activeRequest.invoiceAttachment || att.id !== activeRequest.invoiceAttachment.id) &&
+                  !dedicatedAttIds.has(att.id) &&
                   !String(att.name).includes('فاتورة_عرض_سعر') && 
                   String(att.name).trim() !== 'fdvbgfbgfb' &&
                   String(att.name).trim().length > 0

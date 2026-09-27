@@ -90,36 +90,66 @@ export const INCOME_PAYMENT_SHAPES = [
   },
 ];
 
+const INSTALLMENT_DEVICE_OPTIONS = [
+  'ماكينة قهوة اسبرسو',
+  'ماكينة قهوة تركي',
+  'مبرد مياه',
+  'تكييف وتهوية',
+  'طابعة وماكينة تصوير مستندات',
+  'أجهزة حاسب آلي ولابتوب',
+  'شاشة عرض / تلفزيون',
+  'أخرى (تحديد يدوي)',
+];
+
 const EXPENSE_QUICK_TEMPLATES = [
   {
-    label: '⚡ شحن كارت كهرباء',
-    title: 'شحن كارت كهرباء المقر',
-    description: 'شحن كارت عداد الكهرباء الدوري للمقر',
-    keywords: ['كهرباء', 'طاقة', 'عداد', 'مرافق'],
+    label: '✈️ استخراج تأشيرة',
+    title: 'طلب سداد رسوم استخراج تأشيرة',
+    description: 'سداد تكاليف ورسوم استخراج تأشيرة سفر رسمية ومستندات المسافر',
+    keywords: ['تأشيرة', 'فيزا', 'سفر', 'جواز', 'عمرة', 'تأشيرات', 'visa'],
+    templateType: 'visa' as const,
   },
   {
-    label: '⚡ فواتير إنترنت وهاتف',
-    title: 'سداد فاتورة الإنترنت الشهرية',
-    description: 'سداد فاتورة واشتراك الإنترنت والاتصالات للأعمال',
-    keywords: ['إنترنت', 'انترنت', 'اتصالات', 'هاتف', 'شبكات', 'سحابية'],
-  },
-  {
-    label: '⚡ بوفيه ومستلزمات مقر',
-    title: 'شراء مستلزمات بوفيه وضيافة',
-    description: 'شراء مستلزمات بوفيه وضيافة ومستلزمات نظافة دورية للمقر',
-    keywords: ['بوفيه', 'ضيافة', 'مستلزمات', 'أدوات مكتبية', 'نثريات', 'تشغيل'],
+    label: '📅 سداد قسط شهري',
+    title: 'سداد القسط الشهري للأجهزة والمعدات',
+    description: 'سداد القسط الشهري المستحق لماكينات وأجهزة المقر التشغيلية',
+    keywords: ['قسط', 'أقساط', 'سداد', 'جهاز', 'ماكينة', 'أجهزة'],
+    templateType: 'installment' as const,
   },
   {
     label: '⚡ شحن محفظة مندوب',
     title: 'شحن رصيد محفظة للمندوب / مأمورية',
     description: 'شحن رصيد محفظة إلكترونية للمندوب لتغطية مصاريف المأمورية والانتقالات',
     keywords: ['مندوب', 'محفظة', 'مأمورية', 'سفر', 'انتقالات', 'عهدة'],
+    templateType: 'wallet_topup' as const,
+  },
+  {
+    label: '⚡ شحن كارت كهرباء',
+    title: 'شحن كارت كهرباء المقر',
+    description: 'شحن كارت عداد الكهرباء الدوري للمقر',
+    keywords: ['كهرباء', 'طاقة', 'عداد', 'مرافق'],
+    templateType: null,
+  },
+  {
+    label: '⚡ فواتير إنترنت وهاتف',
+    title: 'سداد فاتورة الإنترنت الشهرية',
+    description: 'سداد فاتورة واشتراك الإنترنت والاتصالات للأعمال',
+    keywords: ['إنترنت', 'انترنت', 'اتصالات', 'هاتف', 'شبكات', 'سحابية'],
+    templateType: null,
+  },
+  {
+    label: '⚡ بوفيه ومستلزمات مقر',
+    title: 'شراء مستلزمات بوفيه وضيافة',
+    description: 'شراء مستلزمات بوفيه وضيافة ومستلزمات نظافة دورية للمقر',
+    keywords: ['بوفيه', 'ضيافة', 'مستلزمات', 'أدوات مكتبية', 'نثريات', 'تشغيل'],
+    templateType: null,
   },
   {
     label: '⚡ وقود وانتقالات',
     title: 'بدل وقود ومصروفات انتقالات مأمورية',
     description: 'سداد فواتير وقود وبنزين ومصروفات انتقالات مأمورية رسمية',
     keywords: ['وقود', 'بنزين', 'انتقالات', 'سفر', 'سيارات', 'مهمة'],
+    templateType: null,
   },
 ];
 
@@ -313,6 +343,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     (currentUser.preferredPaymentMethod as PaymentMethod) || 'instapay'
   );
   const [paymentAccountDetails, setPaymentAccountDetails] = useState('');
+  const [beneficiaryName, setBeneficiaryName] = useState('');
+  const [activeTemplateType, setActiveTemplateType] = useState<'visa' | 'installment' | 'wallet_topup' | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   // Dedicated Invoice & Prepayment States
@@ -323,6 +355,23 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [previewModalUrl, setPreviewModalUrl] = useState<{ url: string; name: string; type: string } | null>(null);
   const [isUploadingInvoice, setIsUploadingInvoice] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Dedicated Visa Document Attachment States
+  const [visaDocumentAttachment, setVisaDocumentAttachment] = useState<RequestAttachment | null>(null);
+  const [isUploadingVisaDoc, setIsUploadingVisaDoc] = useState<boolean>(false);
+  const visaFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Dedicated Installment Transfer & Device States
+  const [installmentTransferAttachment, setInstallmentTransferAttachment] = useState<RequestAttachment | null>(null);
+  const [isUploadingInstallmentTransfer, setIsUploadingInstallmentTransfer] = useState<boolean>(false);
+  const installmentFileInputRef = useRef<HTMLInputElement>(null);
+  const [installmentDeviceType, setInstallmentDeviceType] = useState<string>('ماكينة قهوة اسبرسو');
+  const [installmentDeviceDescription, setInstallmentDeviceDescription] = useState<string>('');
+
+  // Dedicated Wallet Top-up Screenshot Attachment States
+  const [walletTransferAttachment, setWalletTransferAttachment] = useState<RequestAttachment | null>(null);
+  const [isUploadingWalletTransfer, setIsUploadingWalletTransfer] = useState<boolean>(false);
+  const walletFileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -342,6 +391,72 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       alert(err?.message || 'تعذر معالجة أو رفع الملف، يرجى المحاولة ثانية');
     } finally {
       setIsUploadingInvoice(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleVisaDocUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 15 * 1024 * 1024) {
+      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 15 ميجابايت');
+      return;
+    }
+
+    setIsUploadingVisaDoc(true);
+    try {
+      const attachment = await processAndUploadInvoice(file, selectedOrgId || 'org-main');
+      setVisaDocumentAttachment(attachment);
+    } catch (err: any) {
+      console.error('[VisaDocUpload Error]', err);
+      alert(err?.message || 'تعذر رفع مستند التأشيرة، يرجى المحاولة ثانية');
+    } finally {
+      setIsUploadingVisaDoc(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleInstallmentTransferUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 15 * 1024 * 1024) {
+      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 15 ميجابايت');
+      return;
+    }
+
+    setIsUploadingInstallmentTransfer(true);
+    try {
+      const attachment = await processAndUploadInvoice(file, selectedOrgId || 'org-main');
+      setInstallmentTransferAttachment(attachment);
+    } catch (err: any) {
+      console.error('[InstallmentTransferUpload Error]', err);
+      alert(err?.message || 'تعذر رفع سكرين تحويل سداد القسط، يرجى المحاولة ثانية');
+    } finally {
+      setIsUploadingInstallmentTransfer(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleWalletTransferUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 15 * 1024 * 1024) {
+      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 15 ميجابايت');
+      return;
+    }
+
+    setIsUploadingWalletTransfer(true);
+    try {
+      const attachment = await processAndUploadInvoice(file, selectedOrgId || 'org-main');
+      setWalletTransferAttachment(attachment);
+    } catch (err: any) {
+      console.error('[WalletTransferUpload Error]', err);
+      alert(err?.message || 'تعذر رفع سكرين شحن المحفظة، يرجى المحاولة ثانية');
+    } finally {
+      setIsUploadingWalletTransfer(false);
       e.target.value = '';
     }
   };
@@ -392,6 +507,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           setPreferredPaymentMethod(editingRequest.preferredPaymentMethod);
         }
         setPaymentAccountDetails(editingRequest.paymentAccountDetails || '');
+        setBeneficiaryName(editingRequest.beneficiaryName || '');
 
         setIsPrepaidByRequester(Boolean(editingRequest.isPrepaidByRequester));
         setInvoiceNumber(editingRequest.invoiceNumber || '');
@@ -403,6 +519,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         } else {
           setInvoiceAttachment(null);
         }
+
+        setVisaDocumentAttachment(editingRequest.visaDocumentAttachment || null);
+        setInstallmentTransferAttachment(editingRequest.installmentTransferAttachment || null);
+        setInstallmentDeviceType(editingRequest.installmentDeviceType || 'ماكينة قهوة اسبرسو');
+        setInstallmentDeviceDescription(editingRequest.installmentDeviceDescription || '');
+        setWalletTransferAttachment(editingRequest.walletTransferAttachment || null);
       } else {
         const defaultMethod = (currentUser.preferredPaymentMethod as PaymentMethod) || 'instapay';
         setPreferredPaymentMethod(defaultMethod);
@@ -410,10 +532,17 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         if (detail) {
           setPaymentAccountDetails(detail);
         }
+        setBeneficiaryName('');
+        setActiveTemplateType(null);
         setIsPrepaidByRequester(false);
         setInvoiceNumber('');
         setInvoiceDate('');
         setInvoiceAttachment(null);
+        setVisaDocumentAttachment(null);
+        setInstallmentTransferAttachment(null);
+        setInstallmentDeviceType('ماكينة قهوة اسبرسو');
+        setInstallmentDeviceDescription('');
+        setWalletTransferAttachment(null);
       }
     }
   }, [isOpen, editingRequest, currentUser, getProfilePayoutDetail, currentOrg]);
@@ -553,13 +682,14 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   };
 
   // Quick Template Activation for Expense
-  const applyQuickTemplate = (tpl: { label: string; title: string; description: string; keywords: string[] }) => {
+  const applyQuickTemplate = (tpl: { label: string; title: string; description: string; keywords: string[]; templateType?: any }) => {
     setIsCustomTitle(true);
     setCustomTitle(tpl.title);
     setIsCustomDescription(true);
     setCustomDescription(tpl.description);
     setFormError(null);
     setFieldHighlight(null);
+    setActiveTemplateType(tpl.templateType || null);
 
     const matched = effectiveServices.find(s => {
       const sName = s.name.toLowerCase();
@@ -594,15 +724,49 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setItemsDetail('');
     setTargetAccountId('');
     setPaymentAccountDetails('');
+    setBeneficiaryName('');
+    setActiveTemplateType(null);
     setIsPrepaidByRequester(false);
     setInvoiceNumber('');
     setInvoiceDate('');
     setInvoiceAttachment(null);
+    setVisaDocumentAttachment(null);
+    setInstallmentTransferAttachment(null);
+    setInstallmentDeviceType('ماكينة قهوة اسبرسو');
+    setInstallmentDeviceDescription('');
+    setWalletTransferAttachment(null);
     setPreviewModalUrl(null);
     setFormError(null);
     setFieldHighlight(null);
     onClose();
   };
+
+  const selectedServiceName = (effectiveServices.find(s => s.id === selectedServiceId)?.name || '').toLowerCase();
+  const currentTitleLower = (isCustomTitle ? customTitle : selectedTitlePreset).toLowerCase();
+  
+  const isVisaRequest = 
+    activeTemplateType === 'visa' ||
+    selectedServiceName.includes('تأشير') ||
+    selectedServiceName.includes('فيزا') ||
+    currentTitleLower.includes('تأشير') ||
+    currentTitleLower.includes('فيزا') ||
+    Boolean(editingRequest?.visaDocumentAttachment) ||
+    Boolean(visaDocumentAttachment);
+
+  const isInstallmentRequest = 
+    activeTemplateType === 'installment' ||
+    selectedServiceName.includes('قسط') ||
+    currentTitleLower.includes('قسط') ||
+    Boolean(editingRequest?.installmentDeviceType) ||
+    Boolean(editingRequest?.installmentTransferAttachment) ||
+    Boolean(installmentTransferAttachment);
+
+  const isWalletTopupRequest = 
+    activeTemplateType === 'wallet_topup' ||
+    selectedServiceName.includes('محفظة') ||
+    currentTitleLower.includes('محفظة') ||
+    Boolean(editingRequest?.walletTransferAttachment) ||
+    Boolean(walletTransferAttachment);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -657,12 +821,17 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       const providerId = selectedProvider?.id || editingRequest.providerId;
       const providerName = selectedProvider?.name || editingRequest.providerName;
 
+      const additionalAtts = [
+        invoiceAttachment, 
+        visaDocumentAttachment, 
+        installmentTransferAttachment, 
+        walletTransferAttachment
+      ].filter(Boolean) as RequestAttachment[];
+
       const otherAttachments = (editingRequest.attachments || []).filter(
-        a => !invoiceAttachment || a.id !== invoiceAttachment.id
+        a => !additionalAtts.some(na => na.id === a.id)
       );
-      const finalAttachments = invoiceAttachment 
-        ? [invoiceAttachment, ...otherAttachments] 
-        : otherAttachments;
+      const finalAttachments = [...additionalAtts, ...otherAttachments];
 
       setSubmitting(true);
       try {
@@ -673,7 +842,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
             : (effectiveDescription.trim() || editingRequest.description),
           justification: requestType === 'income'
             ? 'إيداع وتوريد مالي مباشر'
-            : (effectiveJustification.trim() || editingRequest.justification),
+            : (isVisaRequest ? (effectiveJustification.trim() || 'استخراج وتخليص تأشيرة سفر رسمية معتمدة') : (effectiveJustification.trim() || editingRequest.justification)),
           amount: Number(amount),
           currency: currency || currentOrg?.currency || 'EGP',
           serviceCategoryId: serviceId,
@@ -688,9 +857,15 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           invoiceNumber: invoiceNumber.trim() || undefined,
           invoiceDate: invoiceDate || undefined,
           invoiceAttachment: invoiceAttachment || undefined,
+          visaDocumentAttachment: visaDocumentAttachment || undefined,
+          installmentTransferAttachment: installmentTransferAttachment || undefined,
+          installmentDeviceType: isInstallmentRequest ? installmentDeviceType : undefined,
+          installmentDeviceDescription: isInstallmentRequest ? installmentDeviceDescription.trim() : undefined,
+          walletTransferAttachment: walletTransferAttachment || undefined,
           attachments: finalAttachments,
           preferredPaymentMethod,
           paymentAccountDetails: paymentAccountDetails.trim(),
+          beneficiaryName: preferredPaymentMethod === 'instapay' ? beneficiaryName.trim() : undefined,
           orgId: selectedOrgId,
         });
 
@@ -822,12 +997,21 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       }
     }
 
+    const finalNewAttachments = [
+      invoiceAttachment,
+      visaDocumentAttachment,
+      installmentTransferAttachment,
+      walletTransferAttachment
+    ].filter(Boolean) as RequestAttachment[];
+
     setSubmitting(true);
     try {
       await createRequest({
         title: effectiveTitle.trim(),
         description: effectiveDescription.trim() || 'سداد مباشر للمصروفات الموضحة بالطلب',
-        justification: effectiveJustification.trim() || 'دعم استمرارية العمليات والتشغيل',
+        justification: isVisaRequest 
+          ? (effectiveJustification.trim() || 'استخراج وتخليص تأشيرة سفر رسمية معتمدة') 
+          : (effectiveJustification.trim() || 'دعم استمرارية العمليات والتشغيل'),
         amount: Number(amount),
         currency: currency || currentOrg?.currency || 'EGP',
         serviceCategoryId: serviceId,
@@ -842,9 +1026,15 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         invoiceNumber: invoiceNumber.trim() || undefined,
         invoiceDate: invoiceDate || undefined,
         invoiceAttachment: invoiceAttachment || undefined,
-        attachments: invoiceAttachment ? [invoiceAttachment] : [],
+        visaDocumentAttachment: visaDocumentAttachment || undefined,
+        installmentTransferAttachment: installmentTransferAttachment || undefined,
+        installmentDeviceType: isInstallmentRequest ? installmentDeviceType : undefined,
+        installmentDeviceDescription: isInstallmentRequest ? installmentDeviceDescription.trim() : undefined,
+        walletTransferAttachment: walletTransferAttachment || undefined,
+        attachments: finalNewAttachments,
         preferredPaymentMethod,
         paymentAccountDetails: paymentAccountDetails.trim(),
+        beneficiaryName: preferredPaymentMethod === 'instapay' ? beneficiaryName.trim() : undefined,
         orgId: selectedOrgId,
       });
 
@@ -1627,6 +1817,327 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       </div>
                     )}
                   </div>
+
+                  {/* Visa Document / Passport Attachment Area (When isVisaRequest) */}
+                  {isVisaRequest && (
+                    <div className="pt-3 border-t border-slate-100 space-y-2">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">
+                          <Paperclip className="h-3.5 w-3.5 text-teal-600" />
+                          <span>مرفق مستند التأشيرة أو جواز السفر *</span>
+                        </label>
+                        <span className="text-[10px] text-teal-800 bg-teal-50 px-2 py-0.5 rounded-full border border-teal-200 font-bold">إثبات التأشيرة</span>
+                      </div>
+
+                      <input
+                        ref={visaFileInputRef}
+                        type="file"
+                        accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+                        onChange={handleVisaDocUpload}
+                        className="hidden"
+                        id="visa-doc-file-upload-input"
+                      />
+
+                      {!visaDocumentAttachment ? (
+                        <div 
+                          onClick={() => !isUploadingVisaDoc && visaFileInputRef.current?.click()}
+                          className={`border-2 border-dashed border-teal-200 hover:border-teal-500 bg-teal-50/40 hover:bg-teal-50/70 rounded-2xl p-5 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-2 group ${
+                            isUploadingVisaDoc ? 'opacity-70 pointer-events-none' : ''
+                          }`}
+                        >
+                          <div className="w-10 h-10 rounded-xl bg-teal-100 text-teal-700 flex items-center justify-center transition-colors shadow-2xs">
+                            {isUploadingVisaDoc ? (
+                              <Loader2 className="h-5 w-5 animate-spin" />
+                            ) : (
+                              <Upload className="h-5 w-5" />
+                            )}
+                          </div>
+                          <div className="space-y-0.5">
+                            <span className="text-xs font-bold text-slate-800 block group-hover:text-teal-950 transition-colors">
+                              {isUploadingVisaDoc ? 'جاري ضغط ورفع مستند التأشيرة...' : 'انقر هنا لرفع صورة مستند التأشيرة أو جواز السفر'}
+                            </span>
+                            <span className="text-[11px] text-slate-500 block">
+                              يدعم صور التأشيرة (JPG, PNG) أو ملف التأشيرة الإلكتروني (PDF)
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bg-white border-2 border-teal-400 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+                          <div className="flex items-center gap-3 min-w-0">
+                            {visaDocumentAttachment.url && (visaDocumentAttachment.type === 'png' || visaDocumentAttachment.type === 'jpg' || visaDocumentAttachment.type.startsWith('image/')) ? (
+                              <img 
+                                src={visaDocumentAttachment.url} 
+                                alt="مستند التأشيرة" 
+                                className="w-12 h-12 rounded-xl object-cover border border-teal-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
+                                onClick={() => setPreviewModalUrl({ url: visaDocumentAttachment.url!, name: visaDocumentAttachment.name, type: visaDocumentAttachment.type })}
+                                title="انقر للمعاينة"
+                              />
+                            ) : (
+                              <div className="w-12 h-12 rounded-xl bg-teal-50 text-teal-700 flex items-center justify-center font-bold text-xs shrink-0 border border-teal-200">
+                                PDF
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-slate-900 text-xs truncate block max-w-[200px] sm:max-w-xs" title={visaDocumentAttachment.name}>
+                                  {visaDocumentAttachment.name}
+                                </span>
+                                <span className="text-[10px] font-black text-teal-800 bg-teal-50 border border-teal-200 px-2 py-0.5 rounded-full shrink-0">
+                                  مستند التأشيرة ✓
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
+                                <span>الحجم: {visaDocumentAttachment.size}</span>
+                                <span>•</span>
+                                <span>النوع: {visaDocumentAttachment.type.toUpperCase()}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                            {visaDocumentAttachment.url && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (visaDocumentAttachment.url) {
+                                    setPreviewModalUrl({ url: visaDocumentAttachment.url, name: visaDocumentAttachment.name, type: visaDocumentAttachment.type });
+                                  }
+                                }}
+                                className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200 flex items-center gap-1.5 transition cursor-pointer"
+                              >
+                                <Eye className="h-3.5 w-3.5 text-slate-500" />
+                                <span>معاينة المستند</span>
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => setVisaDocumentAttachment(null)}
+                              className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
+                              title="حذف مستند التأشيرة"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              <span>حذف</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Installment Transfer Screenshot Area (When isInstallmentRequest) */}
+                  {isInstallmentRequest && (
+                    <div className="pt-3 border-t border-slate-100 space-y-2">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">
+                          <Paperclip className="h-3.5 w-3.5 text-blue-600" />
+                          <span>مرفق سكرين شوت تحويل لمبلغ سداد القسط *</span>
+                        </label>
+                        <span className="text-[10px] text-blue-800 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200 font-bold">إثبات سداد القسط</span>
+                      </div>
+
+                      <input
+                        ref={installmentFileInputRef}
+                        type="file"
+                        accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+                        onChange={handleInstallmentTransferUpload}
+                        className="hidden"
+                        id="installment-transfer-file-upload-input"
+                      />
+
+                      {!installmentTransferAttachment ? (
+                        <div 
+                          onClick={() => !isUploadingInstallmentTransfer && installmentFileInputRef.current?.click()}
+                          className={`border-2 border-dashed border-blue-200 hover:border-blue-500 bg-blue-50/40 hover:bg-blue-50/70 rounded-2xl p-5 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-2 group ${
+                            isUploadingInstallmentTransfer ? 'opacity-70 pointer-events-none' : ''
+                          }`}
+                        >
+                          <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center transition-colors shadow-2xs">
+                            {isUploadingInstallmentTransfer ? (
+                              <Loader2 className="h-5 w-5 animate-spin" />
+                            ) : (
+                              <Upload className="h-5 w-5" />
+                            )}
+                          </div>
+                          <div className="space-y-0.5">
+                            <span className="text-xs font-bold text-slate-800 block group-hover:text-blue-950 transition-colors">
+                              {isUploadingInstallmentTransfer ? 'جاري ضغط ورفع سكرين التحويل...' : 'انقر هنا لرفع سكرين شوت تحويل مبلغ سداد القسط'}
+                            </span>
+                            <span className="text-[11px] text-slate-500 block">
+                              إشعار تحويل بنكي أو سكرين شوت إنستاباي / محفظة لمبلغ القسط
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bg-white border-2 border-blue-400 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+                          <div className="flex items-center gap-3 min-w-0">
+                            {installmentTransferAttachment.url && (installmentTransferAttachment.type === 'png' || installmentTransferAttachment.type === 'jpg' || installmentTransferAttachment.type.startsWith('image/')) ? (
+                              <img 
+                                src={installmentTransferAttachment.url} 
+                                alt="سكرين سداد القسط" 
+                                className="w-12 h-12 rounded-xl object-cover border border-blue-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
+                                onClick={() => setPreviewModalUrl({ url: installmentTransferAttachment.url!, name: installmentTransferAttachment.name, type: installmentTransferAttachment.type })}
+                                title="انقر للمعاينة"
+                              />
+                            ) : (
+                              <div className="w-12 h-12 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center font-bold text-xs shrink-0 border border-blue-200">
+                                PDF
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-slate-900 text-xs truncate block max-w-[200px] sm:max-w-xs" title={installmentTransferAttachment.name}>
+                                  {installmentTransferAttachment.name}
+                                </span>
+                                <span className="text-[10px] font-black text-blue-800 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full shrink-0">
+                                  سكرين القسط ✓
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
+                                <span>الحجم: {installmentTransferAttachment.size}</span>
+                                <span>•</span>
+                                <span>النوع: {installmentTransferAttachment.type.toUpperCase()}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                            {installmentTransferAttachment.url && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (installmentTransferAttachment.url) {
+                                    setPreviewModalUrl({ url: installmentTransferAttachment.url, name: installmentTransferAttachment.name, type: installmentTransferAttachment.type });
+                                  }
+                                }}
+                                className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200 flex items-center gap-1.5 transition cursor-pointer"
+                              >
+                                <Eye className="h-3.5 w-3.5 text-slate-500" />
+                                <span>معاينة السكرين</span>
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => setInstallmentTransferAttachment(null)}
+                              className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
+                              title="حذف سكرين القسط"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              <span>حذف</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Wallet Top-up Screenshot Area (When isWalletTopupRequest) */}
+                  {isWalletTopupRequest && (
+                    <div className="pt-3 border-t border-slate-100 space-y-2">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">
+                          <Paperclip className="h-3.5 w-3.5 text-purple-600" />
+                          <span>مرفق سكرين شوت الشحن والتحويل للمحفظة *</span>
+                        </label>
+                        <span className="text-[10px] text-purple-800 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200 font-bold">إثبات شحن المحفظة</span>
+                      </div>
+
+                      <input
+                        ref={walletFileInputRef}
+                        type="file"
+                        accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+                        onChange={handleWalletTransferUpload}
+                        className="hidden"
+                        id="wallet-transfer-file-upload-input"
+                      />
+
+                      {!walletTransferAttachment ? (
+                        <div 
+                          onClick={() => !isUploadingWalletTransfer && walletFileInputRef.current?.click()}
+                          className={`border-2 border-dashed border-purple-200 hover:border-purple-500 bg-purple-50/40 hover:bg-purple-50/70 rounded-2xl p-5 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-2 group ${
+                            isUploadingWalletTransfer ? 'opacity-70 pointer-events-none' : ''
+                          }`}
+                        >
+                          <div className="w-10 h-10 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center transition-colors shadow-2xs">
+                            {isUploadingWalletTransfer ? (
+                              <Loader2 className="h-5 w-5 animate-spin" />
+                            ) : (
+                              <Upload className="h-5 w-5" />
+                            )}
+                          </div>
+                          <div className="space-y-0.5">
+                            <span className="text-xs font-bold text-slate-800 block group-hover:text-purple-950 transition-colors">
+                              {isUploadingWalletTransfer ? 'جاري ضغط ورفع سكرين الشحن...' : 'انقر هنا لرفع سكرين شوت إثبات الشحن والتحويل للمحفظة'}
+                            </span>
+                            <span className="text-[11px] text-slate-500 block">
+                              صورة رسالة التأكيد أو إشعار التحويل لرقم محفظة المندوب
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bg-white border-2 border-purple-400 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+                          <div className="flex items-center gap-3 min-w-0">
+                            {walletTransferAttachment.url && (walletTransferAttachment.type === 'png' || walletTransferAttachment.type === 'jpg' || walletTransferAttachment.type.startsWith('image/')) ? (
+                              <img 
+                                src={walletTransferAttachment.url} 
+                                alt="سكرين شحن المحفظة" 
+                                className="w-12 h-12 rounded-xl object-cover border border-purple-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
+                                onClick={() => setPreviewModalUrl({ url: walletTransferAttachment.url!, name: walletTransferAttachment.name, type: walletTransferAttachment.type })}
+                                title="انقر للمعاينة"
+                              />
+                            ) : (
+                              <div className="w-12 h-12 rounded-xl bg-purple-50 text-purple-700 flex items-center justify-center font-bold text-xs shrink-0 border border-purple-200">
+                                PDF
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-slate-900 text-xs truncate block max-w-[200px] sm:max-w-xs" title={walletTransferAttachment.name}>
+                                  {walletTransferAttachment.name}
+                                </span>
+                                <span className="text-[10px] font-black text-purple-800 bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full shrink-0">
+                                  سكرين المحفظة ✓
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
+                                <span>الحجم: {walletTransferAttachment.size}</span>
+                                <span>•</span>
+                                <span>النوع: {walletTransferAttachment.type.toUpperCase()}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                            {walletTransferAttachment.url && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (walletTransferAttachment.url) {
+                                    setPreviewModalUrl({ url: walletTransferAttachment.url, name: walletTransferAttachment.name, type: walletTransferAttachment.type });
+                                  }
+                                }}
+                                className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200 flex items-center gap-1.5 transition cursor-pointer"
+                              >
+                                <Eye className="h-3.5 w-3.5 text-slate-500" />
+                                <span>معاينة السكرين</span>
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => setWalletTransferAttachment(null)}
+                              className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
+                              title="حذف سكرين المحفظة"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              <span>حذف</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* =====================================================================
@@ -1661,36 +2172,91 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                     )}
                   </div>
 
-                  {/* Payment Method & Payout Details Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block font-extrabold text-slate-700 mb-1.5 text-xs">
-                        طريقة التحويل المفضلة للمستفيد *
-                      </label>
-                      <select
-                        value={preferredPaymentMethod}
-                        onChange={(e: any) => {
-                          const newMethod = e.target.value as PaymentMethod;
-                          setPreferredPaymentMethod(newMethod);
-                          const detail = getProfilePayoutDetail(newMethod);
-                          setPaymentAccountDetails(detail);
-                          if (formError) setFormError(null);
-                          if (fieldHighlight === 'paymentDetails') setFieldHighlight(null);
-                        }}
-                        className="w-full p-3 bg-white border border-slate-200 rounded-xl font-bold text-xs text-slate-900 focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 shadow-2xs"
-                      >
-                        <option value="instapay">انستاباي (InstaPay)</option>
-                        <option value="bank_transfer">تحويل بنكي فوري (IBAN)</option>
-                        <option value="digital_wallet">محفظة إلكترونية (فودافون كاش / اتصالات / أورانج)</option>
-                        <option value="cash">نقداً من الخزينة</option>
-                      </select>
-                    </div>
+                  {/* Payment Method Selector */}
+                  <div>
+                    <label className="block font-extrabold text-slate-700 mb-1.5 text-xs">
+                      طريقة التحويل المفضلة للمستفيد *
+                    </label>
+                    <select
+                      value={preferredPaymentMethod}
+                      onChange={(e: any) => {
+                        const newMethod = e.target.value as PaymentMethod;
+                        setPreferredPaymentMethod(newMethod);
+                        const detail = getProfilePayoutDetail(newMethod);
+                        setPaymentAccountDetails(detail);
+                        if (formError) setFormError(null);
+                        if (fieldHighlight === 'paymentDetails') setFieldHighlight(null);
+                      }}
+                      className="w-full p-3 bg-white border border-slate-200 rounded-xl font-bold text-xs text-slate-900 focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 shadow-2xs"
+                    >
+                      <option value="instapay">انستاباي (InstaPay)</option>
+                      <option value="bank_transfer">تحويل بنكي فوري (IBAN)</option>
+                      <option value="digital_wallet">محفظة إلكترونية (فودافون كاش / اتصالات / أورانج)</option>
+                      <option value="cash">نقداً من الخزينة</option>
+                    </select>
+                  </div>
 
+                  {/* Payout Details Grid (With dedicated Beneficiary Name for InstaPay) */}
+                  {preferredPaymentMethod === 'instapay' ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 bg-emerald-50/50 p-4 rounded-2xl border border-emerald-200/90 shadow-2xs">
+                      {/* 1. InstaPay Address / Mobile */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="font-extrabold text-slate-800 text-xs">
+                            عنوان انستاباي (IPA / رقم الهاتف) *
+                          </label>
+                          {!paymentAccountDetails && getProfilePayoutDetail('instapay') && (
+                            <button
+                              type="button"
+                              onClick={() => setPaymentAccountDetails(getProfilePayoutDetail('instapay'))}
+                              className="text-[10px] text-teal-700 font-bold hover:underline cursor-pointer flex items-center gap-1"
+                            >
+                              ⚡ ملء من بروفايلي
+                            </button>
+                          )}
+                        </div>
+                        <input
+                          ref={paymentInputRef}
+                          type="text"
+                          value={paymentAccountDetails}
+                          onChange={(e) => {
+                            setPaymentAccountDetails(sanitizeInstaPay(e.target.value));
+                            if (formError) setFormError(null);
+                            if (fieldHighlight === 'paymentDetails') setFieldHighlight(null);
+                          }}
+                          placeholder="user@instapay أو 010xxxxxxxx"
+                          className={`w-full p-3 bg-white border rounded-xl font-mono text-xs shadow-2xs transition-all ${
+                            fieldHighlight === 'paymentDetails' 
+                              ? 'border-rose-500 ring-2 ring-rose-500/20' 
+                              : 'border-slate-200 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 text-slate-900'
+                          }`}
+                        />
+                      </div>
+
+                      {/* 2. Beneficiary Full Name */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="font-extrabold text-slate-800 text-xs">
+                            اسم المستفيد الرباعي (المسجل في انستاباي) *
+                          </label>
+                          <span className="text-[10px] text-emerald-800 font-bold bg-white px-2 py-0.5 rounded-md border border-emerald-200">
+                            لمطابقة التحويل
+                          </span>
+                        </div>
+                        <input
+                          type="text"
+                          value={beneficiaryName}
+                          onChange={(e) => setBeneficiaryName(e.target.value)}
+                          placeholder="مثال: أحمد محمد عبد الرحمن علي"
+                          className="w-full p-3 bg-white border border-slate-200 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 rounded-xl font-bold text-xs text-slate-900 shadow-2xs"
+                        />
+                      </div>
+                    </div>
+                  ) : (
                     <div>
                       <div className="flex items-center justify-between mb-1.5">
                         <label className="font-extrabold text-slate-700 text-xs">
-                          {preferredPaymentMethod === 'instapay' ? 'عنوان انستاباي (IPA / رقم الهاتف) *' :
-                           preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية (أرقام فقط) *' :
+                          {preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية (أرقام فقط) *' :
                            preferredPaymentMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN) *' : 'جهة الاستلام'}
                         </label>
                         {!paymentAccountDetails && getProfilePayoutDetail(preferredPaymentMethod) && (
@@ -1719,8 +2285,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                             setPaymentAccountDetails(sanitizeDigitalWallet(raw));
                           } else if (preferredPaymentMethod === 'bank_transfer') {
                             setPaymentAccountDetails(sanitizeIBAN(raw));
-                          } else if (preferredPaymentMethod === 'instapay') {
-                            setPaymentAccountDetails(sanitizeInstaPay(raw));
                           } else {
                             setPaymentAccountDetails(raw);
                           }
@@ -1728,7 +2292,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                           if (fieldHighlight === 'paymentDetails') setFieldHighlight(null);
                         }}
                         placeholder={
-                          preferredPaymentMethod === 'instapay' ? 'user@instapay أو رقم الهاتف' :
                           preferredPaymentMethod === 'digital_wallet' ? '010xxxxxxxx (أرقام فقط)' :
                           preferredPaymentMethod === 'bank_transfer' ? 'EG... / SA... (حروف وأرقام)' : 'الفرع أو الخزينة'
                         }
@@ -1739,67 +2302,146 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         }`}
                       />
                     </div>
-                  </div>
+                  )}
 
-                  {/* Items Detail (Optional) */}
+                  {/* Installment Device Selector Box (When isInstallmentRequest) */}
+                  {isInstallmentRequest && (
+                    <div className="bg-blue-50/70 border-2 border-blue-200/90 rounded-2xl p-4 space-y-3 shadow-2xs">
+                      <div className="flex items-center justify-between border-b border-blue-200/70 pb-2">
+                        <div className="flex items-center gap-1.5 font-black text-xs text-blue-950">
+                          <span>⚙️ بيانات وتفاصيل الجهاز المقسط له *</span>
+                        </div>
+                        <span className="text-[10px] font-bold text-blue-800 bg-blue-100/90 px-2.5 py-0.5 rounded-full border border-blue-300">
+                          سداد قسط شهري
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block font-extrabold text-slate-800 text-xs mb-1.5">
+                            نوع وعمل الجهاز المقسط له *
+                          </label>
+                          <select
+                            value={installmentDeviceType}
+                            onChange={(e) => setInstallmentDeviceType(e.target.value)}
+                            className="w-full p-3 bg-white border border-blue-200 rounded-xl font-bold text-xs text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10 shadow-2xs"
+                          >
+                            {INSTALLMENT_DEVICE_OPTIONS.map((dev) => (
+                              <option key={dev} value={dev}>{dev}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block font-extrabold text-slate-800 text-xs mb-1.5">
+                            وصف وموديل الجهاز والفرع (اختياري)
+                          </label>
+                          <input
+                            type="text"
+                            value={installmentDeviceDescription}
+                            onChange={(e) => setInstallmentDeviceDescription(e.target.value)}
+                            placeholder="مثال: ماكينة ديلونجي ديديكا - فرع الدقي، القسط 3 من 10"
+                            className="w-full p-3 bg-white border border-blue-200 rounded-xl font-medium text-xs text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10 shadow-2xs"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Items Detail or Visa Details (Dynamic Label & Quick Suggestions) */}
                   <div className="pt-1">
-                    <label className="block font-extrabold text-slate-700 mb-1.5 text-xs">
-                      بيانات البضاعة أو الأصناف (اختياري - اسم الصنف، الكمية، سعر الوحدة)
-                    </label>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block font-extrabold text-slate-800 text-xs flex items-center gap-1.5">
+                        {isVisaRequest ? (
+                          <>
+                            <span className="text-teal-700 font-black">✈️ نوع التأشيرة وبيانات المسافر *</span>
+                            <span className="text-[10px] text-teal-800 bg-teal-50 px-2 py-0.5 rounded-full border border-teal-200 font-bold">بند التأشيرات</span>
+                          </>
+                        ) : (
+                          <span>بيانات البضاعة أو الأصناف (اختياري - اسم الصنف، الكمية، سعر الوحدة)</span>
+                        )}
+                      </label>
+                    </div>
+
+                    {isVisaRequest && (
+                      <div className="flex flex-wrap gap-1.5 mb-2">
+                        {['سياحية', 'عمرة باركود', 'عمرة خارجي', 'عمل / إقامة', 'زيارة عائلية', 'ترانزيت'].map((vType) => (
+                          <button
+                            key={vType}
+                            type="button"
+                            onClick={() => {
+                              if (!itemsDetail.includes(vType)) {
+                                setItemsDetail(prev => prev ? `${vType} - ${prev}` : `تأشيرة ${vType}`);
+                              }
+                            }}
+                            className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 transition cursor-pointer"
+                          >
+                            +{vType}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
                     <input
                       type="text"
                       value={itemsDetail}
                       onChange={(e) => setItemsDetail(e.target.value)}
-                      placeholder="مثال: فطار مجمع وحليب ومستلزمات، أو 10 كراتين بضاعة x 150 ج.م..."
+                      placeholder={
+                        isVisaRequest 
+                          ? "مثال: تأشيرة سياحية للسعودية - المسافر: أحمد محمد - رقم الجواز: A12345678" 
+                          : "مثال: فطار مجمع وحليب ومستلزمات، أو 10 كراتين بضاعة x 150 ج.م..."
+                      }
                       className="w-full p-3 bg-white border border-slate-200 rounded-xl font-medium text-slate-800 text-xs focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 shadow-2xs"
                     />
                   </div>
 
-                  {/* Justification Field */}
-                  <div className="pt-1">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label className="font-extrabold text-slate-700 text-xs">المبرر المالي للطلب *</label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsCustomJustification(!isCustomJustification);
-                          if (!isCustomJustification && !customJustification) {
-                            setCustomJustification(selectedJustPreset.startsWith('✏️') ? '' : selectedJustPreset);
-                          }
-                        }}
-                        className="text-[11px] text-teal-700 hover:text-teal-800 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
-                      >
-                        {isCustomJustification ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة مبرر مخصص'}
-                      </button>
-                    </div>
+                  {/* Justification Field (Hidden when isVisaRequest per requirements) */}
+                  {!isVisaRequest && (
+                    <div className="pt-1">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="font-extrabold text-slate-700 text-xs">المبرر المالي للطلب *</label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsCustomJustification(!isCustomJustification);
+                            if (!isCustomJustification && !customJustification) {
+                              setCustomJustification(selectedJustPreset.startsWith('✏️') ? '' : selectedJustPreset);
+                            }
+                          }}
+                          className="text-[11px] text-teal-700 hover:text-teal-800 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
+                        >
+                          {isCustomJustification ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة مبرر مخصص'}
+                        </button>
+                      </div>
 
-                    {isCustomJustification ? (
-                      <textarea
-                        rows={2}
-                        value={customJustification}
-                        onChange={(e) => setCustomJustification(e.target.value)}
-                        placeholder="اكتب المبرر المالي والتشغيلي للطلب بالتفصيل هنا..."
-                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 text-slate-900 text-xs shadow-2xs"
-                      />
-                    ) : (
-                      <select
-                        value={selectedJustPreset}
-                        onChange={(e) => {
-                          if (e.target.value.startsWith('✏️')) {
-                            setIsCustomJustification(true);
-                            setCustomJustification('');
-                          } else {
-                            setSelectedJustPreset(e.target.value);
-                          }
-                        }}
-                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 font-semibold text-slate-900 text-xs shadow-2xs"
-                      >
-                        {EXPENSE_JUSTIFICATION_TEMPLATES.map((tpl) => (
-                          <option key={tpl} value={tpl}>{tpl}</option>
-                        ))}
-                      </select>
-                    )}
-                  </div>
+                      {isCustomJustification ? (
+                        <textarea
+                          rows={2}
+                          value={customJustification}
+                          onChange={(e) => setCustomJustification(e.target.value)}
+                          placeholder="اكتب المبرر المالي والتشغيلي للطلب بالتفصيل هنا..."
+                          className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 text-slate-900 text-xs shadow-2xs"
+                        />
+                      ) : (
+                        <select
+                          value={selectedJustPreset}
+                          onChange={(e) => {
+                            if (e.target.value.startsWith('✏️')) {
+                              setIsCustomJustification(true);
+                              setCustomJustification('');
+                            } else {
+                              setSelectedJustPreset(e.target.value);
+                            }
+                          }}
+                          className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 font-semibold text-slate-900 text-xs shadow-2xs"
+                        >
+                          {EXPENSE_JUSTIFICATION_TEMPLATES.map((tpl) => (
+                            <option key={tpl} value={tpl}>{tpl}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  )}
 
                   {/* Description Field */}
                   <div className="pt-1">

@@ -463,11 +463,67 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 </div>
               </div>
 
-              {/* Goods / Items Details */}
+              {/* Payout Details & Beneficiary Information */}
+              <div className="bg-slate-50/80 p-3.5 rounded-xl border border-slate-200 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div>
+                    <span className="text-slate-400 block text-[10px] mb-0.5">طريقة التحويل المطلوبة:</span>
+                    <span className="font-bold text-slate-900">
+                      {request.preferredPaymentMethod === 'instapay' ? 'انستاباي (InstaPay) 📱' :
+                       request.preferredPaymentMethod === 'digital_wallet' ? 'محفظة إلكترونية 💳' :
+                       request.preferredPaymentMethod === 'bank_transfer' ? 'تحويل بنكي (IBAN) 🏦' :
+                       request.preferredPaymentMethod === 'cash' ? 'نقداً من الخزينة 💵' : 'أخرى'}
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-slate-400 block text-[10px] mb-0.5">عنوان / رقم حساب المستفيد:</span>
+                    <span className="font-mono font-bold text-slate-900">
+                      {request.paymentAccountDetails || 'الحساب المسجل لدى الإدارة'}
+                    </span>
+                  </div>
+
+                  {request.beneficiaryName && (
+                    <div>
+                      <span className="text-slate-400 block text-[10px] mb-0.5">اسم المستفيد الرباعي (انستاباي):</span>
+                      <span className="font-bold text-emerald-800">
+                        {request.beneficiaryName}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Installment Device Information */}
+              {(request.installmentDeviceType || request.installmentDeviceDescription) && (
+                <div className="bg-blue-50/70 border border-blue-200/90 rounded-xl p-3.5 text-xs space-y-1">
+                  <span className="font-bold text-blue-950 block mb-1">
+                    ⚙️ بيانات ومواصفات الجهاز المقسط له:
+                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-slate-800">
+                    {request.installmentDeviceType && (
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">نوع وعمل الجهاز:</span>
+                        <span className="font-bold text-blue-900">{request.installmentDeviceType}</span>
+                      </div>
+                    )}
+                    {request.installmentDeviceDescription && (
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">وصف وموديل الجهاز:</span>
+                        <span className="font-bold text-slate-900">{request.installmentDeviceDescription}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Goods / Items Details or Visa Details */}
               {request.itemsDetail && (
                 <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3.5 text-xs">
                   <span className="font-bold text-amber-900 block mb-1">
-                    📦 بيانات البضاعة أو الأصناف المرتبطة بالطلب:
+                    {request.visaDocumentAttachment || request.title?.includes('تأشير') || request.serviceCategoryName?.includes('تأشير')
+                      ? '✈️ نوع التأشيرة وبيانات المسافر:'
+                      : '📦 بيانات البضاعة أو الأصناف المرتبطة بالطلب:'}
                   </span>
                   <p className="text-slate-800 font-medium whitespace-pre-wrap">{request.itemsDetail}</p>
                 </div>
@@ -608,6 +664,185 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                       className="hidden"
                     />
                   </label>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Dedicated Attachments: Visa Document, Installment Transfer, Wallet Transfer */}
+          {(request.visaDocumentAttachment || request.installmentTransferAttachment || request.walletTransferAttachment) && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              {/* Visa Document Attachment Card */}
+              {request.visaDocumentAttachment && (
+                <div className="bg-teal-50/70 border-2 border-teal-200 rounded-2xl p-3.5 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-black text-teal-950 flex items-center gap-1.5 text-xs">
+                      <span>✈️ مستند التأشيرة أو جواز السفر</span>
+                    </span>
+                    <span className="text-[10px] bg-teal-100 text-teal-800 font-bold px-2 py-0.5 rounded-full">
+                      مستند تأشيرة
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 pt-1 border-t border-teal-100">
+                    <div className="flex items-center gap-2 truncate">
+                      {request.visaDocumentAttachment.url && (request.visaDocumentAttachment.type === 'png' || request.visaDocumentAttachment.type === 'jpg' || request.visaDocumentAttachment.type?.startsWith('image/')) ? (
+                        <button
+                          type="button"
+                          onClick={() => setPreviewInvoice({
+                            url: request.visaDocumentAttachment!.url,
+                            name: request.visaDocumentAttachment!.name,
+                            size: request.visaDocumentAttachment!.size,
+                            type: request.visaDocumentAttachment!.type,
+                          })}
+                          className="cursor-pointer shrink-0"
+                          title="معاينة المستند"
+                        >
+                          <img src={request.visaDocumentAttachment.url} alt="تأشيرة" className="w-10 h-10 rounded-lg object-cover border border-teal-300 shadow-2xs" />
+                        </button>
+                      ) : (
+                        <div className="w-10 h-10 rounded-lg bg-teal-100 text-teal-800 font-bold text-xs flex items-center justify-center border border-teal-200 shrink-0">
+                          PDF
+                        </div>
+                      )}
+                      <div className="truncate">
+                        <span className="font-bold text-slate-800 truncate block text-xs">{request.visaDocumentAttachment.name}</span>
+                        <span className="text-[10px] text-slate-400 font-mono">{request.visaDocumentAttachment.size}</span>
+                      </div>
+                    </div>
+
+                    {request.visaDocumentAttachment.url && (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewInvoice({
+                          url: request.visaDocumentAttachment!.url,
+                          name: request.visaDocumentAttachment!.name,
+                          size: request.visaDocumentAttachment!.size,
+                          type: request.visaDocumentAttachment!.type,
+                        })}
+                        className="px-2.5 py-1 bg-teal-700 hover:bg-teal-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        <span>معاينة</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Installment Transfer Screenshot Card */}
+              {request.installmentTransferAttachment && (
+                <div className="bg-blue-50/70 border-2 border-blue-200 rounded-2xl p-3.5 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-black text-blue-950 flex items-center gap-1.5 text-xs">
+                      <span>📅 سكرين شوت سداد مبلغ القسط</span>
+                    </span>
+                    <span className="text-[10px] bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded-full">
+                      سداد القسط
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 pt-1 border-t border-blue-100">
+                    <div className="flex items-center gap-2 truncate">
+                      {request.installmentTransferAttachment.url && (request.installmentTransferAttachment.type === 'png' || request.installmentTransferAttachment.type === 'jpg' || request.installmentTransferAttachment.type?.startsWith('image/')) ? (
+                        <button
+                          type="button"
+                          onClick={() => setPreviewInvoice({
+                            url: request.installmentTransferAttachment!.url,
+                            name: request.installmentTransferAttachment!.name,
+                            size: request.installmentTransferAttachment!.size,
+                            type: request.installmentTransferAttachment!.type,
+                          })}
+                          className="cursor-pointer shrink-0"
+                          title="معاينة السكرين"
+                        >
+                          <img src={request.installmentTransferAttachment.url} alt="قسط" className="w-10 h-10 rounded-lg object-cover border border-blue-300 shadow-2xs" />
+                        </button>
+                      ) : (
+                        <div className="w-10 h-10 rounded-lg bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center border border-blue-200 shrink-0">
+                          PDF
+                        </div>
+                      )}
+                      <div className="truncate">
+                        <span className="font-bold text-slate-800 truncate block text-xs">{request.installmentTransferAttachment.name}</span>
+                        <span className="text-[10px] text-slate-400 font-mono">{request.installmentTransferAttachment.size}</span>
+                      </div>
+                    </div>
+
+                    {request.installmentTransferAttachment.url && (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewInvoice({
+                          url: request.installmentTransferAttachment!.url,
+                          name: request.installmentTransferAttachment!.name,
+                          size: request.installmentTransferAttachment!.size,
+                          type: request.installmentTransferAttachment!.type,
+                        })}
+                        className="px-2.5 py-1 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        <span>معاينة</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Wallet Top-up Screenshot Card */}
+              {request.walletTransferAttachment && (
+                <div className="bg-purple-50/70 border-2 border-purple-200 rounded-2xl p-3.5 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-black text-purple-950 flex items-center gap-1.5 text-xs">
+                      <span>⚡ سكرين شحن وتحويل المحفظة</span>
+                    </span>
+                    <span className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-full">
+                      شحن محفظة
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 pt-1 border-t border-purple-100">
+                    <div className="flex items-center gap-2 truncate">
+                      {request.walletTransferAttachment.url && (request.walletTransferAttachment.type === 'png' || request.walletTransferAttachment.type === 'jpg' || request.walletTransferAttachment.type?.startsWith('image/')) ? (
+                        <button
+                          type="button"
+                          onClick={() => setPreviewInvoice({
+                            url: request.walletTransferAttachment!.url,
+                            name: request.walletTransferAttachment!.name,
+                            size: request.walletTransferAttachment!.size,
+                            type: request.walletTransferAttachment!.type,
+                          })}
+                          className="cursor-pointer shrink-0"
+                          title="معاينة السكرين"
+                        >
+                          <img src={request.walletTransferAttachment.url} alt="محفظة" className="w-10 h-10 rounded-lg object-cover border border-purple-300 shadow-2xs" />
+                        </button>
+                      ) : (
+                        <div className="w-10 h-10 rounded-lg bg-purple-100 text-purple-800 font-bold text-xs flex items-center justify-center border border-purple-200 shrink-0">
+                          PDF
+                        </div>
+                      )}
+                      <div className="truncate">
+                        <span className="font-bold text-slate-800 truncate block text-xs">{request.walletTransferAttachment.name}</span>
+                        <span className="text-[10px] text-slate-400 font-mono">{request.walletTransferAttachment.size}</span>
+                      </div>
+                    </div>
+
+                    {request.walletTransferAttachment.url && (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewInvoice({
+                          url: request.walletTransferAttachment!.url,
+                          name: request.walletTransferAttachment!.name,
+                          size: request.walletTransferAttachment!.size,
+                          type: request.walletTransferAttachment!.type,
+                        })}
+                        className="px-2.5 py-1 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        <span>معاينة</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

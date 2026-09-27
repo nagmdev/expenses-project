@@ -170,6 +170,7 @@ export interface ExpenseRequest {
   requesterPhone?: string;
   preferredPaymentMethod?: PaymentMethod;
   paymentAccountDetails?: string; // e.g. InstaPay IPA (user@instapay) or IBAN or Mobile Wallet #
+  beneficiaryName?: string; // اسم المستفيد الرباعي (المسجل في انستاباي أو الحساب البنكي)
   serviceCategoryId: string;
   serviceCategoryName: string;
   providerId: string;
@@ -183,11 +184,16 @@ export interface ExpenseRequest {
   urgency: 'low' | 'medium' | 'high';
   requestType?: RequestType; // 'expense' (صرف) أو 'income' (توريد) أو 'advance' (سلفة)
   targetAccountId?: string; // الخزينة أو الحساب المالي المرتبط
-  itemsDetail?: string; // تفاصيل البضاعة أو الأصناف (اسم الصنف، الكمية، السعر)
+  itemsDetail?: string; // تفاصيل البضاعة أو الأصناف (أو نوع وبيانات التأشيرة)
   isPrepaidByRequester?: boolean; // هل تم سداد المبلغ من الجيب الخاص مسبقاً (استرداد مصروفات / دفع شخصي)
   invoiceNumber?: string; // رقم الفاتورة أو الإيصال
   invoiceDate?: string; // تاريخ الفاتورة
   invoiceAttachment?: RequestAttachment; // المرفق الرئيسي للفاتورة أو إيصال السداد
+  visaDocumentAttachment?: RequestAttachment; // مرفق مستند التأشيرة أو جواز السفر
+  installmentTransferAttachment?: RequestAttachment; // مرفق سكرين شوت تحويل مبلغ سداد القسط
+  installmentDeviceType?: string; // نوع الجهاز المقسط له (ماكينة قهوة اسبرسو، ماكينة قهوة تركي، مبرد مياه، إلخ)
+  installmentDeviceDescription?: string; // وصف وتفاصيل الجهاز المقسط له
+  walletTransferAttachment?: RequestAttachment; // مرفق سكرين إثبات الشحن والتحويل للمحفظة
   // Loan & Advance specifics
   installmentsCount?: number;
   installmentAmount?: number;

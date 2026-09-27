@@ -332,11 +332,17 @@ interface AppContextType {
     attachments?: RequestAttachment[];
     preferredPaymentMethod?: PaymentMethod;
     paymentAccountDetails?: string;
+    beneficiaryName?: string;
     orgId?: string;
     isPrepaidByRequester?: boolean;
     invoiceNumber?: string;
     invoiceDate?: string;
     invoiceAttachment?: RequestAttachment;
+    visaDocumentAttachment?: RequestAttachment;
+    installmentTransferAttachment?: RequestAttachment;
+    installmentDeviceType?: string;
+    installmentDeviceDescription?: string;
+    walletTransferAttachment?: RequestAttachment;
   }) => Promise<void>;
   
   updateRequest: (requestId: string, updatedFields: Partial<ExpenseRequest>) => Promise<void>;
@@ -4147,11 +4153,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     attachments?: RequestAttachment[];
     preferredPaymentMethod?: PaymentMethod;
     paymentAccountDetails?: string;
+    beneficiaryName?: string;
     orgId?: string;
     isPrepaidByRequester?: boolean;
     invoiceNumber?: string;
     invoiceDate?: string;
     invoiceAttachment?: RequestAttachment;
+    visaDocumentAttachment?: RequestAttachment;
+    installmentTransferAttachment?: RequestAttachment;
+    installmentDeviceType?: string;
+    installmentDeviceDescription?: string;
+    walletTransferAttachment?: RequestAttachment;
   }) => {
     const service = rawServices.find(s => s.id === data.serviceCategoryId);
     const provider = rawProviders.find(p => p.id === data.providerId);
@@ -4181,6 +4193,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (data.invoiceAttachment && !attachments.some(a => a.id === data.invoiceAttachment!.id)) {
       attachments = [data.invoiceAttachment, ...attachments];
+    }
+    if (data.visaDocumentAttachment && !attachments.some(a => a.id === data.visaDocumentAttachment!.id)) {
+      attachments.push(data.visaDocumentAttachment);
+    }
+    if (data.installmentTransferAttachment && !attachments.some(a => a.id === data.installmentTransferAttachment!.id)) {
+      attachments.push(data.installmentTransferAttachment);
+    }
+    if (data.walletTransferAttachment && !attachments.some(a => a.id === data.walletTransferAttachment!.id)) {
+      attachments.push(data.walletTransferAttachment);
     }
 
     const isIncome = data.requestType === 'income';
@@ -4220,6 +4241,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       requesterPhone: currentUser.phone || userMemberRecord?.phone,
       preferredPaymentMethod: data.preferredPaymentMethod || (isIncome ? 'cash' : 'instapay'),
       paymentAccountDetails: data.paymentAccountDetails || '',
+      beneficiaryName: data.beneficiaryName,
       serviceCategoryId: defaultSrvId,
       serviceCategoryName: defaultSrvName,
       providerId: defaultProvId,
@@ -4238,6 +4260,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       invoiceNumber: data.invoiceNumber,
       invoiceDate: data.invoiceDate,
       invoiceAttachment: data.invoiceAttachment,
+      visaDocumentAttachment: data.visaDocumentAttachment,
+      installmentTransferAttachment: data.installmentTransferAttachment,
+      installmentDeviceType: data.installmentDeviceType,
+      installmentDeviceDescription: data.installmentDeviceDescription,
+      walletTransferAttachment: data.walletTransferAttachment,
       attachments,
       comments: [],
       timeline: [
