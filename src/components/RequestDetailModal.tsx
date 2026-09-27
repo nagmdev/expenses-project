@@ -735,10 +735,10 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 <div className="bg-blue-50/70 border-2 border-blue-200 rounded-2xl p-3.5 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="font-black text-blue-950 flex items-center gap-1.5 text-xs">
-                      <span>📅 سكرين شوت سداد مبلغ القسط</span>
+                      <span>📅 سكرين شوت تحويل أو إثبات سداد القسط (انستاباي / سداد بنكي)</span>
                     </span>
                     <span className="text-[10px] bg-blue-100 text-blue-800 font-bold px-2 py-0.5 rounded-full">
-                      سداد القسط
+                      سداد بنكي / انستاباي
                     </span>
                   </div>
 

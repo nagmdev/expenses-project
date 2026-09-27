@@ -90,15 +90,85 @@ export const INCOME_PAYMENT_SHAPES = [
   },
 ];
 
-const INSTALLMENT_DEVICE_OPTIONS = [
-  'ماكينة قهوة اسبرسو',
-  'ماكينة قهوة تركي',
-  'مبرد مياه',
-  'تكييف وتهوية',
-  'طابعة وماكينة تصوير مستندات',
-  'أجهزة حاسب آلي ولابتوب',
-  'شاشة عرض / تلفزيون',
-  'أخرى (تحديد يدوي)',
+interface InstallmentDevicePreset {
+  id: string;
+  name: string;
+  badge: string;
+  category: string;
+  description: string;
+}
+
+const INSTALLMENT_DEVICE_PRESETS: InstallmentDevicePreset[] = [
+  {
+    id: 'okka_espresso',
+    name: 'ماكينة أوكا اسبريسو كافيه (Okka Espresso)',
+    badge: '☕ أوكا اسبريسو كافيه',
+    category: 'معدات القهوة والمشروبات',
+    description: 'ماكينة تحضير قهوة اسبريسو وكابتشينو ماركة أوكا (Okka Espresso Coffee Machine) - قسط شهري لمعدات الضيافة ومشروبات المقر',
+  },
+  {
+    id: 'turkish_coffee',
+    name: 'ماكينة قهوة تركي (Turkish Coffee Machine)',
+    badge: '🇹🇷 ماكينة قهوة تركي',
+    category: 'معدات القهوة والمشروبات',
+    description: 'ماكينة إعداد قهوة تركي أوتوماتيكية ماركة أوكا / بيكو (Turkish Coffee Machine) - قسط شهري لمعدات البوفيه',
+  },
+  {
+    id: 'coffee_machine',
+    name: 'كافي ماشين / صانعة قهوة (Coffee Machine)',
+    badge: '☕ كافي ماشين مدمجة',
+    category: 'معدات القهوة والمشروبات',
+    description: 'صانعة قهوة ومشروبات ساخنة مفلترة للمقر (All-in-One Coffee Machine) - سداد قسط شهري',
+  },
+  {
+    id: 'water_dispenser',
+    name: 'مبرد مياه ساخن وبارد (Water Dispenser)',
+    badge: '💧 مبرد مياه',
+    category: 'أجهزة التبريد والضيافة',
+    description: 'مبرد وموزع مياه نقي ساخن وبارد مع كابينة سفلية (Water Dispenser) - قسط شهري لتجهيزات المقر',
+  },
+  {
+    id: 'air_conditioner',
+    name: 'تكييف هواء سبليت (Air Conditioner)',
+    badge: '❄️ تكييف هواء',
+    category: 'التكييف والتهوية',
+    description: 'جهاز تكييف هواء سبليت موفر للطاقة لتبريد وتكييف مكاتب العمل والاجتماعات - قسط شهري',
+  },
+  {
+    id: 'printer_copier',
+    name: 'طابعة وماكينة تصوير مستندات (Printer & Copier)',
+    badge: '🖨️ طابعة وتصوير مستندات',
+    category: 'أجهزة مكتبية ومستندات',
+    description: 'ماكينة تصوير مستندات وطابعة ليزر متعددة الوظائف والمسح الضوئي (Multi-Function Printer) - قسط شهري',
+  },
+  {
+    id: 'computers_laptops',
+    name: 'أجهزة كمبيوتر ولابتوب (Laptops & Computers)',
+    badge: '💻 كمبيوتر ولابتوب',
+    category: 'تكنولوجيا المعلومات',
+    description: 'أجهزة حاسب آلي ولابتوبات عمل للموظفين وفريق العمل - قسط شهري للأجهزة المكتبية',
+  },
+  {
+    id: 'smart_tv',
+    name: 'شاشة عرض وتلفزيون ذكي (Smart TV / Display)',
+    badge: '📺 شاشة عرض واجتماعات',
+    category: 'شاشات وعرض',
+    description: 'شاشة عرض تفاعلية ذكية فائقة الدقة لغرف الاجتماعات والعرض التقديمي - قسط شهري',
+  },
+  {
+    id: 'refrigerator',
+    name: 'ثلاجة مكتبية وبوفيه (Office Refrigerator)',
+    badge: '🧊 ثلاجة مكتبية',
+    category: 'أجهزة البوفيه',
+    description: 'ثلاجة حفظ وتبريد الأطعمة والمشروبات لمطبخ وبوفيه مقر الشركة - قسط شهري',
+  },
+  {
+    id: 'other_device',
+    name: 'جهاز أو معدات أخرى (تحديد يدوي)',
+    badge: '⚙️ جهاز آخر مخصص',
+    category: 'أخرى',
+    description: 'سداد القسط الشهري لأجهزة ومعدات تشغيلية معتمدة بالمقر',
+  },
 ];
 
 const EXPENSE_QUICK_TEMPLATES = [
@@ -365,8 +435,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [installmentTransferAttachment, setInstallmentTransferAttachment] = useState<RequestAttachment | null>(null);
   const [isUploadingInstallmentTransfer, setIsUploadingInstallmentTransfer] = useState<boolean>(false);
   const installmentFileInputRef = useRef<HTMLInputElement>(null);
-  const [installmentDeviceType, setInstallmentDeviceType] = useState<string>('ماكينة قهوة اسبرسو');
-  const [installmentDeviceDescription, setInstallmentDeviceDescription] = useState<string>('');
+  const [installmentDeviceType, setInstallmentDeviceType] = useState<string>(INSTALLMENT_DEVICE_PRESETS[0].name);
+  const [installmentDeviceDescription, setInstallmentDeviceDescription] = useState<string>(INSTALLMENT_DEVICE_PRESETS[0].description);
 
   // Dedicated Wallet Top-up Screenshot Attachment States
   const [walletTransferAttachment, setWalletTransferAttachment] = useState<RequestAttachment | null>(null);
@@ -522,7 +592,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
         setVisaDocumentAttachment(editingRequest.visaDocumentAttachment || null);
         setInstallmentTransferAttachment(editingRequest.installmentTransferAttachment || null);
-        setInstallmentDeviceType(editingRequest.installmentDeviceType || 'ماكينة قهوة اسبرسو');
+        setInstallmentDeviceType(editingRequest.installmentDeviceType || INSTALLMENT_DEVICE_PRESETS[0].name);
         setInstallmentDeviceDescription(editingRequest.installmentDeviceDescription || '');
         setWalletTransferAttachment(editingRequest.walletTransferAttachment || null);
       } else {
@@ -540,8 +610,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         setInvoiceAttachment(null);
         setVisaDocumentAttachment(null);
         setInstallmentTransferAttachment(null);
-        setInstallmentDeviceType('ماكينة قهوة اسبرسو');
-        setInstallmentDeviceDescription('');
+        setInstallmentDeviceType(INSTALLMENT_DEVICE_PRESETS[0].name);
+        setInstallmentDeviceDescription(INSTALLMENT_DEVICE_PRESETS[0].description);
         setWalletTransferAttachment(null);
       }
     }
@@ -700,6 +770,11 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     if (matched) {
       setSelectedServiceId(matched.id);
       applyServiceCategoryDefaults(matched);
+    }
+
+    if (tpl.templateType === 'installment') {
+      setInstallmentDeviceType(INSTALLMENT_DEVICE_PRESETS[0].name);
+      setInstallmentDeviceDescription(INSTALLMENT_DEVICE_PRESETS[0].description);
     }
 
     // Auto-focus amount input so the user can easily enter the cost!
@@ -1928,12 +2003,15 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   {/* Installment Transfer Screenshot Area (When isInstallmentRequest) */}
                   {isInstallmentRequest && (
                     <div className="pt-3 border-t border-slate-100 space-y-2">
-                      <div className="flex items-center justify-between mb-1.5">
+                      <div className="flex items-center justify-between mb-1.5 flex-wrap gap-1">
                         <label className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">
                           <Paperclip className="h-3.5 w-3.5 text-blue-600" />
-                          <span>مرفق سكرين شوت تحويل لمبلغ سداد القسط *</span>
+                          <span>مرفق سكرين التحويل أو إثبات السداد (انستاباي أو سداد بنكي) *</span>
                         </label>
-                        <span className="text-[10px] text-blue-800 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200 font-bold">إثبات سداد القسط</span>
+                        <div className="flex items-center gap-1">
+                          <span className="text-[10px] text-blue-900 bg-blue-100/80 px-2 py-0.5 rounded-full border border-blue-200 font-bold">⚡ انستاباي</span>
+                          <span className="text-[10px] text-indigo-900 bg-indigo-100/80 px-2 py-0.5 rounded-full border border-indigo-200 font-bold">🏦 سداد بنكي</span>
+                        </div>
                       </div>
 
                       <input
@@ -1948,7 +2026,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       {!installmentTransferAttachment ? (
                         <div 
                           onClick={() => !isUploadingInstallmentTransfer && installmentFileInputRef.current?.click()}
-                          className={`border-2 border-dashed border-blue-200 hover:border-blue-500 bg-blue-50/40 hover:bg-blue-50/70 rounded-2xl p-5 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-2 group ${
+                          className={`border-2 border-dashed border-blue-300 hover:border-blue-500 bg-blue-50/50 hover:bg-blue-50/80 rounded-2xl p-5 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-2 group ${
                             isUploadingInstallmentTransfer ? 'opacity-70 pointer-events-none' : ''
                           }`}
                         >
@@ -1961,10 +2039,10 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                           </div>
                           <div className="space-y-0.5">
                             <span className="text-xs font-bold text-slate-800 block group-hover:text-blue-950 transition-colors">
-                              {isUploadingInstallmentTransfer ? 'جاري ضغط ورفع سكرين التحويل...' : 'انقر هنا لرفع سكرين شوت تحويل مبلغ سداد القسط'}
+                              {isUploadingInstallmentTransfer ? 'جاري ضغط ورفع سكرين التحويل...' : 'انقر هنا لرفع سكرين شوت تحويل أو سداد مبلغ القسط'}
                             </span>
                             <span className="text-[11px] text-slate-500 block">
-                              إشعار تحويل بنكي أو سكرين شوت إنستاباي / محفظة لمبلغ القسط
+                              إشعار تحويل بنكي (Bank Transfer) أو سكرين شوت إنستاباي (InstaPay) لمبلغ القسط
                             </span>
                           </div>
                         </div>
@@ -2306,41 +2384,87 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                   {/* Installment Device Selector Box (When isInstallmentRequest) */}
                   {isInstallmentRequest && (
-                    <div className="bg-blue-50/70 border-2 border-blue-200/90 rounded-2xl p-4 space-y-3 shadow-2xs">
+                    <div className="bg-blue-50/70 border-2 border-blue-200/90 rounded-2xl p-4 space-y-3.5 shadow-2xs">
                       <div className="flex items-center justify-between border-b border-blue-200/70 pb-2">
                         <div className="flex items-center gap-1.5 font-black text-xs text-blue-950">
-                          <span>⚙️ بيانات وتفاصيل الجهاز المقسط له *</span>
+                          <span>⚙️ نوع وتفاصيل الجهاز المقسط له (اختيار وتعبئة بنقرة واحدة One-Touch) *</span>
                         </div>
                         <span className="text-[10px] font-bold text-blue-800 bg-blue-100/90 px-2.5 py-0.5 rounded-full border border-blue-300">
                           سداد قسط شهري
                         </span>
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {/* One-Touch Quick Preset Buttons */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
+                            <span>👇 اختيارات الأجهزة الجاهزة (One-Touch):</span>
+                            <span className="text-[10px] text-blue-700 font-normal">اضغطي لتحديد الجهاز ووصفه الكامل فوراً</span>
+                          </span>
+                          <span className="text-[10px] font-extrabold text-blue-800 bg-blue-100 px-2 py-0.5 rounded-md">
+                            جاهز بالوصف آلياً
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {INSTALLMENT_DEVICE_PRESETS.map((preset) => {
+                            const isSelected = installmentDeviceType === preset.name;
+                            return (
+                              <button
+                                key={preset.id}
+                                type="button"
+                                onClick={() => {
+                                  setInstallmentDeviceType(preset.name);
+                                  setInstallmentDeviceDescription(preset.description);
+                                }}
+                                className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all duration-150 flex items-center gap-1.5 cursor-pointer border shadow-2xs ${
+                                  isSelected 
+                                    ? 'bg-blue-700 text-white border-blue-800 shadow-xs ring-2 ring-blue-400/30 scale-[1.02]' 
+                                    : 'bg-white hover:bg-blue-100/70 text-slate-700 border-blue-200 hover:border-blue-400'
+                                }`}
+                                title={preset.description}
+                              >
+                                <span>{preset.badge}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                         <div>
                           <label className="block font-extrabold text-slate-800 text-xs mb-1.5">
                             نوع وعمل الجهاز المقسط له *
                           </label>
                           <select
                             value={installmentDeviceType}
-                            onChange={(e) => setInstallmentDeviceType(e.target.value)}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setInstallmentDeviceType(val);
+                              const match = INSTALLMENT_DEVICE_PRESETS.find(p => p.name === val);
+                              if (match) {
+                                setInstallmentDeviceDescription(match.description);
+                              }
+                            }}
                             className="w-full p-3 bg-white border border-blue-200 rounded-xl font-bold text-xs text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10 shadow-2xs"
                           >
-                            {INSTALLMENT_DEVICE_OPTIONS.map((dev) => (
-                              <option key={dev} value={dev}>{dev}</option>
+                            {INSTALLMENT_DEVICE_PRESETS.map((preset) => (
+                              <option key={preset.id} value={preset.name}>
+                                {preset.name}
+                              </option>
                             ))}
                           </select>
                         </div>
 
                         <div>
-                          <label className="block font-extrabold text-slate-800 text-xs mb-1.5">
-                            وصف وموديل الجهاز والفرع (اختياري)
+                          <label className="block font-extrabold text-slate-800 text-xs mb-1.5 flex items-center justify-between">
+                            <span>وصف وموديل الجهاز ومواصفات القسط *</span>
+                            <span className="text-[10px] text-blue-700 font-bold">تعبئة آلية وقابل للتعديل</span>
                           </label>
                           <input
                             type="text"
                             value={installmentDeviceDescription}
                             onChange={(e) => setInstallmentDeviceDescription(e.target.value)}
-                            placeholder="مثال: ماكينة ديلونجي ديديكا - فرع الدقي، القسط 3 من 10"
+                            placeholder="وصف ومواصفات الجهاز وموديله ورقم القسط..."
                             className="w-full p-3 bg-white border border-blue-200 rounded-xl font-medium text-xs text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10 shadow-2xs"
                           />
                         </div>
