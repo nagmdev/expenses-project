@@ -1899,9 +1899,9 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       <div className="flex items-center justify-between mb-1.5">
                         <label className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">
                           <Paperclip className="h-3.5 w-3.5 text-teal-600" />
-                          <span>مرفق مستند التأشيرة أو جواز السفر *</span>
+                          <span>مرفق مستند التأشيرة أو جواز السفر (اختياري)</span>
                         </label>
-                        <span className="text-[10px] text-teal-800 bg-teal-50 px-2 py-0.5 rounded-full border border-teal-200 font-bold">إثبات التأشيرة</span>
+                        <span className="text-[10px] text-teal-800 bg-teal-50 px-2 py-0.5 rounded-full border border-teal-200 font-bold">اختياري</span>
                       </div>
 
                       <input
@@ -2006,11 +2006,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       <div className="flex items-center justify-between mb-1.5 flex-wrap gap-1">
                         <label className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">
                           <Paperclip className="h-3.5 w-3.5 text-blue-600" />
-                          <span>مرفق سكرين التحويل أو إثبات السداد (انستاباي أو سداد بنكي) *</span>
+                          <span>مرفق سكرين التحويل أو إثبات السداد (انستاباي أو سداد بنكي) (اختياري)</span>
                         </label>
                         <div className="flex items-center gap-1">
                           <span className="text-[10px] text-blue-900 bg-blue-100/80 px-2 py-0.5 rounded-full border border-blue-200 font-bold">⚡ انستاباي</span>
                           <span className="text-[10px] text-indigo-900 bg-indigo-100/80 px-2 py-0.5 rounded-full border border-indigo-200 font-bold">🏦 سداد بنكي</span>
+                          <span className="text-[10px] text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200 font-bold">اختياري</span>
                         </div>
                       </div>
 
@@ -2116,9 +2117,9 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       <div className="flex items-center justify-between mb-1.5">
                         <label className="font-extrabold text-slate-800 flex items-center gap-1.5 text-xs">
                           <Paperclip className="h-3.5 w-3.5 text-purple-600" />
-                          <span>مرفق سكرين شوت الشحن والتحويل للمحفظة *</span>
+                          <span>مرفق سكرين شوت الشحن والتحويل للمحفظة (اختياري)</span>
                         </label>
-                        <span className="text-[10px] text-purple-800 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200 font-bold">إثبات شحن المحفظة</span>
+                        <span className="text-[10px] text-purple-800 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200 font-bold">اختياري</span>
                       </div>
 
                       <input
