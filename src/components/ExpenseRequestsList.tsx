@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { ExpenseRequest, PaymentMethod } from '../types';
 import { 
@@ -35,7 +35,8 @@ import {
   ArrowDownLeft,
   Landmark,
   Pencil,
-  Receipt
+  Receipt,
+  ChevronDown
 } from 'lucide-react';
 import { NewRequestModal } from './NewRequestModal';
 import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
@@ -94,6 +95,24 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   const [requesterFilter, setRequesterFilter] = useState<string>('all');
   const [datePeriodFilter, setDatePeriodFilter] = useState<string>('all');
   const [specificDateFilter, setSpecificDateFilter] = useState<string>('');
+  
+  // Progressive rendering state for instant load and buttery-smooth scrolling
+  const [visibleCount, setVisibleCount] = useState(35);
+
+  useEffect(() => {
+    setVisibleCount(35);
+  }, [
+    search, 
+    statusFilter, 
+    categoryFilter, 
+    providerFilter, 
+    departmentFilter, 
+    urgencyFilter, 
+    paymentMethodFilter, 
+    requesterFilter, 
+    datePeriodFilter, 
+    specificDateFilter
+  ]);
 
   // Inline Actions States
   const [activeAction, setActiveAction] = useState<'none' | 'approve' | 'reject' | 'clarify' | 'disburse'>('none');
@@ -216,6 +235,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     specificDateFilter,
     search
   ]);
+
+  // Sliced requests for progressive rendering
+  const visibleRequests = useMemo(() => {
+    return filteredRequests.slice(0, visibleCount);
+  }, [filteredRequests, visibleCount]);
 
   // Selected Active Request for Deep Tracking Workspace
   const activeRequest: ExpenseRequest | undefined = useMemo(() => {
@@ -889,7 +913,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
           {/* Cards List */}
           <div className="space-y-3">
-            {filteredRequests.map((req) => {
+            {visibleRequests.map((req) => {
               const isSelected = activeRequest?.id === req.id;
               const hasClarification = req.status === 'clarification_requested';
               const isApproved = req.status === 'approved';
@@ -1052,6 +1076,19 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 </div>
               );
             })}
+
+            {visibleCount < filteredRequests.length && (
+              <div className="pt-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount(prev => prev + 35)}
+                  className="w-full py-3 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-2xl border border-slate-200 shadow-2xs transition flex items-center justify-center gap-2 cursor-pointer active:scale-98"
+                >
+                  <span>عرض المزيد من الطلبات (المتبقي: {filteredRequests.length - visibleCount} طلب)</span>
+                  <ChevronDown className="h-4 w-4 text-slate-400" />
+                </button>
+              </div>
+            )}
 
             {filteredRequests.length === 0 && (
               <div className="bg-white p-8 rounded-2xl border border-slate-200 text-center">

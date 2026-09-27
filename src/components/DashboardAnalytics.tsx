@@ -91,17 +91,31 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
 
   const isSuperAdmin = currentRole === 'super_admin';
   const orgList = isSuperAdmin ? (allOrganizations.length > 0 ? allOrganizations : organizations) : organizations;
-  const targetRequests = isSuperAdmin 
-    ? (activeOrgId === 'all' ? allRequests : allRequests.filter(r => r.orgId === activeOrgId)) 
-    : requests;
-  const targetCustodies = isSuperAdmin 
-    ? (activeOrgId === 'all' ? allCustodies : allCustodies.filter(c => c.orgId === activeOrgId)) 
-    : custodies;
-  const targetSettlements = isSuperAdmin 
-    ? (activeOrgId === 'all' ? allCustodySettlements : allCustodySettlements.filter(s => s.orgId === activeOrgId)) 
-    : custodySettlements;
-  const currentOrgServices = isSuperAdmin ? (activeOrgId === 'all' ? allServices : allServices.filter(s => !s.orgIds || s.orgIds.includes(activeOrgId))) : services;
-  const currentOrgProviders = isSuperAdmin ? (activeOrgId === 'all' ? allProviders : allProviders.filter(p => !p.orgId || p.orgId === activeOrgId)) : providers;
+  const targetRequests = useMemo(() => {
+    return isSuperAdmin 
+      ? (activeOrgId === 'all' ? allRequests : allRequests.filter(r => r.orgId === activeOrgId)) 
+      : requests;
+  }, [isSuperAdmin, activeOrgId, allRequests, requests]);
+
+  const targetCustodies = useMemo(() => {
+    return isSuperAdmin 
+      ? (activeOrgId === 'all' ? allCustodies : allCustodies.filter(c => c.orgId === activeOrgId)) 
+      : custodies;
+  }, [isSuperAdmin, activeOrgId, allCustodies, custodies]);
+
+  const targetSettlements = useMemo(() => {
+    return isSuperAdmin 
+      ? (activeOrgId === 'all' ? allCustodySettlements : allCustodySettlements.filter(s => s.orgId === activeOrgId)) 
+      : custodySettlements;
+  }, [isSuperAdmin, activeOrgId, allCustodySettlements, custodySettlements]);
+
+  const currentOrgServices = useMemo(() => {
+    return isSuperAdmin ? (activeOrgId === 'all' ? allServices : allServices.filter(s => !s.orgIds || s.orgIds.includes(activeOrgId))) : services;
+  }, [isSuperAdmin, activeOrgId, allServices, services]);
+
+  const currentOrgProviders = useMemo(() => {
+    return isSuperAdmin ? (activeOrgId === 'all' ? allProviders : allProviders.filter(p => !p.orgId || p.orgId === activeOrgId)) : providers;
+  }, [isSuperAdmin, activeOrgId, allProviders, providers]);
 
   const [timeFilter, setTimeFilter] = useState<'all' | 'today' | 'month' | 'q3' | 'specific' | 'range'>('all');
   const [specificDate, setSpecificDate] = useState<string>(() => {
@@ -226,26 +240,28 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
   const currency = activeOrg?.currency || 'EGP';
 
   // Chart 1: Expenses by Service Category (Combines Requests + Custody Settlements)
-  const serviceChartData = currentOrgServices.map(srv => {
-    const requestsSpent = filteredRequests
-      .filter(r => r.serviceCategoryId === srv.id && r.status === 'disbursed')
-      .reduce((sum, r) => sum + r.amount, 0);
+  const serviceChartData = useMemo(() => {
+    return currentOrgServices.map(srv => {
+      const requestsSpent = filteredRequests
+        .filter(r => r.serviceCategoryId === srv.id && r.status === 'disbursed')
+        .reduce((sum, r) => sum + r.amount, 0);
 
-    const custodySpent = filteredSettlements
-      .filter(s => s.serviceCategoryId === srv.id)
-      .reduce((sum, s) => sum + Number(s.amount || 0), 0);
+      const custodySpent = filteredSettlements
+        .filter(s => s.serviceCategoryId === srv.id)
+        .reduce((sum, s) => sum + Number(s.amount || 0), 0);
 
-    const totalSpent = requestsSpent + custodySpent;
+      const totalSpent = requestsSpent + custodySpent;
 
-    return {
-      name: srv.name.length > 18 ? srv.name.slice(0, 18) + '...' : srv.name,
-      fullName: srv.name,
-      spent: totalSpent,
-      requestsSpent,
-      custodySpent,
-      budget: srv.budgetLimit || 0,
-    };
-  }).filter(item => item.spent > 0 || item.budget > 0);
+      return {
+        name: srv.name.length > 18 ? srv.name.slice(0, 18) + '...' : srv.name,
+        fullName: srv.name,
+        spent: totalSpent,
+        requestsSpent,
+        custodySpent,
+        budget: srv.budgetLimit || 0,
+      };
+    }).filter(item => item.spent > 0 || item.budget > 0);
+  }, [currentOrgServices, filteredRequests, filteredSettlements]);
 
   // Chart 2: Status Distribution (All financial operations)
   const statusColors: Record<string, string> = {
@@ -258,15 +274,24 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
     'مرفوض': '#94a3b8',
   };
 
-  const statusData = [
-    { name: 'طلبات تم صرفها', count: disbursedRequests.length, amount: totalDisbursedRequests },
-    { name: 'فواتير عُهد مسواة', count: filteredSettlements.length, amount: totalSettledCustodies },
-    { name: 'معتمد للصرف', count: approvedRequests.length, amount: totalApprovedAwaitingDisbursement },
-    { name: 'قيد المراجعة', count: pendingRequests.length, amount: totalPending },
-    { name: 'عُهد جارية مع الموظفين', count: activeCustodies.length, amount: totalActiveCustodiesRemaining },
-    { name: 'طلب توضيح', count: clarificationRequests.length, amount: clarificationRequests.reduce((s, r) => s + r.amount, 0) },
-    { name: 'مرفوض', count: rejectedRequests.length, amount: rejectedRequests.reduce((s, r) => s + r.amount, 0) },
-  ].filter(d => d.count > 0 || d.amount > 0);
+  const statusData = useMemo(() => {
+    return [
+      { name: 'طلبات تم صرفها', count: disbursedRequests.length, amount: totalDisbursedRequests },
+      { name: 'فواتير عُهد مسواة', count: filteredSettlements.length, amount: totalSettledCustodies },
+      { name: 'معتمد للصرف', count: approvedRequests.length, amount: totalApprovedAwaitingDisbursement },
+      { name: 'قيد المراجعة', count: pendingRequests.length, amount: totalPending },
+      { name: 'عُهد جارية مع الموظفين', count: activeCustodies.length, amount: totalActiveCustodiesRemaining },
+      { name: 'طلب توضيح', count: clarificationRequests.length, amount: clarificationRequests.reduce((s, r) => s + r.amount, 0) },
+      { name: 'مرفوض', count: rejectedRequests.length, amount: rejectedRequests.reduce((s, r) => s + r.amount, 0) },
+    ].filter(d => d.count > 0 || d.amount > 0);
+  }, [
+    disbursedRequests.length, totalDisbursedRequests,
+    filteredSettlements.length, totalSettledCustodies,
+    approvedRequests.length, totalApprovedAwaitingDisbursement,
+    pendingRequests.length, totalPending,
+    activeCustodies.length, totalActiveCustodiesRemaining,
+    clarificationRequests, rejectedRequests
+  ]);
 
   // Chart 3: Expenses by Top Providers (Aggregating Requests + Custody Settlements)
   const providerExpenseData = useMemo(() => {

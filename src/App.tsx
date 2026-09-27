@@ -1,29 +1,42 @@
-import React, { useState } from 'react';
+import React, { useState, Suspense, lazy } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { LoginPage } from './components/LoginPage';
 import { Header } from './components/Header';
 import { Navbar } from './components/Navbar';
-import { DashboardAnalytics } from './components/DashboardAnalytics';
-import { ExpenseRequestsList } from './components/ExpenseRequestsList';
-import { RequesterTracker } from './components/RequesterTracker';
-import { ServicesManagement } from './components/ServicesManagement';
-import { VendorsManagement } from './components/VendorsManagement';
-import { OrganizationsManagement } from './components/OrganizationsManagement';
-import { TreasuryManagement } from './components/TreasuryManagement';
-import { CustodyManagement } from './components/CustodyManagement';
-import { NewRequestModal } from './components/NewRequestModal';
-import { RequestDetailModal } from './components/RequestDetailModal';
-import { FirebaseConfigModal } from './components/FirebaseConfigModal';
-import { UserProfileModal } from './components/UserProfileModal';
-import { SettingsManagement } from './components/SettingsManagement';
-import { ProfileManagement } from './components/ProfileManagement';
-import { VisaManagement } from './components/VisaManagement';
 import { Sidebar } from './components/Sidebar';
-import { UsersManagement } from './components/UsersManagement';
 import { ExpenseRequest, SUPPORTED_CURRENCIES, Organization, OrganizationMember } from './types';
 import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
 import { initFirebase, getDoc, getDocs, doc, collection, query, where } from './lib/firebase';
+
+// Code-split heavy page views and modals (loads only what the user actively visits)
+const DashboardAnalytics = lazy(() => import('./components/DashboardAnalytics').then(m => ({ default: m.DashboardAnalytics })));
+const ExpenseRequestsList = lazy(() => import('./components/ExpenseRequestsList').then(m => ({ default: m.ExpenseRequestsList })));
+const RequesterTracker = lazy(() => import('./components/RequesterTracker').then(m => ({ default: m.RequesterTracker })));
+const ServicesManagement = lazy(() => import('./components/ServicesManagement').then(m => ({ default: m.ServicesManagement })));
+const VendorsManagement = lazy(() => import('./components/VendorsManagement').then(m => ({ default: m.VendorsManagement })));
+const OrganizationsManagement = lazy(() => import('./components/OrganizationsManagement').then(m => ({ default: m.OrganizationsManagement })));
+const TreasuryManagement = lazy(() => import('./components/TreasuryManagement').then(m => ({ default: m.TreasuryManagement })));
+const CustodyManagement = lazy(() => import('./components/CustodyManagement').then(m => ({ default: m.CustodyManagement })));
+const NewRequestModal = lazy(() => import('./components/NewRequestModal').then(m => ({ default: m.NewRequestModal })));
+const RequestDetailModal = lazy(() => import('./components/RequestDetailModal').then(m => ({ default: m.RequestDetailModal })));
+const FirebaseConfigModal = lazy(() => import('./components/FirebaseConfigModal').then(m => ({ default: m.FirebaseConfigModal })));
+const UserProfileModal = lazy(() => import('./components/UserProfileModal').then(m => ({ default: m.UserProfileModal })));
+const SettingsManagement = lazy(() => import('./components/SettingsManagement').then(m => ({ default: m.SettingsManagement })));
+const ProfileManagement = lazy(() => import('./components/ProfileManagement').then(m => ({ default: m.ProfileManagement })));
+const VisaManagement = lazy(() => import('./components/VisaManagement').then(m => ({ default: m.VisaManagement })));
+const UsersManagement = lazy(() => import('./components/UsersManagement').then(m => ({ default: m.UsersManagement })));
+
+// Ultra-fast lightweight tab loading skeleton
+const TabLoadingFallback: React.FC = () => (
+  <div className="flex flex-col items-center justify-center min-h-[360px] p-8 text-center animate-in fade-in duration-150">
+    <div className="h-11 w-11 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3 shadow-2xs border border-emerald-100">
+      <Loader2 className="h-5 w-5 animate-spin text-emerald-600" />
+    </div>
+    <span className="text-xs font-bold text-slate-700">جاري معالجة الشاشة وتحميل البيانات...</span>
+    <span className="text-[11px] text-slate-400 mt-0.5">تحميل ذكي فائق السرعة</span>
+  </div>
+);
 
 const MainApp: React.FC = () => {
   const { 
@@ -341,112 +354,130 @@ const MainApp: React.FC = () => {
                 )}
               </div>
             </div>
-          ) : currentRole === 'employee' ? (
-            /* Employee Experience: Dedicated Banking Tracker, Profile, Visas, or Petty Cash Custodies */
-            activeTab === 'profile' ? (
-              <ProfileManagement />
-            ) : activeTab === 'visas' ? (
-              <VisaManagement />
-            ) : activeTab === 'custody' ? (
-              <CustodyManagement />
-            ) : (
-              <RequesterTracker 
-                onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
-                onSelectRequest={setSelectedRequest}
-              />
-            )
           ) : (
-            /* Admin / Super Admin / Data Entry Multi-Tab View */
-            <>
-              {activeTab === 'profile' && (
-                <ProfileManagement />
-              )}
+            <Suspense fallback={<TabLoadingFallback />}>
+              {currentRole === 'employee' ? (
+                /* Employee Experience: Dedicated Banking Tracker, Profile, Visas, or Petty Cash Custodies */
+                activeTab === 'profile' ? (
+                  <ProfileManagement />
+                ) : activeTab === 'visas' ? (
+                  <VisaManagement />
+                ) : activeTab === 'custody' ? (
+                  <CustodyManagement />
+                ) : (
+                  <RequesterTracker 
+                    onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+                    onSelectRequest={setSelectedRequest}
+                  />
+                )
+              ) : (
+                /* Admin / Super Admin / Data Entry Multi-Tab View */
+                <>
+                  {activeTab === 'profile' && (
+                    <ProfileManagement />
+                  )}
 
-              {activeTab === 'dashboard' && currentRole !== 'data_entry' && (
-                <DashboardAnalytics 
-                  onSelectRequest={setSelectedRequest}
-                  onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
-                />
-              )}
+                  {activeTab === 'dashboard' && currentRole !== 'data_entry' && (
+                    <DashboardAnalytics 
+                      onSelectRequest={setSelectedRequest}
+                      onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+                    />
+                  )}
 
-              {activeTab === 'requests' && currentRole !== 'data_entry' && (
-                <ExpenseRequestsList 
-                  onSelectRequest={setSelectedRequest}
-                  onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
-                />
-              )}
+                  {activeTab === 'requests' && currentRole !== 'data_entry' && (
+                    <ExpenseRequestsList 
+                      onSelectRequest={setSelectedRequest}
+                      onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+                    />
+                  )}
 
-              {activeTab === 'visas' && (
-                <VisaManagement />
-              )}
+                  {activeTab === 'visas' && (
+                    <VisaManagement />
+                  )}
 
-              {activeTab === 'my-requests' && (
-                <RequesterTracker 
-                  onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
-                  onSelectRequest={setSelectedRequest}
-                />
-              )}
+                  {activeTab === 'my-requests' && (
+                    <RequesterTracker 
+                      onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
+                      onSelectRequest={setSelectedRequest}
+                    />
+                  )}
 
-              {activeTab === 'treasury' && (
-                <TreasuryManagement />
-              )}
+                  {activeTab === 'treasury' && (
+                    <TreasuryManagement />
+                  )}
 
-              {activeTab === 'custody' && (
-                <CustodyManagement />
-              )}
+                  {activeTab === 'custody' && (
+                    <CustodyManagement />
+                  )}
 
-              {activeTab === 'services' && (
-                <ServicesManagement />
-              )}
+                  {activeTab === 'services' && (
+                    <ServicesManagement />
+                  )}
 
-              {activeTab === 'providers' && (
-                <VendorsManagement />
-              )}
+                  {activeTab === 'providers' && (
+                    <VendorsManagement />
+                  )}
 
-              {/* Dedicated Users & Employees tab from screenshot */}
-              {activeTab === 'users' && (
-                <UsersManagement />
-              )}
+                  {/* Dedicated Users & Employees tab from screenshot */}
+                  {activeTab === 'users' && (
+                    <UsersManagement />
+                  )}
 
-              {activeTab === 'organizations' && (
-                <OrganizationsManagement initialSection="companies" />
-              )}
+                  {activeTab === 'organizations' && (
+                    <OrganizationsManagement initialSection="companies" />
+                  )}
 
-              {/* Dedicated Audit Log tab */}
-              {activeTab === 'audit' && (
-                <OrganizationsManagement initialSection="audit_log" />
-              )}
+                  {/* Dedicated Audit Log tab */}
+                  {activeTab === 'audit' && (
+                    <OrganizationsManagement initialSection="audit_log" />
+                  )}
 
-              {activeTab === 'settings' && (currentRole === 'org_admin' || currentRole === 'super_admin') && (
-                <SettingsManagement />
+                  {activeTab === 'settings' && (currentRole === 'org_admin' || currentRole === 'super_admin') && (
+                    <SettingsManagement />
+                  )}
+                </>
               )}
-            </>
+            </Suspense>
           )}
         </main>
       </div>
 
-      {/* Modals */}
-      <NewRequestModal 
-        isOpen={isNewRequestModalOpen}
-        onClose={() => setIsNewRequestModalOpen(false)}
-      />
+      {/* Modals (Loaded lazily on-demand when activated) */}
+      {isNewRequestModalOpen && (
+        <Suspense fallback={null}>
+          <NewRequestModal 
+            isOpen={isNewRequestModalOpen}
+            onClose={() => setIsNewRequestModalOpen(false)}
+          />
+        </Suspense>
+      )}
 
-      <RequestDetailModal 
-        request={selectedRequest}
-        onClose={() => setSelectedRequest(null)}
-      />
+      {selectedRequest && (
+        <Suspense fallback={null}>
+          <RequestDetailModal 
+            request={selectedRequest}
+            onClose={() => setSelectedRequest(null)}
+          />
+        </Suspense>
+      )}
 
-      {/* Firebase Cloud Firestore Modal */}
-      <FirebaseConfigModal 
-        isOpen={isFirebaseModalOpen}
-        onClose={closeFirebaseModal}
-      />
+      {isFirebaseModalOpen && (
+        <Suspense fallback={null}>
+          <FirebaseConfigModal 
+            isOpen={isFirebaseModalOpen}
+            onClose={closeFirebaseModal}
+          />
+        </Suspense>
+      )}
 
-      {/* User Profile & Password Change Modal */}
-      <UserProfileModal 
-        isOpen={isProfileModalOpen}
-        onClose={() => setIsProfileModalOpen(false)}
-      />
+      {isProfileModalOpen && (
+        <Suspense fallback={null}>
+          <UserProfileModal 
+            isOpen={isProfileModalOpen}
+            onClose={() => setIsProfileModalOpen(false)}
+          />
+        </Suspense>
+      )}
 
       {/* Quick Add Org Modal (Super Admin Only) */}
       {isQuickOrgModalOpen && currentRole === 'super_admin' && (
