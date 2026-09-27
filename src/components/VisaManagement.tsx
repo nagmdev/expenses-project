@@ -98,6 +98,7 @@ export const VisaManagement: React.FC = () => {
   // Validation & feedback state for create modal
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Detail Modal Action states
@@ -123,9 +124,22 @@ export const VisaManagement: React.FC = () => {
     return paymentAccounts.filter(a => !effectiveOrgId || a.orgId === effectiveOrgId);
   }, [paymentAccounts, effectiveOrgId]);
 
+  // Strict deduplication guarantee for Visa Requests (by ID & Request Number)
+  const cleanVisaRequests = useMemo(() => {
+    const seenIds = new Set<string>();
+    const seenNumbers = new Set<string>();
+    return visaRequests.filter(req => {
+      const numKey = (req.requestNumber || '').trim().toUpperCase();
+      if (seenIds.has(req.id) || (numKey && seenNumbers.has(numKey))) return false;
+      seenIds.add(req.id);
+      if (numKey) seenNumbers.add(numKey);
+      return true;
+    });
+  }, [visaRequests]);
+
   // Filtered Visa Requests
   const filteredVisaRequests = useMemo(() => {
-    return visaRequests.filter(req => {
+    return cleanVisaRequests.filter(req => {
       const matchSearch = 
         !searchTerm.trim() ||
         req.travelerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -139,15 +153,15 @@ export const VisaManagement: React.FC = () => {
 
       return matchSearch && matchType && matchStatus;
     });
-  }, [visaRequests, searchTerm, selectedTypeFilter, selectedStatusFilter]);
+  }, [cleanVisaRequests, searchTerm, selectedTypeFilter, selectedStatusFilter]);
 
   // Overall Financial Metrics
   const metrics = useMemo(() => {
-    const totalCount = visaRequests.length;
-    const totalCost = visaRequests.reduce((sum, r) => sum + Number(r.totalAmount || 0), 0);
-    const totalPaid = visaRequests.reduce((sum, r) => sum + Number(r.paidAmount || 0), 0);
-    const totalRemaining = visaRequests.reduce((sum, r) => sum + Number(r.remainingBalance || 0), 0);
-    const pendingCount = visaRequests.filter(r => r.status === 'pending').length;
+    const totalCount = cleanVisaRequests.length;
+    const totalCost = cleanVisaRequests.reduce((sum, r) => sum + Number(r.totalAmount || 0), 0);
+    const totalPaid = cleanVisaRequests.reduce((sum, r) => sum + Number(r.paidAmount || 0), 0);
+    const totalRemaining = cleanVisaRequests.reduce((sum, r) => sum + Number(r.remainingBalance || 0), 0);
+    const pendingCount = cleanVisaRequests.filter(r => r.status === 'pending').length;
 
     return { totalCount, totalCost, totalPaid, totalRemaining, pendingCount };
   }, [visaRequests]);
@@ -309,6 +323,8 @@ export const VisaManagement: React.FC = () => {
       return;
     }
 
+    if (isSubmittingRef.current || isSubmitting) return;
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
       const selectedProviderObj = availableProviders.find(p => p.id === serviceProviderId);
@@ -344,6 +360,7 @@ export const VisaManagement: React.FC = () => {
     } catch (err: any) {
       alert(`حدث خطأ أثناء حفظ الطلب: ${err?.message || 'تعذر الاتصال'}`);
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };

@@ -57,6 +57,22 @@ export const TreasuryManagement: React.FC = () => {
   const targetAccounts = isSuperAdmin ? allPaymentAccounts : paymentAccounts;
   const targetTransactions = isSuperAdmin ? allTransactions : transactions;
 
+  // Strict deduplication guarantee for Ledger Transactions (by ID & reference)
+  const cleanTargetTransactions = useMemo(() => {
+    const seenIds = new Set<string>();
+    const seenRefs = new Set<string>();
+    return targetTransactions.filter(tx => {
+      if (seenIds.has(tx.id)) return false;
+      const refKey = tx.referenceType && tx.referenceNumber
+        ? `${tx.accountId}:::${tx.type}:::${tx.referenceType}:::${(tx.referenceNumber || '').trim().toUpperCase()}`
+        : '';
+      if (refKey && seenRefs.has(refKey)) return false;
+      seenIds.add(tx.id);
+      if (refKey) seenRefs.add(refKey);
+      return true;
+    });
+  }, [targetTransactions]);
+
   // Filters & State
   const [selectedOrgFilter, setSelectedOrgFilter] = useState<string>(
     activeOrgId && activeOrgId !== 'all' ? activeOrgId : 'all'
@@ -105,7 +121,7 @@ export const TreasuryManagement: React.FC = () => {
 
   // Filtered Transactions
   const filteredTransactions = useMemo(() => {
-    return targetTransactions.filter(tx => {
+    return cleanTargetTransactions.filter(tx => {
       if (selectedOrgFilter !== 'all' && tx.orgId !== selectedOrgFilter) return false;
       if (inspectingAccount && tx.accountId !== inspectingAccount.id) return false;
       if (searchQuery.trim()) {
@@ -118,7 +134,7 @@ export const TreasuryManagement: React.FC = () => {
       }
       return true;
     });
-  }, [targetTransactions, selectedOrgFilter, inspectingAccount, searchQuery]);
+  }, [cleanTargetTransactions, selectedOrgFilter, inspectingAccount, searchQuery]);
 
   // Overall Financial Stats (Aggregated only across primary physical containers to prevent double counting linked channels)
   const stats = useMemo(() => {
@@ -709,7 +725,7 @@ export const TreasuryManagement: React.FC = () => {
                         className="w-full flex items-center justify-center gap-1.5 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-semibold border border-slate-200 transition cursor-pointer"
                       >
                         <History className="h-3.5 w-3.5 text-slate-400" />
-                        <span>عرض كشف وحركات الحساب ({targetTransactions.filter(t => t.accountId === acc.id).length})</span>
+                        <span>عرض كشف وحركات الحساب ({cleanTargetTransactions.filter(t => t.accountId === acc.id).length})</span>
                       </button>
                     </div>
                   </div>

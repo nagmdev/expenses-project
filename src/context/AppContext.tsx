@@ -149,11 +149,32 @@ const safeGetLocal = <T,>(key: string, fallback: T): T => {
           seenIds.add(item.id);
         }
 
-        // Strict deduplication by requestNumber for expense requests
+        // Strict deduplication by requestNumber for expense requests & visa requests
         if (item.requestNumber) {
           const rNum = String(item.requestNumber).trim().toUpperCase();
           if (seenKeys.has(rNum)) return false;
           seenKeys.add(rNum);
+        }
+
+        // Strict deduplication by custodyNumber for petty cash custodies
+        if (item.custodyNumber) {
+          const cNum = String(item.custodyNumber).trim().toUpperCase();
+          if (seenKeys.has(cNum)) return false;
+          seenKeys.add(cNum);
+        }
+
+        // Strict deduplication for automated ledger transactions
+        if (item.referenceType && item.referenceNumber && item.accountId && item.type) {
+          const txKey = `${item.accountId}:::${item.type}:::${item.referenceType}:::${String(item.referenceNumber).trim().toUpperCase()}`;
+          if (seenKeys.has(txKey)) return false;
+          seenKeys.add(txKey);
+        }
+
+        // Strict deduplication for custody settlements
+        if (item.custodyId && item.amount && (item.invoiceNumber || item.invoiceDate)) {
+          const stKey = `${item.custodyId}:::${item.amount}:::${String(item.invoiceNumber || '').trim().toUpperCase()}:::${item.invoiceDate || ''}`;
+          if (seenKeys.has(stKey)) return false;
+          seenKeys.add(stKey);
         }
 
         return true;
@@ -1104,7 +1125,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const seenIds = new Set<string>();
+    const seenNumbers = new Set<string>();
+    return list.filter(v => {
+      const numKey = (v.requestNumber || '').trim().toUpperCase();
+      if (seenIds.has(v.id) || (numKey && seenNumbers.has(numKey))) {
+        return false;
+      }
+      seenIds.add(v.id);
+      if (numKey) seenNumbers.add(numKey);
+      return true;
+    }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [firebaseUser, resolvedRole, rawVisaRequests, effectiveOrgId, userEmail, currentUser, rawOrganizations]);
 
   const scopedPaymentAccounts = useMemo(() => {
@@ -1118,36 +1149,135 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const scopedTransactions = useMemo(() => {
     if (!firebaseUser) return [];
+    let list: AccountTransaction[] = [];
     if (resolvedRole === 'super_admin') {
-      return effectiveOrgId === 'all' ? rawTransactions : rawTransactions.filter(t => t.orgId === effectiveOrgId);
+      list = effectiveOrgId === 'all' ? rawTransactions : rawTransactions.filter(t => t.orgId === effectiveOrgId);
+    } else if (!effectiveOrgId) {
+      return [];
+    } else {
+      list = rawTransactions.filter(t => t.orgId === effectiveOrgId);
     }
-    if (!effectiveOrgId) return [];
-    return rawTransactions.filter(t => t.orgId === effectiveOrgId);
+
+    const seenIds = new Set<string>();
+    const seenRefs = new Set<string>();
+    return list.filter(t => {
+      if (seenIds.has(t.id)) return false;
+      const refKey = t.referenceType && t.referenceNumber 
+        ? `${t.accountId}:::${t.type}:::${t.referenceType}:::${(t.referenceNumber || '').trim().toUpperCase()}`
+        : '';
+      if (refKey && seenRefs.has(refKey)) return false;
+      seenIds.add(t.id);
+      if (refKey) seenRefs.add(refKey);
+      return true;
+    });
   }, [firebaseUser, resolvedRole, rawTransactions, effectiveOrgId]);
 
   const scopedCustodies = useMemo(() => {
     if (!firebaseUser) return [];
+    let list: PettyCashCustody[] = [];
     if (resolvedRole === 'super_admin') {
-      return effectiveOrgId === 'all' ? rawCustodies : rawCustodies.filter(c => c.orgId === effectiveOrgId);
+      list = effectiveOrgId === 'all' ? rawCustodies : rawCustodies.filter(c => c.orgId === effectiveOrgId);
+    } else if (!effectiveOrgId) {
+      return [];
+    } else if (resolvedRole === 'employee' && currentUser) {
+      list = rawCustodies.filter(c => c.orgId === effectiveOrgId && (c.employeeId === currentUser.id || c.employeeName === currentUser.name));
+    } else {
+      list = rawCustodies.filter(c => c.orgId === effectiveOrgId);
     }
-    if (!effectiveOrgId) return [];
-    if (resolvedRole === 'employee' && currentUser) {
-      return rawCustodies.filter(c => c.orgId === effectiveOrgId && (c.employeeId === currentUser.id || c.employeeName === currentUser.name));
-    }
-    return rawCustodies.filter(c => c.orgId === effectiveOrgId);
+
+    const seenIds = new Set<string>();
+    const seenCustodyNumbers = new Set<string>();
+    return list.filter(c => {
+      const numKey = (c.custodyNumber || '').trim().toUpperCase();
+      if (seenIds.has(c.id) || (numKey && seenCustodyNumbers.has(numKey))) {
+        return false;
+      }
+      seenIds.add(c.id);
+      if (numKey) seenCustodyNumbers.add(numKey);
+      return true;
+    });
   }, [firebaseUser, resolvedRole, rawCustodies, effectiveOrgId, currentUser]);
 
   const scopedCustodySettlements = useMemo(() => {
     if (!firebaseUser) return [];
+    let list: CustodySettlementItem[] = [];
     if (resolvedRole === 'super_admin') {
-      return effectiveOrgId === 'all' ? rawCustodySettlements : rawCustodySettlements.filter(s => s.orgId === effectiveOrgId);
+      list = effectiveOrgId === 'all' ? rawCustodySettlements : rawCustodySettlements.filter(s => s.orgId === effectiveOrgId);
+    } else if (!effectiveOrgId) {
+      return [];
+    } else if (resolvedRole === 'employee' && currentUser) {
+      list = rawCustodySettlements.filter(s => s.orgId === effectiveOrgId && (s.employeeId === currentUser.id || s.employeeName === currentUser.name));
+    } else {
+      list = rawCustodySettlements.filter(s => s.orgId === effectiveOrgId);
     }
-    if (!effectiveOrgId) return [];
-    if (resolvedRole === 'employee' && currentUser) {
-      return rawCustodySettlements.filter(s => s.orgId === effectiveOrgId && (s.employeeId === currentUser.id || s.employeeName === currentUser.name));
-    }
-    return rawCustodySettlements.filter(s => s.orgId === effectiveOrgId);
+
+    const seenIds = new Set<string>();
+    const seenKeys = new Set<string>();
+    return list.filter(s => {
+      if (seenIds.has(s.id)) return false;
+      const stKey = s.custodyId && s.amount && (s.invoiceNumber || s.invoiceDate)
+        ? `${s.custodyId}:::${s.amount}:::${(s.invoiceNumber || '').trim().toUpperCase()}:::${s.invoiceDate || ''}`
+        : '';
+      if (stKey && seenKeys.has(stKey)) return false;
+      seenIds.add(s.id);
+      if (stKey) seenKeys.add(stKey);
+      return true;
+    });
   }, [firebaseUser, resolvedRole, rawCustodySettlements, effectiveOrgId, currentUser]);
+
+  const dedupedAllCustodies = useMemo(() => {
+    const seenIds = new Set<string>();
+    const seenNumbers = new Set<string>();
+    return rawCustodies.filter(c => {
+      const numKey = (c.custodyNumber || '').trim().toUpperCase();
+      if (seenIds.has(c.id) || (numKey && seenNumbers.has(numKey))) return false;
+      seenIds.add(c.id);
+      if (numKey) seenNumbers.add(numKey);
+      return true;
+    });
+  }, [rawCustodies]);
+
+  const dedupedAllTransactions = useMemo(() => {
+    const seenIds = new Set<string>();
+    const seenRefs = new Set<string>();
+    return rawTransactions.filter(t => {
+      if (seenIds.has(t.id)) return false;
+      const refKey = t.referenceType && t.referenceNumber 
+        ? `${t.accountId}:::${t.type}:::${t.referenceType}:::${(t.referenceNumber || '').trim().toUpperCase()}`
+        : '';
+      if (refKey && seenRefs.has(refKey)) return false;
+      seenIds.add(t.id);
+      if (refKey) seenRefs.add(refKey);
+      return true;
+    });
+  }, [rawTransactions]);
+
+  const dedupedAllCustodySettlements = useMemo(() => {
+    const seenIds = new Set<string>();
+    const seenKeys = new Set<string>();
+    return rawCustodySettlements.filter(s => {
+      if (seenIds.has(s.id)) return false;
+      const stKey = s.custodyId && s.amount && (s.invoiceNumber || s.invoiceDate)
+        ? `${s.custodyId}:::${s.amount}:::${(s.invoiceNumber || '').trim().toUpperCase()}:::${s.invoiceDate || ''}`
+        : '';
+      if (stKey && seenKeys.has(stKey)) return false;
+      seenIds.add(s.id);
+      if (stKey) seenKeys.add(stKey);
+      return true;
+    });
+  }, [rawCustodySettlements]);
+
+  const dedupedAllVisaRequests = useMemo(() => {
+    const seenIds = new Set<string>();
+    const seenNumbers = new Set<string>();
+    return rawVisaRequests.filter(v => {
+      const numKey = (v.requestNumber || '').trim().toUpperCase();
+      if (seenIds.has(v.id) || (numKey && seenNumbers.has(numKey))) return false;
+      seenIds.add(v.id);
+      if (numKey) seenNumbers.add(numKey);
+      return true;
+    });
+  }, [rawVisaRequests]);
 
   const scopedDepartments = useMemo(() => {
     if (!firebaseUser) return [];
@@ -1503,12 +1633,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setRawVisaRequests(prev => {
         const baseList = shouldReplaceAll ? incomingList : [...incomingList, ...prev];
         const seenIds = new Set<string>();
+        const seenNumbers = new Set<string>();
         const deduped: VisaRequest[] = [];
         for (const item of baseList) {
-          if (!seenIds.has(item.id)) {
-            seenIds.add(item.id);
-            deduped.push(item);
+          const numKey = (item.requestNumber || '').trim().toUpperCase();
+          if (seenIds.has(item.id) || (numKey && seenNumbers.has(numKey))) {
+            continue;
           }
+          seenIds.add(item.id);
+          if (numKey) seenNumbers.add(numKey);
+          deduped.push(item);
         }
         safeSetLocal(STORAGE_KEYS.VISA_REQUESTS, deduped);
         return deduped;
@@ -1569,7 +1703,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setRawPaymentAccounts([]);
     }
 
-    // 8. Account Transactions Listener (Finance & Org Admin only)
+    // 8. Account Transactions Listener (Finance & Org Admin only) - With Strict Deduplication & Self-Healing
     let txTargetQuery = null;
     if (isSuperAdmin) {
       txTargetQuery = collection(db, 'accountTransactions');
@@ -1585,14 +1719,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .map(d => ({ id: d.id, ...d.data() } as AccountTransaction))
           .filter(t => !DUMMY_IDS.has(t.id));
         list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        setRawTransactions(list);
-        safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, list);
+
+        const seenTxIds = new Set<string>();
+        const seenTxRefs = new Set<string>();
+        const dedupedTxList: AccountTransaction[] = [];
+        const duplicateTxIdsToDelete: string[] = [];
+
+        for (const t of list) {
+          if (seenTxIds.has(t.id)) {
+            duplicateTxIdsToDelete.push(t.id);
+            continue;
+          }
+
+          const refKey = t.referenceType && t.referenceNumber 
+            ? `${t.accountId}:::${t.type}:::${t.referenceType}:::${(t.referenceNumber || '').trim().toUpperCase()}`
+            : '';
+
+          if (refKey && seenTxRefs.has(refKey)) {
+            duplicateTxIdsToDelete.push(t.id);
+            continue;
+          }
+
+          seenTxIds.add(t.id);
+          if (refKey) seenTxRefs.add(refKey);
+          dedupedTxList.push(t);
+        }
+
+        if (duplicateTxIdsToDelete.length > 0 && isFirebaseConfigured() && getDb()) {
+          console.warn('[Self-Healing] Deleting duplicate transaction documents from Firestore:', duplicateTxIdsToDelete);
+          duplicateTxIdsToDelete.forEach(dupId => {
+            deleteFirestoreDoc('accountTransactions', dupId).catch(err => {
+              console.warn('[Self-Healing] Failed to delete duplicate tx doc:', dupId, err);
+            });
+          });
+        }
+
+        setRawTransactions(dedupedTxList);
+        safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, dedupedTxList);
       }, handleListenerError('AccountTransactions')));
     } else {
       setRawTransactions([]);
     }
 
-    // 9. Petty Cash Custodies Listener (Role-Aware Scoping)
+    // 9. Petty Cash Custodies Listener (Role-Aware Scoping) - With Strict Deduplication & Self-Healing
     let custodiesTargetQuery = null;
     if (isSuperAdmin) {
       custodiesTargetQuery = collection(db, 'custodies');
@@ -1612,20 +1781,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .filter(c => !DUMMY_IDS.has(c.id) && !DUMMY_IDS.has(c.orgId));
         list.sort((a, b) => new Date(b.createdAt || b.issuedAt).getTime() - new Date(a.createdAt || a.issuedAt).getTime());
 
-        const seen = new Set<string>();
+        const seenIds = new Set<string>();
+        const seenCustodyNumbers = new Set<string>();
         const deduped: PettyCashCustody[] = [];
+        const duplicateCustodyIdsToDelete: string[] = [];
+
         for (const c of list) {
-          if (!seen.has(c.id)) {
-            seen.add(c.id);
-            deduped.push(c);
+          const cNum = (c.custodyNumber || '').trim().toUpperCase();
+          if (seenIds.has(c.id) || (cNum && seenCustodyNumbers.has(cNum))) {
+            duplicateCustodyIdsToDelete.push(c.id);
+            continue;
           }
+          seenIds.add(c.id);
+          if (cNum) seenCustodyNumbers.add(cNum);
+          deduped.push(c);
         }
+
+        if (duplicateCustodyIdsToDelete.length > 0 && isFirebaseConfigured() && getDb()) {
+          console.warn('[Self-Healing] Deleting duplicate custody documents from Firestore:', duplicateCustodyIdsToDelete);
+          duplicateCustodyIdsToDelete.forEach(dupId => {
+            deleteFirestoreDoc('custodies', dupId).catch(err => {
+              console.warn('[Self-Healing] Failed to delete duplicate custody doc:', dupId, err);
+            });
+          });
+        }
+
         setRawCustodies(deduped);
         safeSetLocal(STORAGE_KEYS.PETTY_CASH_CUSTODIES, deduped);
       }, handleListenerError('Custodies')));
     }
 
-    // 10. Custody Settlements Listener (Role-Aware Scoping)
+    // 10. Custody Settlements Listener (Role-Aware Scoping) - With Strict Deduplication & Self-Healing
     let settlementsTargetQuery = null;
     if (isSuperAdmin) {
       settlementsTargetQuery = collection(db, 'custodySettlements');
@@ -1644,16 +1830,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .filter(s => !DUMMY_IDS.has(s.id) && !DUMMY_IDS.has(s.orgId));
         list.sort((a, b) => new Date(b.createdAt || b.invoiceDate || '').getTime() - new Date(a.createdAt || a.invoiceDate || '').getTime());
 
-        const seen = new Set<string>();
-        const deduped: CustodySettlementItem[] = [];
+        const seenSettlementIds = new Set<string>();
+        const seenSettlementKeys = new Set<string>();
+        const dedupedSettlements: CustodySettlementItem[] = [];
+        const duplicateSettlementIdsToDelete: string[] = [];
+
         for (const s of list) {
-          if (!seen.has(s.id)) {
-            seen.add(s.id);
-            deduped.push(s);
+          if (seenSettlementIds.has(s.id)) {
+            duplicateSettlementIdsToDelete.push(s.id);
+            continue;
           }
+          const stKey = s.custodyId && s.amount && (s.invoiceNumber || s.invoiceDate)
+            ? `${s.custodyId}:::${s.amount}:::${(s.invoiceNumber || '').trim().toUpperCase()}:::${s.invoiceDate || ''}`
+            : '';
+          if (stKey && seenSettlementKeys.has(stKey)) {
+            duplicateSettlementIdsToDelete.push(s.id);
+            continue;
+          }
+          seenSettlementIds.add(s.id);
+          if (stKey) seenSettlementKeys.add(stKey);
+          dedupedSettlements.push(s);
         }
-        setRawCustodySettlements(deduped);
-        safeSetLocal(STORAGE_KEYS.CUSTODY_SETTLEMENTS, deduped);
+
+        if (duplicateSettlementIdsToDelete.length > 0 && isFirebaseConfigured() && getDb()) {
+          console.warn('[Self-Healing] Deleting duplicate settlement documents from Firestore:', duplicateSettlementIdsToDelete);
+          duplicateSettlementIdsToDelete.forEach(dupId => {
+            deleteFirestoreDoc('custodySettlements', dupId).catch(err => {
+              console.warn('[Self-Healing] Failed to delete duplicate settlement doc:', dupId, err);
+            });
+          });
+        }
+
+        setRawCustodySettlements(dedupedSettlements);
+        safeSetLocal(STORAGE_KEYS.CUSTODY_SETTLEMENTS, dedupedSettlements);
       }, handleListenerError('CustodySettlements')));
     }
 
@@ -3396,6 +3605,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'يرجى إدخال مبلغ صحيح للعهدة.' };
     }
 
+    // 1. Idempotency Guard: prevent rapid duplicate custody creations for same employee and amount
+    const recentDuplicate = rawCustodies.find(c => 
+      c.employeeName?.trim().toLowerCase() === employeeName.trim().toLowerCase() &&
+      c.orgId === orgId &&
+      Math.abs(Number(c.totalAmount || 0) - numAmount) < 0.01 &&
+      c.sourceAccountId === sourceAccountId &&
+      (Date.now() - new Date(c.createdAt || c.issuedAt || 0).getTime()) < 15000
+    );
+    if (recentDuplicate) {
+      console.warn('[Idempotency Guard] Duplicate custody issuance blocked for:', employeeName, recentDuplicate.custodyNumber);
+      return { success: true, message: `تم إصدار العهدة مسبقاً بنجاح برقم ${recentDuplicate.custodyNumber}` };
+    }
+
     const sourceAccount = rawPaymentAccounts.find(a => a.id === sourceAccountId);
     if (!sourceAccount) {
       return { success: false, message: 'حساب الخزينة / مصدر الصرف غير موجود.' };
@@ -3413,9 +3635,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedAt: new Date().toISOString(),
     };
 
-    const custodyId = `cus-${Date.now()}`;
-    const custodyNumber = `CUS-${Math.floor(100 + Math.random() * 900)}`;
-    const txId = `tx-${Date.now()}`;
+    // 2. Guaranteed Unique Sequential Custody Reference Number (No random collisions)
+    const existingNums = new Set(
+      rawCustodies
+        .map(c => (c.custodyNumber || '').trim().toUpperCase())
+        .filter(Boolean)
+    );
+    let nextNum = 101;
+    rawCustodies.forEach(c => {
+      const digits = (c.custodyNumber || '').replace(/\D/g, '');
+      const val = parseInt(digits, 10);
+      if (!isNaN(val) && val >= nextNum) {
+        nextNum = val + 1;
+      }
+    });
+    let custodyNumber = `CUS-${nextNum}`;
+    while (existingNums.has(custodyNumber)) {
+      nextNum++;
+      custodyNumber = `CUS-${nextNum}`;
+    }
+
+    const custodyId = `cus-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+    const txId = `tx-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
 
     const newTransaction: AccountTransaction = {
       id: txId,
@@ -3508,7 +3749,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setRawCustodies(prev => {
-      const updated = [newCustody, ...prev];
+      const filtered = prev.filter(c => c.id !== custodyId && (c.custodyNumber || '').trim().toUpperCase() !== custodyNumber);
+      const updated = [newCustody, ...filtered];
       safeSetLocal(STORAGE_KEYS.PETTY_CASH_CUSTODIES, updated);
       return updated;
     });
@@ -3524,7 +3766,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setRawTransactions(prev => {
       const newItems = parentTx ? [parentTx, newTransaction] : [newTransaction];
-      const updated = [...newItems, ...prev];
+      const newIds = new Set(newItems.map(i => i.id));
+      const filtered = prev.filter(t => !newIds.has(t.id));
+      const updated = [...newItems, ...filtered];
       safeSetLocal(STORAGE_KEYS.ACCOUNT_TRANSACTIONS, updated);
       return updated;
     });
@@ -5512,7 +5756,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         replyClarification,
         disburseRequest,
         visaRequests: scopedVisaRequests,
-        allVisaRequests: rawVisaRequests,
+        allVisaRequests: dedupedAllVisaRequests,
         createVisaRequest,
         updateVisaRequest,
         approveVisaRequest,
@@ -5522,7 +5766,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         paymentAccounts: scopedPaymentAccounts,
         allPaymentAccounts: rawPaymentAccounts,
         transactions: scopedTransactions,
-        allTransactions: rawTransactions,
+        allTransactions: dedupedAllTransactions,
         addPaymentAccount,
         updatePaymentAccount,
         deletePaymentAccount,
@@ -5530,9 +5774,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         recordManualAccountAdjustment,
         resolveParentBankAccount: resolveParentAccount,
         custodies: scopedCustodies,
-        allCustodies: rawCustodies,
+        allCustodies: dedupedAllCustodies,
         custodySettlements: scopedCustodySettlements,
-        allCustodySettlements: rawCustodySettlements,
+        allCustodySettlements: dedupedAllCustodySettlements,
         issueCustody,
         settleCustodyItem,
         replenishCustody,

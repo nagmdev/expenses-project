@@ -74,6 +74,37 @@ export const CustodyManagement: React.FC = () => {
   const targetServices = isSuperAdmin ? allServices : services;
   const targetProviders = isSuperAdmin ? allProviders : providers;
 
+  // Strict deduplication guarantee for Custodies (by ID & Custody Number)
+  const cleanTargetCustodies = useMemo(() => {
+    const seenIds = new Set<string>();
+    const seenNumbers = new Set<string>();
+    return targetCustodies.filter(c => {
+      const numKey = (c.custodyNumber || '').trim().toUpperCase();
+      if (seenIds.has(c.id) || (numKey && seenNumbers.has(numKey))) {
+        return false;
+      }
+      seenIds.add(c.id);
+      if (numKey) seenNumbers.add(numKey);
+      return true;
+    });
+  }, [targetCustodies]);
+
+  // Strict deduplication guarantee for Settlements (by ID & unique invoice/amount)
+  const cleanTargetSettlements = useMemo(() => {
+    const seenIds = new Set<string>();
+    const seenKeys = new Set<string>();
+    return targetSettlements.filter(s => {
+      if (seenIds.has(s.id)) return false;
+      const stKey = s.custodyId && s.amount && (s.invoiceNumber || s.invoiceDate)
+        ? `${s.custodyId}:::${s.amount}:::${(s.invoiceNumber || '').trim().toUpperCase()}:::${s.invoiceDate || ''}`
+        : '';
+      if (stKey && seenKeys.has(stKey)) return false;
+      seenIds.add(s.id);
+      if (stKey) seenKeys.add(stKey);
+      return true;
+    });
+  }, [targetSettlements]);
+
   // Filters & State
   const [selectedOrgFilter, setSelectedOrgFilter] = useState<string>(
     activeOrgId && activeOrgId !== 'all' ? activeOrgId : 'all'
@@ -86,14 +117,14 @@ export const CustodyManagement: React.FC = () => {
   // Unique Employees list for filter
   const uniqueEmployees = useMemo(() => {
     const names = new Set<string>();
-    targetCustodies.forEach(c => {
+    cleanTargetCustodies.forEach(c => {
       if (c.employeeName) names.add(c.employeeName.trim());
     });
-    targetSettlements.forEach(s => {
+    cleanTargetSettlements.forEach(s => {
       if (s.employeeName) names.add(s.employeeName.trim());
     });
     return Array.from(names).sort();
-  }, [targetCustodies, targetSettlements]);
+  }, [cleanTargetCustodies, cleanTargetSettlements]);
 
   // Modals
   const [isIssueModalOpen, setIsIssueModalOpen] = useState(false);
@@ -112,6 +143,7 @@ export const CustodyManagement: React.FC = () => {
   const [issueSourceAccountId, setIssueSourceAccountId] = useState('');
   const [issueNotes, setIssueNotes] = useState('');
   const [isIssuing, setIsIssuing] = useState(false);
+  const isIssuingRef = useRef(false);
   const [issueError, setIssueError] = useState<string | null>(null);
 
   // Settle Custody Form State
@@ -123,6 +155,7 @@ export const CustodyManagement: React.FC = () => {
   const [settleDescription, setSettleDescription] = useState('');
   const [settleReceiptUrl, setSettleReceiptUrl] = useState('');
   const [isSettling, setIsSettling] = useState(false);
+  const isSettlingRef = useRef(false);
   const [settleError, setSettleError] = useState<string | null>(null);
   const receiptFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -131,11 +164,12 @@ export const CustodyManagement: React.FC = () => {
   const [replenishSourceAccountId, setReplenishSourceAccountId] = useState('');
   const [replenishNotes, setReplenishNotes] = useState('');
   const [isReplenishing, setIsReplenishing] = useState(false);
+  const isReplenishingRef = useRef(false);
   const [replenishError, setReplenishError] = useState<string | null>(null);
 
   // Filtered Custodies
   const filteredCustodies = useMemo(() => {
-    return targetCustodies.filter(item => {
+    return cleanTargetCustodies.filter(item => {
       // Org filter
       if (selectedOrgFilter !== 'all' && item.orgId !== selectedOrgFilter) {
         return false;
@@ -162,11 +196,11 @@ export const CustodyManagement: React.FC = () => {
       }
       return true;
     });
-  }, [targetCustodies, selectedOrgFilter, employeeFilter, statusFilter, searchQuery]);
+  }, [cleanTargetCustodies, selectedOrgFilter, employeeFilter, statusFilter, searchQuery]);
 
   // Filtered Settlements
   const filteredSettlements = useMemo(() => {
-    return targetSettlements.filter(item => {
+    return cleanTargetSettlements.filter(item => {
       if (selectedOrgFilter !== 'all' && item.orgId !== selectedOrgFilter) {
         return false;
       }
@@ -186,7 +220,7 @@ export const CustodyManagement: React.FC = () => {
       }
       return true;
     });
-  }, [targetSettlements, selectedOrgFilter, employeeFilter, searchQuery]);
+  }, [cleanTargetSettlements, selectedOrgFilter, employeeFilter, searchQuery]);
 
   // KPI Calculations
   const { totalIssued, totalRemaining, totalSettled, activeCount } = useMemo(() => {
@@ -283,6 +317,8 @@ export const CustodyManagement: React.FC = () => {
       return;
     }
 
+    if (isIssuingRef.current || isIssuing) return;
+    isIssuingRef.current = true;
     setIsIssuing(true);
     try {
       const res = await issueCustody(
@@ -297,6 +333,7 @@ export const CustodyManagement: React.FC = () => {
 
       if (res && !res.success) {
         setIssueError(res.message || 'حدث خطأ أثناء صرف العهدة.');
+        isIssuingRef.current = false;
         setIsIssuing(false);
         return;
       }
@@ -306,6 +343,7 @@ export const CustodyManagement: React.FC = () => {
       console.error(err);
       setIssueError(err?.message || 'حدث خطأ أثناء صرف العهدة.');
     } finally {
+      isIssuingRef.current = false;
       setIsIssuing(false);
     }
   };
@@ -366,6 +404,8 @@ export const CustodyManagement: React.FC = () => {
       return;
     }
 
+    if (isSettlingRef.current || isSettling) return;
+    isSettlingRef.current = true;
     setIsSettling(true);
     try {
       const res = await settleCustodyItem(
@@ -381,6 +421,7 @@ export const CustodyManagement: React.FC = () => {
 
       if (res && !res.success) {
         setSettleError(res.message || 'حدث خطأ أثناء تسجيل فاتورة التصفية.');
+        isSettlingRef.current = false;
         setIsSettling(false);
         return;
       }
@@ -390,6 +431,7 @@ export const CustodyManagement: React.FC = () => {
       console.error(err);
       setSettleError(err?.message || 'حدث خطأ غير متوقع أثناء تسجيل التصفية.');
     } finally {
+      isSettlingRef.current = false;
       setIsSettling(false);
     }
   };
@@ -420,6 +462,8 @@ export const CustodyManagement: React.FC = () => {
       return;
     }
 
+    if (isReplenishingRef.current || isReplenishing) return;
+    isReplenishingRef.current = true;
     setIsReplenishing(true);
     try {
       const res = await replenishCustody(
@@ -431,6 +475,7 @@ export const CustodyManagement: React.FC = () => {
 
       if (res && !res.success) {
         setReplenishError(res.message || 'حدث خطأ أثناء استعاضة العهدة.');
+        isReplenishingRef.current = false;
         setIsReplenishing(false);
         return;
       }
@@ -440,6 +485,7 @@ export const CustodyManagement: React.FC = () => {
       console.error(err);
       setReplenishError(err?.message || 'حدث خطأ غير متوقع أثناء استعاضة العهدة.');
     } finally {
+      isReplenishingRef.current = false;
       setIsReplenishing(false);
     }
   };
@@ -540,7 +586,7 @@ export const CustodyManagement: React.FC = () => {
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                الكل ({targetCustodies.length})
+                الكل ({cleanTargetCustodies.length})
               </button>
               <button
                 type="button"
@@ -551,7 +597,7 @@ export const CustodyManagement: React.FC = () => {
                     : 'text-slate-600 hover:text-emerald-700'
                 }`}
               >
-                🟢 عهد نشطة ({targetCustodies.filter(c => c.status === 'active').length})
+                🟢 عهد نشطة ({cleanTargetCustodies.filter(c => c.status === 'active').length})
               </button>
               <button
                 type="button"
@@ -562,7 +608,7 @@ export const CustodyManagement: React.FC = () => {
                     : 'text-slate-600 hover:text-blue-700'
                 }`}
               >
-                ✓ تمت تصفيتها بالكامل ({targetCustodies.filter(c => c.status === 'settled').length})
+                ✓ تمت تصفيتها بالكامل ({cleanTargetCustodies.filter(c => c.status === 'settled').length})
               </button>
             </div>
           </div>

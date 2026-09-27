@@ -92,21 +92,51 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
   const isSuperAdmin = currentRole === 'super_admin';
   const orgList = isSuperAdmin ? (allOrganizations.length > 0 ? allOrganizations : organizations) : organizations;
   const targetRequests = useMemo(() => {
-    return isSuperAdmin 
+    const list = isSuperAdmin 
       ? (activeOrgId === 'all' ? allRequests : allRequests.filter(r => r.orgId === activeOrgId)) 
       : requests;
+    const seenIds = new Set<string>();
+    const seenNumbers = new Set<string>();
+    return list.filter(r => {
+      const numKey = (r.requestNumber || '').trim().toUpperCase();
+      if (seenIds.has(r.id) || (numKey && seenNumbers.has(numKey))) return false;
+      seenIds.add(r.id);
+      if (numKey) seenNumbers.add(numKey);
+      return true;
+    });
   }, [isSuperAdmin, activeOrgId, allRequests, requests]);
 
   const targetCustodies = useMemo(() => {
-    return isSuperAdmin 
+    const list = isSuperAdmin 
       ? (activeOrgId === 'all' ? allCustodies : allCustodies.filter(c => c.orgId === activeOrgId)) 
       : custodies;
+    const seenIds = new Set<string>();
+    const seenNumbers = new Set<string>();
+    return list.filter(c => {
+      const numKey = (c.custodyNumber || '').trim().toUpperCase();
+      if (seenIds.has(c.id) || (numKey && seenNumbers.has(numKey))) return false;
+      seenIds.add(c.id);
+      if (numKey) seenNumbers.add(numKey);
+      return true;
+    });
   }, [isSuperAdmin, activeOrgId, allCustodies, custodies]);
 
   const targetSettlements = useMemo(() => {
-    return isSuperAdmin 
+    const list = isSuperAdmin 
       ? (activeOrgId === 'all' ? allCustodySettlements : allCustodySettlements.filter(s => s.orgId === activeOrgId)) 
       : custodySettlements;
+    const seenIds = new Set<string>();
+    const seenKeys = new Set<string>();
+    return list.filter(s => {
+      if (seenIds.has(s.id)) return false;
+      const stKey = s.custodyId && s.amount && (s.invoiceNumber || s.invoiceDate)
+        ? `${s.custodyId}:::${s.amount}:::${(s.invoiceNumber || '').trim().toUpperCase()}:::${s.invoiceDate || ''}`
+        : '';
+      if (stKey && seenKeys.has(stKey)) return false;
+      seenIds.add(s.id);
+      if (stKey) seenKeys.add(stKey);
+      return true;
+    });
   }, [isSuperAdmin, activeOrgId, allCustodySettlements, custodySettlements]);
 
   const currentOrgServices = useMemo(() => {
