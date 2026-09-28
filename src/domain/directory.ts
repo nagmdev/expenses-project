@@ -1,4 +1,4 @@
-import type { AuditActionType, Department, Organization, OrganizationMember, PaymentAccount, ServiceCategory, ServiceProvider } from '../types';
+import type { AuditActionType, Department, Organization, OrganizationMember, PaymentAccount, Role, ServiceCategory, ServiceProvider } from '../types';
 import { encodeKeyPart, idFromKey } from '../utils/ids';
 import {
   COL,
@@ -58,7 +58,7 @@ export async function createOrganization(
     const codeKey = await readUniqueKey(tx, 'org_code', '-', code);
     if (isKeyTakenByOther(codeKey, id)) throw new DomainError('duplicate', `كود الشركة (${code}) مستخدم لشركة أخرى.`);
 
-    const org: Organization & { operationKey: string } = { ...input, id, name, code, createdAt: nowIso, operationKey };
+    const org: Organization & { operationKey: string } = { ...input, id, name, code, notificationRecipients: [], createdAt: nowIso, operationKey };
     const accounts = defaultAccountsFor(org);
     const accountKeys: UniqueKeyRead[] = [];
     for (const acc of accounts) accountKeys.push(await readUniqueKey(tx, 'account_identifier', org.id, acc.accountIdentifier));
@@ -98,6 +98,7 @@ export async function updateOrganization(store: DataStore, actor: Actor, orgId: 
   delete clean.id;
   delete clean.createdAt;
   delete clean.code; // the code is the org's identity key
+  delete clean.notificationRecipients; // maintained with memberships only
   const nowIso = now.toISOString();
   return store.runTransaction(async tx => {
     const org = await tx.get<Organization>(COL.organizations, orgId);
@@ -350,6 +351,78 @@ export const pendingUserIdForEmail = (email: string) => `pending-${encodeKeyPart
 
 export interface MemberInput extends Omit<OrganizationMember, 'id' | 'joinedAt'> {}
 
+// ---------------------------------------------------------------------------
+// Notification recipients. organizations/{orgId}.notificationRecipients lists the
+// emails admin-facing notifications of that org may go to; firestore.rules only lets
+// an outbox event address those (plus the platform super admins). It is kept up to
+// date by every membership change below. A missing field means "not initialized
+// yet": ensureOrgNotificationRecipients fills it from the org's members.
+// ---------------------------------------------------------------------------
+type RecipientFields = Pick<OrganizationMember, 'role' | 'active' | 'userEmail'>;
+
+/** Active org admins receive the org's admin-facing notifications. */
+export const isNotificationRecipient = (m: RecipientFields) =>
+  m.role === 'org_admin' && m.active !== false && normalizeEmail(m.userEmail).includes('@');
+
+export function orgNotificationRecipients(members: OrganizationMember[], orgId: string): string[] {
+  const emails = members.filter(m => m.orgId === orgId && isNotificationRecipient(m)).map(m => normalizeEmail(m.userEmail));
+  return Array.from(new Set(emails)).sort();
+}
+
+type RecipientEdits = Map<string, { remove: string[]; add: string[] }>;
+
+function editRecipients(edits: RecipientEdits, orgId: string, before: RecipientFields | null, after: RecipientFields | null) {
+  if (!orgId) return;
+  const entry = edits.get(orgId) || { remove: [], add: [] };
+  if (before && isNotificationRecipient(before)) entry.remove.push(normalizeEmail(before.userEmail));
+  if (after && isNotificationRecipient(after)) entry.add.push(normalizeEmail(after.userEmail));
+  edits.set(orgId, entry);
+}
+
+/** Reads the affected orgs (read phase); returns the writes to apply in the write phase. */
+async function readRecipientUpdates(tx: TxContext, edits: RecipientEdits) {
+  const updates: Array<{ orgId: string; notificationRecipients: string[] }> = [];
+  for (const [orgId, { remove, add }] of edits) {
+    const org = await tx.get<Organization>(COL.organizations, orgId);
+    if (!org || !Array.isArray(org.notificationRecipients)) continue; // not initialized: the backfill computes it
+    const next = new Set(org.notificationRecipients.filter(e => !remove.includes(e)));
+    add.forEach(e => next.add(e));
+    const list = Array.from(next).sort();
+    if (list.join('\n') !== [...org.notificationRecipients].sort().join('\n')) updates.push({ orgId, notificationRecipients: list });
+  }
+  return updates;
+}
+
+function writeRecipientUpdates(tx: TxContext, updates: Array<{ orgId: string; notificationRecipients: string[] }>, nowIso: string) {
+  for (const u of updates) tx.update(COL.organizations, u.orgId, { notificationRecipients: u.notificationRecipients, updatedAt: nowIso });
+}
+
+/** One-time initialization of an org's recipient list from its current members. */
+export async function ensureOrgNotificationRecipients(
+  store: DataStore,
+  actor: Actor,
+  orgId: string,
+  members: OrganizationMember[],
+  now: Date = new Date(),
+): Promise<MutationOutcome<string[] | null>> {
+  assertRole(actor, ['super_admin', 'org_admin'], 'تهيئة مستلمي الإشعارات متاحة للإدارة فقط.');
+  return store.runTransaction(async tx => {
+    const org = await tx.get<Organization>(COL.organizations, orgId);
+    if (!org || Array.isArray(org.notificationRecipients)) return { value: org?.notificationRecipients ?? null, changed: false };
+    const list = orgNotificationRecipients(members, orgId);
+    tx.update(COL.organizations, orgId, { notificationRecipients: list, updatedAt: now.toISOString() });
+    return { value: list, changed: true };
+  });
+}
+
+/**
+ * users/{uid} profiles that carry this membership's access: in the membership's org
+ * and linked to it (memberId) or to no membership in particular (admin-provisioned).
+ * A profile whose primary org is elsewhere is left alone.
+ */
+const profileCarriesMembership = (profile: Record<string, any> | null, mem: Pick<OrganizationMember, 'id' | 'orgId'>) =>
+  Boolean(profile && profile.orgId === mem.orgId && (!profile.memberId || profile.memberId === mem.id));
+
 export async function createMember(
   store: DataStore,
   actor: Actor,
@@ -386,8 +459,13 @@ export async function createMember(
       active: input.active !== false,
       operationKey,
     };
+    const recipientEdits: RecipientEdits = new Map();
+    editRecipients(recipientEdits, member.orgId, null, member);
+    const recipientUpdates = await readRecipientUpdates(tx, recipientEdits);
+
     tx.set(COL.members, id, member);
     if (key) claimUniqueKey(tx, key, { collection: COL.members, id }, nowIso);
+    writeRecipientUpdates(tx, recipientUpdates, nowIso);
     if (options.writeUserProfile) {
       tx.set(COL.users, userId, {
         uid: userId,
@@ -395,8 +473,9 @@ export async function createMember(
         name: member.userName,
         role: member.role,
         orgId: member.orgId,
+        memberId: id,
         department: member.department || '',
-        active: true,
+        active: member.active,
         updatedAt: nowIso,
       });
     }
@@ -421,10 +500,36 @@ export async function createMember(
 /** A Firebase Auth UID (as opposed to a placeholder id for a member who never signed in). */
 export const isRealUid = (id?: string) => Boolean(id && /^[A-Za-z0-9]{20,40}$/.test(id));
 
+const LINKABLE_ROLE_PRIORITY: Partial<Record<Role, number>> = { org_admin: 4, finance: 3, data_entry: 2, employee: 1 };
+
+/**
+ * The membership a user's own users/{uid} profile may be linked to (role, orgId and
+ * memberId copied from it). Mirrors `grantsMembership` in firestore.rules: an active
+ * membership with an org and a non-super-admin role, addressed to the user's UID or to
+ * their verified email. Highest role first, like the membership the UI resolves.
+ */
+export function pickMembershipToLink(
+  memberships: OrganizationMember[],
+  identity: { uid: string; email?: string | null; emailVerified: boolean },
+): OrganizationMember | null {
+  const email = normalizeEmail(identity.email);
+  const eligible = memberships.filter(m =>
+    Boolean(m.orgId?.trim()) &&
+    m.active !== false &&
+    LINKABLE_ROLE_PRIORITY[m.role] !== undefined &&
+    (m.userId === identity.uid || (identity.emailVerified && Boolean(email) && normalizeEmail(m.userEmail) === email)),
+  );
+  eligible.sort((a, b) => (LINKABLE_ROLE_PRIORITY[b.role] ?? 0) - (LINKABLE_ROLE_PRIORITY[a.role] ?? 0));
+  return eligible[0] ?? null;
+}
+
 /**
  * Updates a membership and the matching users/{uid} security profile(s) in ONE
  * transaction, so a role change can never be half-applied.
- * `linkedUserIds` are real UIDs found by email for members provisioned before sign-in.
+ * `linkedUserIds` are the profiles the caller may read that could carry this membership
+ * (see linkedProfileIds in AppContext): the member's own UID, and profiles self-linked
+ * to it via memberId. Only those that actually carry it (profileCarriesMembership), or
+ * the member's own UID without a profile yet, are synced.
  */
 export async function updateMemberRecord(
   store: DataStore,
@@ -463,19 +568,32 @@ export async function updateMemberRecord(
       throw new DomainError('duplicate', `البريد الإلكتروني (${after.userEmail}) مسجل لموظف آخر في هذه المؤسسة.`);
     }
 
-    const realUids = Array.from(new Set([...(isRealUid(mem.userId) ? [mem.userId] : []), ...linkedUserIds.filter(isRealUid)]));
-    if (!isRealUid(mem.userId) && realUids[0]) clean.userId = realUids[0];
+    const realUids = Array.from(new Set(linkedUserIds.filter(isRealUid)));
+    const syncUids: string[] = [];
+    for (const uid of realUids) {
+      const profile = await tx.get(COL.users, uid);
+      if (profile ? profileCarriesMembership(profile, mem) : uid === mem.userId) syncUids.push(uid);
+    }
+    // A placeholder member (invited by email) is re-pointed at the real account.
+    if (!isRealUid(mem.userId) && syncUids[0]) clean.userId = syncUids[0];
+
+    const recipientEdits: RecipientEdits = new Map();
+    editRecipients(recipientEdits, mem.orgId, mem, null);
+    editRecipients(recipientEdits, after.orgId, null, after);
+    const recipientUpdates = await readRecipientUpdates(tx, recipientEdits);
 
     tx.update(COL.members, memberId, { ...clean, updatedAt: nowIso });
     if (oldKey) releaseUniqueKey(tx, oldKey, memberId);
     if (newKey) claimUniqueKey(tx, newKey, { collection: COL.members, id: memberId }, nowIso);
-    for (const uid of realUids) {
+    writeRecipientUpdates(tx, recipientUpdates, nowIso);
+    for (const uid of syncUids) {
       tx.set(
         COL.users,
         uid,
         {
           orgId: after.orgId,
           role: after.role,
+          memberId,
           name: after.userName,
           userName: after.userName,
           phone: after.phone || '',
@@ -519,15 +637,40 @@ export async function updateMemberRecord(
   });
 }
 
-export async function removeMember(store: DataStore, actor: Actor, memberId: string, operationKey: string, now: Date = new Date()) {
+/**
+ * Deletes a membership and revokes the access it carried: every profile in
+ * `linkedUserIds` that carries it (profileCarriesMembership) is detached from the org
+ * in the same transaction. Without this a removed user whose users/{uid} still named
+ * the org kept full access.
+ */
+export async function removeMember(
+  store: DataStore,
+  actor: Actor,
+  memberId: string,
+  linkedUserIds: string[],
+  operationKey: string,
+  now: Date = new Date(),
+) {
   assertRole(actor, ['super_admin', 'org_admin'], 'حذف الموظفين متاح لمدير الشركة فقط.');
   const nowIso = now.toISOString();
   return store.runTransaction(async tx => {
     const mem = await tx.get<OrganizationMember>(COL.members, memberId);
     if (!mem) return { value: null, changed: false };
     const key = mem.userEmail ? await readUniqueKey(tx, 'member_email', mem.orgId, mem.userEmail) : null;
+    const detachUids: string[] = [];
+    for (const uid of new Set(linkedUserIds.filter(isRealUid))) {
+      if (profileCarriesMembership(await tx.get(COL.users, uid), mem)) detachUids.push(uid);
+    }
+    const recipientEdits: RecipientEdits = new Map();
+    editRecipients(recipientEdits, mem.orgId, mem, null);
+    const recipientUpdates = await readRecipientUpdates(tx, recipientEdits);
+
     tx.delete(COL.members, memberId);
     if (key) releaseUniqueKey(tx, key, memberId);
+    writeRecipientUpdates(tx, recipientUpdates, nowIso);
+    for (const uid of detachUids) {
+      tx.update(COL.users, uid, { orgId: '', role: 'employee', memberId: null, updatedAt: nowIso });
+    }
     writeAudit(
       tx,
       actor,

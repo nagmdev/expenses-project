@@ -5,7 +5,7 @@ import { Header } from './components/Header';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { ExpenseRequest, SUPPORTED_CURRENCIES } from './types';
-import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
+import { Building2, X, AlertTriangle, Loader2, Wallet, Ban } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
 import { useSubmitGuard } from './hooks/useSubmitGuard';
 
@@ -55,6 +55,7 @@ const MainApp: React.FC = () => {
     firebaseError,
     clearFirebaseError,
     forceRefreshUserState,
+    isAccountSuspended,
   } = useApp();
 
   const [isNewRequestModalOpen, setIsNewRequestModalOpen] = useState(false);
@@ -211,6 +212,18 @@ const MainApp: React.FC = () => {
                   + إنشاء الشركة الأولى الآن
                 </button>
               </div>
+            </div>
+          ) : isAccountSuspended ? (
+            <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-lg mx-auto text-center shadow-md my-12 animate-in fade-in duration-200">
+              <div className="h-16 w-16 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto mb-4 border border-rose-200">
+                <Ban className="h-8 w-8" />
+              </div>
+              <h2 className="text-lg font-bold text-slate-900">الحساب موقوف</h2>
+              <p className="text-xs text-slate-500 mt-2 leading-relaxed">
+                مرحباً بك <strong>{currentUser.name}</strong> ({currentUser.email}).
+                <br />
+                تم إيقاف حسابك من قِبل مسؤول الشركة، ولا يمكنك الوصول إلى بيانات الشركة حالياً. يرجى التواصل مع مدير شركتك لإعادة تفعيله.
+              </p>
             </div>
           ) : !loading && currentRole !== 'super_admin' && organizations.length === 0 ? (
             <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-lg mx-auto text-center shadow-md my-12 animate-in fade-in duration-200">

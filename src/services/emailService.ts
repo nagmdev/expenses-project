@@ -34,7 +34,12 @@ async function postJson(url: string, body: unknown, headers: Record<string, stri
   }
 }
 
-export function createNotificationTransport(store: DataStore): OutboxTransport {
+/**
+ * `getIdToken` returns the signed-in user's Firebase ID token. /api/send-email only
+ * delivers an outbox event the caller can read under the Firestore rules, and only to
+ * one of its recipients, with the event's own content — so it is not an open relay.
+ */
+export function createNotificationTransport(store: DataStore, getIdToken: () => Promise<string | null> = async () => null): OutboxTransport {
   return {
     async deliver(event: OutboxEvent, target: string, idempotencyKey: string) {
       const { subject, html, text } = event.message;
@@ -84,20 +89,12 @@ export function createNotificationTransport(store: DataStore): OutboxTransport {
         return;
       }
 
+      const token = await getIdToken();
+      if (!token) throw new Error('انتهت جلسة الدخول. ستتم إعادة المحاولة بعد تسجيل الدخول.');
       const { res, data } = await postJson(
         '/api/send-email',
-        {
-          to: target,
-          subject,
-          html,
-          text,
-          senderName: event.meta.senderName,
-          senderEmail: event.meta.senderEmail,
-          replyTo: event.meta.replyTo,
-          provider: event.meta.provider || 'auto',
-          idempotencyKey,
-        },
-        { 'Idempotency-Key': idempotencyKey },
+        { eventId: event.id, to: target },
+        { 'Idempotency-Key': idempotencyKey, Authorization: `Bearer ${token}` },
         API_TIMEOUT_MS,
       );
       if (res.ok && data?.success) return;
