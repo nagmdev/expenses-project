@@ -4,10 +4,10 @@ import { LoginPage } from './components/LoginPage';
 import { Header } from './components/Header';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
-import { ExpenseRequest, SUPPORTED_CURRENCIES, Organization, OrganizationMember } from './types';
+import { ExpenseRequest, SUPPORTED_CURRENCIES } from './types';
 import { Building2, X, AlertTriangle, Loader2, Wallet } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
-import { initFirebase, getDoc, getDocs, doc, collection, query, where } from './lib/firebase';
+import { useSubmitGuard } from './hooks/useSubmitGuard';
 
 // Code-split heavy page views and modals (loads only what the user actively visits)
 const DashboardAnalytics = lazy(() => import('./components/DashboardAnalytics').then(m => ({ default: m.DashboardAnalytics })));
@@ -54,12 +54,7 @@ const MainApp: React.FC = () => {
     openFirebaseModal,
     firebaseError,
     clearFirebaseError,
-    effectiveOrgId,
-    setActiveOrgId,
     forceRefreshUserState,
-    setUserDocProfile,
-    setRawMembers,
-    setRawOrganizations,
   } = useApp();
 
   const [isNewRequestModalOpen, setIsNewRequestModalOpen] = useState(false);
@@ -71,120 +66,19 @@ const MainApp: React.FC = () => {
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  // Direct fetch and immediate admission into organization without page refresh
+  // Manual "check my access now": re-reads the user's profile + memberships once.
   const handleCheckStatusNow = async () => {
     if (!firebaseUser || isRefreshingStatus) return;
     setIsRefreshingStatus(true);
     setStatusMessage(null);
-
     try {
-      const { db } = initFirebase();
-      if (!db) {
-        await forceRefreshUserState();
-        return;
-      }
-
-      let foundOrgId = '';
-      let profileData: any = null;
-      const fetchedMembers: OrganizationMember[] = [];
-
-      // 1. Directly fetch getDoc(doc(db, 'users', firebaseUser.uid))
-      try {
-        const userDocRef = doc(db, 'users', firebaseUser.uid);
-        const userSnap = await getDoc(userDocRef);
-        if (userSnap.exists()) {
-          profileData = userSnap.data();
-          if (profileData?.orgId) {
-            foundOrgId = profileData.orgId;
-          }
-        }
-      } catch (err) {
-        console.warn('[Status Check] user doc fetch warning:', err);
-      }
-
-      // 2. Directly fetch getDocs(query(collection(db, 'members'), where('userId', '==', firebaseUser.uid)))
-      try {
-        const membersQueryByUid = query(collection(db, 'members'), where('userId', '==', firebaseUser.uid));
-        const membersByUidSnap = await getDocs(membersQueryByUid);
-        membersByUidSnap.docs.forEach(d => {
-          fetchedMembers.push({ id: d.id, ...d.data() } as OrganizationMember);
-        });
-      } catch (err) {
-        console.warn('[Status Check] members by uid fetch warning:', err);
-      }
-
-      // 3. Check by email where('userEmail', '==', firebaseUser.email)
-      if (firebaseUser.email) {
-        const uEmail = firebaseUser.email.toLowerCase().trim();
-        try {
-          const membersQueryByEmail = query(collection(db, 'members'), where('userEmail', '==', uEmail));
-          const membersByEmailSnap = await getDocs(membersQueryByEmail);
-          membersByEmailSnap.docs.forEach(d => {
-            if (!fetchedMembers.some(m => m.id === d.id)) {
-              fetchedMembers.push({ id: d.id, ...d.data() } as OrganizationMember);
-            }
-          });
-
-          if (firebaseUser.email !== uEmail) {
-            const membersByOrigEmailSnap = await getDocs(query(collection(db, 'members'), where('userEmail', '==', firebaseUser.email)));
-            membersByOrigEmailSnap.docs.forEach(d => {
-              if (!fetchedMembers.some(m => m.id === d.id)) {
-                fetchedMembers.push({ id: d.id, ...d.data() } as OrganizationMember);
-              }
-            });
-          }
-        } catch (err) {
-          console.warn('[Status Check] members by email fetch warning:', err);
-        }
-      }
-
-      if (!foundOrgId && fetchedMembers.length > 0) {
-        const memWithOrg = fetchedMembers.find(m => m.orgId && m.orgId.trim());
-        if (memWithOrg) foundOrgId = memWithOrg.orgId;
-      }
-
-      // If found, immediately update userDocProfile, rawMembers, effectiveOrgId, and activeOrgId in state and localStorage
-      if (foundOrgId) {
-        // Fetch organization details immediately so company is displayed without reload
-        try {
-          const orgSnap = await getDoc(doc(db, 'organizations', foundOrgId));
-          if (orgSnap.exists()) {
-            const orgData = { id: orgSnap.id, ...orgSnap.data() } as Organization;
-            setRawOrganizations([orgData]);
-            try {
-              localStorage.setItem('expenses_organizations_v3', JSON.stringify([orgData]));
-            } catch {}
-          }
-        } catch (err) {
-          console.warn('[Status Check] org fetch warning:', err);
-        }
-
-        if (profileData) {
-          setUserDocProfile(profileData);
-        }
-        if (fetchedMembers.length > 0) {
-          setRawMembers(fetchedMembers);
-          try {
-            localStorage.setItem('expenses_members_v3', JSON.stringify(fetchedMembers));
-          } catch {}
-        }
-
-        setActiveOrgId(foundOrgId);
-        try {
-          localStorage.setItem('expenses_active_org_id_v3', foundOrgId);
-        } catch {}
-
-        await forceRefreshUserState();
-      } else {
-        // Run forceRefreshUserState as secondary attempt
-        const ok = await forceRefreshUserState();
-        if (!ok) {
-          setStatusMessage('لم يتم ربط الحساب بشركة حتى الآن. يرجى التأكد من قيام مسؤول الشركة بإضافة بريدك الإلكتروني في قائمة الأعضاء.');
-        }
+      const ok = await forceRefreshUserState();
+      if (!ok) {
+        setStatusMessage('لم يتم ربط الحساب بشركة حتى الآن. يرجى التأكد من قيام مسؤول الشركة بإضافة بريدك الإلكتروني في قائمة الأعضاء.');
       }
     } catch (e: any) {
       console.error('[Status Check Error]', e);
-      await forceRefreshUserState();
+      setStatusMessage('تعذر التحقق من حالة الحساب. أعد المحاولة.');
     } finally {
       setIsRefreshingStatus(false);
     }
@@ -196,7 +90,8 @@ const MainApp: React.FC = () => {
   const [newOrgCode, setNewOrgCode] = useState('');
   const [newOrgCurrency, setNewOrgCurrency] = useState('EGP');
   const [newOrgBudget, setNewOrgBudget] = useState('500000');
-  const [isQuickOrgSubmitting, setIsQuickOrgSubmitting] = useState(false);
+  const quickOrgGuard = useSubmitGuard();
+  const isQuickOrgSubmitting = quickOrgGuard.pending;
   const [quickOrgError, setQuickOrgError] = useState<string | null>(null);
 
   // 1. Mandatory Loading State
@@ -219,37 +114,34 @@ const MainApp: React.FC = () => {
     return <LoginPage />;
   }
 
-  const handleQuickAddOrg = async (e: React.FormEvent) => {
+  const handleQuickAddOrg = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newOrgName.trim() || isQuickOrgSubmitting) return;
-
-    setQuickOrgError(null);
-    setIsQuickOrgSubmitting(true);
-
-    try {
-      const res = await addOrganization({
-        name: newOrgName.trim(),
-        code: newOrgCode.trim().toUpperCase() || newOrgName.trim().slice(0, 3).toUpperCase() || 'ORG',
-        currency: newOrgCurrency,
-        budget: Number(newOrgBudget) || 0,
-        description: 'مؤسسة جديدة أضيفت للنظام.',
-      });
-
-      if (!res.success) {
-        setQuickOrgError(res.message || 'تعذر إضافة الشركة.');
-        setIsQuickOrgSubmitting(false);
-        return;
-      }
-
-      setNewOrgName('');
-      setNewOrgCode('');
+    if (!newOrgName.trim()) return;
+    // Synchronous lock: Enter + click / double click can never create two companies.
+    void quickOrgGuard.run(async idempotencyKey => {
       setQuickOrgError(null);
-      setIsQuickOrgModalOpen(false);
-    } catch {
-      setQuickOrgError('حدث خطأ غير متوقع أثناء إضافة الشركة.');
-    } finally {
-      setIsQuickOrgSubmitting(false);
-    }
+      try {
+        const res = await addOrganization({
+          name: newOrgName.trim(),
+          code: newOrgCode.trim().toUpperCase() || newOrgName.trim().slice(0, 3).toUpperCase() || 'ORG',
+          currency: newOrgCurrency,
+          budget: Number(newOrgBudget) || 0,
+          description: 'مؤسسة جديدة أضيفت للنظام.',
+        }, { idempotencyKey });
+
+        if (!res.success) {
+          setQuickOrgError(res.message || 'تعذر إضافة الشركة.');
+          return;
+        }
+        quickOrgGuard.rotateKey();
+        setNewOrgName('');
+        setNewOrgCode('');
+        setQuickOrgError(null);
+        setIsQuickOrgModalOpen(false);
+      } catch (err: any) {
+        setQuickOrgError(err?.message || 'حدث خطأ غير متوقع أثناء إضافة الشركة.');
+      }
+    });
   };
 
   return (

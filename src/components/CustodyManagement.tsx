@@ -39,6 +39,8 @@ import {
   sanitizePhone 
 } from '../utils/validation';
 import { InvoiceViewerModal } from './InvoiceViewerModal';
+import { useSubmitGuard } from '../hooks/useSubmitGuard';
+import { newId } from '../utils/ids';
 
 export const CustodyManagement: React.FC = () => {
   const {
@@ -142,8 +144,8 @@ export const CustodyManagement: React.FC = () => {
   const [issueAmount, setIssueAmount] = useState('');
   const [issueSourceAccountId, setIssueSourceAccountId] = useState('');
   const [issueNotes, setIssueNotes] = useState('');
-  const [isIssuing, setIsIssuing] = useState(false);
-  const isIssuingRef = useRef(false);
+  const issueGuard = useSubmitGuard();
+  const isIssuing = issueGuard.pending;
   const [issueError, setIssueError] = useState<string | null>(null);
 
   // Settle Custody Form State
@@ -154,8 +156,8 @@ export const CustodyManagement: React.FC = () => {
   const [settleInvoiceDate, setSettleInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
   const [settleDescription, setSettleDescription] = useState('');
   const [settleReceiptUrl, setSettleReceiptUrl] = useState('');
-  const [isSettling, setIsSettling] = useState(false);
-  const isSettlingRef = useRef(false);
+  const settleGuard = useSubmitGuard();
+  const isSettling = settleGuard.pending;
   const [settleError, setSettleError] = useState<string | null>(null);
   const receiptFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -163,8 +165,8 @@ export const CustodyManagement: React.FC = () => {
   const [replenishAmount, setReplenishAmount] = useState('');
   const [replenishSourceAccountId, setReplenishSourceAccountId] = useState('');
   const [replenishNotes, setReplenishNotes] = useState('');
-  const [isReplenishing, setIsReplenishing] = useState(false);
-  const isReplenishingRef = useRef(false);
+  const replenishGuard = useSubmitGuard();
+  const isReplenishing = replenishGuard.pending;
   const [replenishError, setReplenishError] = useState<string | null>(null);
 
   // Filtered Custodies
@@ -258,6 +260,7 @@ export const CustodyManagement: React.FC = () => {
     setIssueSourceAccountId('');
     setIssueNotes('');
     setIssueError(null);
+    issueGuard.rotateKey();
     setIsIssueModalOpen(true);
   };
 
@@ -308,7 +311,7 @@ export const CustodyManagement: React.FC = () => {
         return;
       }
       if (!finalEmpId) {
-        finalEmpId = `emp-${Date.now()}`;
+        finalEmpId = newId('emp');
       }
     }
 
@@ -317,35 +320,31 @@ export const CustodyManagement: React.FC = () => {
       return;
     }
 
-    if (isIssuingRef.current || isIssuing) return;
-    isIssuingRef.current = true;
-    setIsIssuing(true);
-    try {
-      const res = await issueCustody(
-        issueOrgId,
-        finalEmpId,
-        finalEmpName,
-        finalEmpPhone || undefined,
-        amountNum,
-        issueSourceAccountId,
-        issueNotes.trim() || undefined
-      );
+    await issueGuard.run(async (idempotencyKey) => {
+      try {
+        const res = await issueCustody(
+          issueOrgId,
+          finalEmpId,
+          finalEmpName,
+          finalEmpPhone || undefined,
+          amountNum,
+          issueSourceAccountId,
+          issueNotes.trim() || undefined,
+          { idempotencyKey }
+        );
 
-      if (res && !res.success) {
-        setIssueError(res.message || 'حدث خطأ أثناء صرف العهدة.');
-        isIssuingRef.current = false;
-        setIsIssuing(false);
-        return;
+        if (!res || !res.success) {
+          setIssueError(res?.message || 'حدث خطأ أثناء صرف العهدة.');
+          return;
+        }
+
+        issueGuard.rotateKey();
+        setIsIssueModalOpen(false);
+      } catch (err: any) {
+        console.error(err);
+        setIssueError(err?.message || 'حدث خطأ أثناء صرف العهدة.');
       }
-
-      setIsIssueModalOpen(false);
-    } catch (err: any) {
-      console.error(err);
-      setIssueError(err?.message || 'حدث خطأ أثناء صرف العهدة.');
-    } finally {
-      isIssuingRef.current = false;
-      setIsIssuing(false);
-    }
+    });
   };
 
   // Handle open settlement modal
@@ -359,6 +358,7 @@ export const CustodyManagement: React.FC = () => {
     setSettleDescription('');
     setSettleReceiptUrl('');
     setSettleError(null);
+    settleGuard.rotateKey();
   };
 
   // Handle receipt image upload
@@ -404,36 +404,33 @@ export const CustodyManagement: React.FC = () => {
       return;
     }
 
-    if (isSettlingRef.current || isSettling) return;
-    isSettlingRef.current = true;
-    setIsSettling(true);
-    try {
-      const res = await settleCustodyItem(
-        settlingCustody.id,
-        amountNum,
-        settleDescription.trim(),
-        settleServiceCategoryId || undefined,
-        settleVendorName.trim() || undefined,
-        settleInvoiceNumber.trim() || undefined,
-        settleInvoiceDate || undefined,
-        settleReceiptUrl || undefined
-      );
+    const custodyId = settlingCustody.id;
+    await settleGuard.run(async (idempotencyKey) => {
+      try {
+        const res = await settleCustodyItem(
+          custodyId,
+          amountNum,
+          settleDescription.trim(),
+          settleServiceCategoryId || undefined,
+          settleVendorName.trim() || undefined,
+          settleInvoiceNumber.trim() || undefined,
+          settleInvoiceDate || undefined,
+          settleReceiptUrl || undefined,
+          { idempotencyKey }
+        );
 
-      if (res && !res.success) {
-        setSettleError(res.message || 'حدث خطأ أثناء تسجيل فاتورة التصفية.');
-        isSettlingRef.current = false;
-        setIsSettling(false);
-        return;
+        if (!res || !res.success) {
+          setSettleError(res?.message || 'حدث خطأ أثناء تسجيل فاتورة التصفية.');
+          return;
+        }
+
+        settleGuard.rotateKey();
+        setSettlingCustody(null);
+      } catch (err: any) {
+        console.error(err);
+        setSettleError(err?.message || 'حدث خطأ غير متوقع أثناء تسجيل التصفية.');
       }
-
-      setSettlingCustody(null);
-    } catch (err: any) {
-      console.error(err);
-      setSettleError(err?.message || 'حدث خطأ غير متوقع أثناء تسجيل التصفية.');
-    } finally {
-      isSettlingRef.current = false;
-      setIsSettling(false);
-    }
+    });
   };
 
   // Handle open replenish modal
@@ -443,6 +440,7 @@ export const CustodyManagement: React.FC = () => {
     setReplenishSourceAccountId(custody.sourceAccountId || '');
     setReplenishNotes('');
     setReplenishError(null);
+    replenishGuard.rotateKey();
   };
 
   // Submit replenish
@@ -462,32 +460,29 @@ export const CustodyManagement: React.FC = () => {
       return;
     }
 
-    if (isReplenishingRef.current || isReplenishing) return;
-    isReplenishingRef.current = true;
-    setIsReplenishing(true);
-    try {
-      const res = await replenishCustody(
-        replenishingCustody.id,
-        amountNum,
-        replenishSourceAccountId,
-        replenishNotes.trim() || undefined
-      );
+    const custodyId = replenishingCustody.id;
+    await replenishGuard.run(async (idempotencyKey) => {
+      try {
+        const res = await replenishCustody(
+          custodyId,
+          amountNum,
+          replenishSourceAccountId,
+          replenishNotes.trim() || undefined,
+          { idempotencyKey }
+        );
 
-      if (res && !res.success) {
-        setReplenishError(res.message || 'حدث خطأ أثناء استعاضة العهدة.');
-        isReplenishingRef.current = false;
-        setIsReplenishing(false);
-        return;
+        if (!res || !res.success) {
+          setReplenishError(res?.message || 'حدث خطأ أثناء استعاضة العهدة.');
+          return;
+        }
+
+        replenishGuard.rotateKey();
+        setReplenishingCustody(null);
+      } catch (err: any) {
+        console.error(err);
+        setReplenishError(err?.message || 'حدث خطأ غير متوقع أثناء استعاضة العهدة.');
       }
-
-      setReplenishingCustody(null);
-    } catch (err: any) {
-      console.error(err);
-      setReplenishError(err?.message || 'حدث خطأ غير متوقع أثناء استعاضة العهدة.');
-    } finally {
-      isReplenishingRef.current = false;
-      setIsReplenishing(false);
-    }
+    });
   };
 
   // Get settlements for an inspected custody

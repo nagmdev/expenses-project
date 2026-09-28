@@ -26,6 +26,7 @@ import {
   Database
 } from 'lucide-react';
 import { EmailEventType, Role } from '../types';
+import { useSubmitGuard } from '../hooks/useSubmitGuard';
 
 export const SettingsManagement: React.FC = () => {
   const { 
@@ -55,14 +56,16 @@ export const SettingsManagement: React.FC = () => {
   const [testFeedback, setTestFeedback] = useState<{ msg: string; isError?: boolean } | null>(null);
 
   // Email Settings Form state
-  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const settingsGuard = useSubmitGuard();
+  const isSavingSettings = settingsGuard.pending;
   const [settingsFeedback, setSettingsFeedback] = useState<string | null>(null);
   const [formSettings, setFormSettings] = useState(emailSettings);
 
   // Profile Form state
   const [displayName, setDisplayName] = useState(currentUser.name || '');
   const [phoneNumber, setPhoneNumber] = useState(currentUser.phone || '');
-  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const profileGuard = useSubmitGuard();
+  const isSavingProfile = profileGuard.pending;
   const [profileFeedback, setProfileFeedback] = useState<{ msg: string; isError?: boolean } | null>(null);
 
   // Password Change state
@@ -79,17 +82,17 @@ export const SettingsManagement: React.FC = () => {
 
   const handleSaveEmailSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSavingSettings(true);
+    await settingsGuard.run(async () => {
     setSettingsFeedback(null);
     try {
       await updateEmailSettings(formSettings);
       setSettingsFeedback('تم حفظ وتطبيق إعدادات الإشعارات بنجاح!');
       setTimeout(() => setSettingsFeedback(null), 4000);
-    } catch {
-      setSettingsFeedback('حدث خطأ أثناء حفظ الإعدادات.');
-    } finally {
-      setIsSavingSettings(false);
+    } catch (err: any) {
+      // The feedback banner is success-styled; report failures separately.
+      alert(err?.message || 'حدث خطأ أثناء حفظ الإعدادات.');
     }
+    });
   };
 
   const handleTriggerTestEmail = async () => {
@@ -116,7 +119,7 @@ export const SettingsManagement: React.FC = () => {
       setProfileFeedback({ msg: 'يرجى إدخال الاسم.', isError: true });
       return;
     }
-    setIsSavingProfile(true);
+    await profileGuard.run(async () => {
     setProfileFeedback(null);
     try {
       const res = await updateUserProfileInfo(displayName.trim(), phoneNumber.trim());
@@ -126,9 +129,10 @@ export const SettingsManagement: React.FC = () => {
       } else {
         setProfileFeedback({ msg: res.error || 'حدث خطأ أثناء التحديث.', isError: true });
       }
-    } finally {
-      setIsSavingProfile(false);
+    } catch (err: any) {
+      setProfileFeedback({ msg: err?.message || 'حدث خطأ أثناء التحديث.', isError: true });
     }
+    });
   };
 
   const handleChangePassword = async (e: React.FormEvent) => {

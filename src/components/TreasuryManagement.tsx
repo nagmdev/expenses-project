@@ -30,8 +30,12 @@ import {
   sanitizeAmount, 
   sanitizeDigitalWallet, 
   sanitizeIBAN, 
-  sanitizeInstaPay 
+  sanitizeInstaPay
 } from '../utils/validation';
+import { useSubmitGuard } from '../hooks/useSubmitGuard';
+
+const errorText = (err: unknown, fallback: string) =>
+  err instanceof Error && err.message ? err.message : fallback;
 
 export const TreasuryManagement: React.FC = () => {
   const { 
@@ -99,7 +103,11 @@ export const TreasuryManagement: React.FC = () => {
   const [adjustmentType, setAdjustmentType] = useState<TransactionType>('in');
   const [adjustmentAmount, setAdjustmentAmount] = useState('');
   const [adjustmentReason, setAdjustmentReason] = useState('');
-  const [isAdjusting, setIsAdjusting] = useState(false);
+  // Synchronous submit locks + idempotency keys (double click / Enter+click / retry-safe)
+  const accountGuard = useSubmitGuard();
+  const adjustmentGuard = useSubmitGuard();
+  const isSavingAccount = accountGuard.pending;
+  const isAdjusting = adjustmentGuard.pending;
 
   // Account Detail Inspection
   const [inspectingAccount, setInspectingAccount] = useState<PaymentAccount | null>(null);
@@ -258,6 +266,7 @@ export const TreasuryManagement: React.FC = () => {
     setAccInitialBalance('0');
     setAccDescription('');
     setAccOrgId(targetOrg);
+    accountGuard.rotateKey();
     setIsAccountModalOpen(true);
   };
 
@@ -286,37 +295,45 @@ export const TreasuryManagement: React.FC = () => {
       ? targetAccounts.find(a => a.id === accParentAccountId)
       : undefined;
 
-    if (editingAccount) {
-      await updatePaymentAccount(editingAccount.id, {
-        name: accName.trim(),
-        type: accType,
-        accountIdentifier: accIdentifier.trim(),
-        bankName: accBankName.trim() || undefined,
-        parentAccountId: parentBank ? parentBank.id : undefined,
-        parentAccountName: parentBank ? parentBank.name : undefined,
-        currency: accCurrency,
-        description: accDescription.trim() || undefined,
-      });
-    } else {
-      await addPaymentAccount({
-        orgId: finalOrgId,
-        name: accName.trim(),
-        type: accType,
-        accountIdentifier: accIdentifier.trim(),
-        bankName: accBankName.trim() || undefined,
-        parentAccountId: parentBank ? parentBank.id : undefined,
-        parentAccountName: parentBank ? parentBank.name : undefined,
-        initialBalance: initialNum,
-        currentBalance: initialNum,
-        totalIn: 0,
-        totalOut: 0,
-        currency: accCurrency,
-        active: true,
-        description: accDescription.trim() || undefined,
-      });
-    }
+    await accountGuard.run(async (idempotencyKey) => {
+      try {
+        if (editingAccount) {
+          await updatePaymentAccount(editingAccount.id, {
+            name: accName.trim(),
+            type: accType,
+            accountIdentifier: accIdentifier.trim(),
+            bankName: accBankName.trim() || undefined,
+            parentAccountId: parentBank ? parentBank.id : undefined,
+            parentAccountName: parentBank ? parentBank.name : undefined,
+            currency: accCurrency,
+            description: accDescription.trim() || undefined,
+          });
+        } else {
+          await addPaymentAccount({
+            orgId: finalOrgId,
+            name: accName.trim(),
+            type: accType,
+            accountIdentifier: accIdentifier.trim(),
+            bankName: accBankName.trim() || undefined,
+            parentAccountId: parentBank ? parentBank.id : undefined,
+            parentAccountName: parentBank ? parentBank.name : undefined,
+            initialBalance: initialNum,
+            currentBalance: initialNum,
+            totalIn: 0,
+            totalOut: 0,
+            currency: accCurrency,
+            active: true,
+            description: accDescription.trim() || undefined,
+          }, { idempotencyKey });
+        }
 
-    setIsAccountModalOpen(false);
+        accountGuard.rotateKey();
+        setIsAccountModalOpen(false);
+      } catch (err) {
+        console.error(err);
+        alert(errorText(err, 'حدث خطأ أثناء حفظ بيانات الحساب.'));
+      }
+    });
   };
 
   // Handlers for Adjustment (IN / OUT)
@@ -325,6 +342,7 @@ export const TreasuryManagement: React.FC = () => {
     setAdjustmentType(type);
     setAdjustmentAmount('');
     setAdjustmentReason('');
+    adjustmentGuard.rotateKey();
     setIsAdjustmentModalOpen(true);
   };
 
@@ -334,21 +352,22 @@ export const TreasuryManagement: React.FC = () => {
     const amountNum = parseFloat(adjustmentAmount);
     if (!amountNum || amountNum <= 0) return;
 
-    setIsAdjusting(true);
-    try {
-      await recordManualAccountAdjustment(
-        adjustmentTargetAccount.id,
-        adjustmentType,
-        amountNum,
-        adjustmentReason.trim()
-      );
-      setIsAdjustmentModalOpen(false);
-    } catch (err) {
-      console.error(err);
-      alert('حدث خطأ أثناء حفظ الحركة المالية.');
-    } finally {
-      setIsAdjusting(false);
-    }
+    await adjustmentGuard.run(async (idempotencyKey) => {
+      try {
+        await recordManualAccountAdjustment(
+          adjustmentTargetAccount.id,
+          adjustmentType,
+          amountNum,
+          adjustmentReason.trim(),
+          { idempotencyKey }
+        );
+        adjustmentGuard.rotateKey();
+        setIsAdjustmentModalOpen(false);
+      } catch (err) {
+        console.error(err);
+        alert(errorText(err, 'حدث خطأ أثناء حفظ الحركة المالية.'));
+      }
+    });
   };
 
   const getAccountIcon = (type: PaymentAccountType) => {
@@ -628,9 +647,14 @@ export const TreasuryManagement: React.FC = () => {
                           {(isSuperAdmin || currentRole === 'org_admin') && (
                             <button
                               type="button"
-                              onClick={() => {
+                              onClick={async () => {
                                 if (confirm(`هل أنت متأكد من حذف الحساب "${acc.name}"؟`)) {
-                                  deletePaymentAccount(acc.id);
+                                  try {
+                                    await deletePaymentAccount(acc.id);
+                                  } catch (err) {
+                                    console.error(err);
+                                    alert(errorText(err, 'حدث خطأ أثناء حذف الحساب.'));
+                                  }
                                 }
                               }}
                               className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
@@ -1052,9 +1076,10 @@ export const TreasuryManagement: React.FC = () => {
                 </button>
                 <button
                   type="submit"
+                  disabled={isSavingAccount}
                   className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold shadow-md transition cursor-pointer active:scale-98"
                 >
-                  {editingAccount ? 'حفظ التعديلات' : 'إنشاء وتفعيل الحساب'}
+                  {isSavingAccount ? 'جاري الحفظ...' : (editingAccount ? 'حفظ التعديلات' : 'إنشاء وتفعيل الحساب')}
                 </button>
               </div>
             </form>

@@ -1,5 +1,6 @@
 import { getStorageInstance, ref, uploadBytes, getDownloadURL } from '../lib/firebase';
 import { RequestAttachment } from '../types';
+import { newId, uuid } from './ids';
 
 /**
  * Format bytes to human readable format (KB, MB)
@@ -197,7 +198,7 @@ export async function processAndUploadInvoice(
   try {
     const storage = getStorageInstance();
     if (storage) {
-      const storagePath = `invoices/${orgId}/${requestId || 'new'}_${Date.now()}_${cleanName}`;
+      const storagePath = `invoices/${orgId}/${requestId || 'new'}_${uuid()}_${cleanName}`;
       const storageRef = ref(storage, storagePath);
       
       const snapshot = await uploadBytes(storageRef, blobToUpload, {
@@ -235,7 +236,7 @@ export async function processAndUploadInvoice(
   }
 
   return {
-    id: `att-${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    id: newId('att'),
     name: file.name,
     size: finalSize,
     type: fileType,

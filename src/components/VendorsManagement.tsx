@@ -22,8 +22,9 @@ import {
   sanitizePhone, 
   sanitizeTaxOrCR, 
   sanitizeIBAN, 
-  handleNumericKeyDown 
+  handleNumericKeyDown
 } from '../utils/validation';
+import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 
 export const VendorsManagement: React.FC = () => {
   const { 
@@ -52,6 +53,8 @@ export const VendorsManagement: React.FC = () => {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<ServiceProvider | null>(null);
+  const saveGuard = useSubmitGuard();
+  const providerActions = useKeyedSubmitGuard();
   const [search, setSearch] = useState('');
 
   // Form states
@@ -96,6 +99,7 @@ export const VendorsManagement: React.FC = () => {
     setSelectedServices(initialOrgServices.length > 0 ? [initialOrgServices[0].id] : []);
     setRating(5.0);
     setNotes('');
+    saveGuard.rotateKey();
     setIsModalOpen(true);
   };
 
@@ -127,6 +131,8 @@ export const VendorsManagement: React.FC = () => {
       .filter(s => selectedServices.includes(s.id))
       .map(s => s.name);
 
+    await saveGuard.run(async (idempotencyKey) => {
+    try {
     if (editingProvider) {
       await updateProvider({
         ...editingProvider,
@@ -162,10 +168,15 @@ export const VendorsManagement: React.FC = () => {
         rating,
         notes: notes.trim(),
         active: true,
-      });
+      }, { idempotencyKey });
+      saveGuard.rotateKey();
     }
 
     setIsModalOpen(false);
+    } catch (err: any) {
+      alert(err?.message || 'تعذر تنفيذ العملية');
+    }
+    });
   };
 
   return (
@@ -262,7 +273,14 @@ export const VendorsManagement: React.FC = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() => deleteProvider(prov.id)}
+                      onClick={() => providerActions.run(`delete:${prov.id}`, async () => {
+                        try {
+                          await deleteProvider(prov.id);
+                        } catch (err: any) {
+                          alert(err?.message || 'تعذر تنفيذ العملية');
+                        }
+                      })}
+                      disabled={providerActions.isPending(`delete:${prov.id}`)}
                       className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
                       title="حذف المورد"
                     >
@@ -570,6 +588,7 @@ export const VendorsManagement: React.FC = () => {
                 </button>
                 <button
                   type="submit"
+                  disabled={saveGuard.pending}
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl"
                 >
                   حفظ مقدم الخدمة

@@ -27,6 +27,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { processAndUploadInvoice } from '../utils/fileUpload';
+import { useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 import { NewRequestModal } from './NewRequestModal';
 import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
 
@@ -71,8 +72,10 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
   const [referenceNumber, setReferenceNumber] = useState('');
   const [bankName, setBankName] = useState('المصرف الرئيسي');
   const [disbursementNotes, setDisbursementNotes] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [isUploadingInvoice, setIsUploadingInvoice] = useState(false);
+
+  // Per-action submit lock + idempotency key, scoped by `${action}:${requestId}`
+  const actionGuard = useKeyedSubmitGuard();
 
   const handleDirectInvoiceUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -83,26 +86,31 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
       return;
     }
 
-    setIsUploadingInvoice(true);
-    try {
-      const att = await processAndUploadInvoice(file, request.orgId || 'org-main', request.id);
-      const otherAttachments = (request.attachments || []).filter(
-        a => !request.invoiceAttachment || a.id !== request.invoiceAttachment.id
-      );
-      await updateRequest(request.id, {
-        invoiceAttachment: att,
-        attachments: [att, ...otherAttachments],
-      });
-    } catch (err: any) {
-      console.error('[DirectInvoiceUpload]', err);
-      alert('تعذر إرفاق صورة الفاتورة: ' + (err?.message || 'خطأ غير متوقع'));
-    } finally {
-      setIsUploadingInvoice(false);
-      e.target.value = '';
-    }
+    const scope = `invoice:${request.id}`;
+    await actionGuard.run(scope, async (idempotencyKey) => {
+      setIsUploadingInvoice(true);
+      try {
+        const att = await processAndUploadInvoice(file, request.orgId || 'org-main', request.id);
+        const otherAttachments = (request.attachments || []).filter(
+          a => !request.invoiceAttachment || a.id !== request.invoiceAttachment.id
+        );
+        await updateRequest(request.id, {
+          invoiceAttachment: att,
+          attachments: [att, ...otherAttachments],
+        }, { idempotencyKey });
+        actionGuard.rotateKey(scope);
+      } catch (err: any) {
+        console.error('[DirectInvoiceUpload]', err);
+        alert('تعذر إرفاق صورة الفاتورة: ' + (err?.message || 'خطأ غير متوقع'));
+      } finally {
+        setIsUploadingInvoice(false);
+        e.target.value = '';
+      }
+    });
   };
 
-  // Sync state whenever request changes
+  // Sync state when a DIFFERENT request is shown (keyed on the id: live snapshots of the
+  // same request must not wipe a half-typed reason/question or regenerate the reference).
   useEffect(() => {
     if (request) {
       setDisburseAccountId(request.targetAccountId || '');
@@ -121,7 +129,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
       setReplyText('');
       setReplyAttachment('');
     }
-  }, [request]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request?.id]);
 
   // Close on Escape key press for accessibility
   useEffect(() => {
@@ -161,46 +170,65 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     a => a.orgId === request?.orgId && a.active !== false
   );
 
-  const handleApprove = (e: React.FormEvent) => {
+  // Guarded + awaited action: UI is reset / closed only after the call succeeded.
+  // On failure the idempotency key is kept so a retry resolves to the same operation.
+  const runAction = (action: string, fn: (idempotencyKey: string) => Promise<unknown>) => {
+    const scope = `${action}:${request.id}`;
+    return actionGuard.run(scope, async (idempotencyKey) => {
+      try {
+        await fn(idempotencyKey);
+        actionGuard.rotateKey(scope);
+        setActiveAction('none');
+        onClose();
+      } catch (err: any) {
+        console.error(`[RequestDetailModal] ${action} failed:`, err);
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
+  };
+  const isActionPending = (action: string) => actionGuard.isPending(`${action}:${request.id}`);
+  const isSubmitting = isActionPending('disburse');
+
+  const handleApprove = async (e: React.FormEvent) => {
     e.preventDefault();
-    approveRequest(request.id, approvalNote.trim() || undefined);
-    setActiveAction('none');
-    onClose();
+    await runAction('approve', (idempotencyKey) =>
+      approveRequest(request.id, approvalNote.trim() || undefined, { idempotencyKey })
+    );
   };
 
-  const handleReject = (e: React.FormEvent) => {
+  const handleReject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!rejectionReason.trim()) return;
-    rejectRequest(request.id, rejectionReason.trim());
-    setActiveAction('none');
-    onClose();
+    await runAction('reject', (idempotencyKey) =>
+      rejectRequest(request.id, rejectionReason.trim(), { idempotencyKey })
+    );
   };
 
-  const handleClarify = (e: React.FormEvent) => {
+  const handleClarify = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!clarificationQuestion.trim()) return;
-    requestClarification(request.id, clarificationQuestion.trim());
-    setActiveAction('none');
-    onClose();
+    await runAction('clarify', (idempotencyKey) =>
+      requestClarification(request.id, clarificationQuestion.trim(), { idempotencyKey })
+    );
   };
 
-  const handleReply = (e: React.FormEvent) => {
+  const handleReply = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!replyText.trim()) return;
-    replyClarification(request.id, replyText.trim(), replyAttachment.trim() || undefined);
-    setActiveAction('none');
-    onClose();
+    await runAction('reply', (idempotencyKey) =>
+      replyClarification(request.id, replyText.trim(), replyAttachment.trim() || undefined, { idempotencyKey })
+    );
   };
 
   const handleDisburse = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!referenceNumber.trim()) return;
-    setIsSubmitting(true);
-    try {
-      const targetAcc = companyAccounts.find(a => a.id === disburseAccountId) 
-        || companyAccounts.find(a => a.type === mapPaymentMethodToAccountType(paymentMethod)) 
+    await runAction('disburse', async (idempotencyKey) => {
+      const targetAcc = companyAccounts.find(a => a.id === disburseAccountId)
+        || companyAccounts.find(a => a.type === mapPaymentMethodToAccountType(paymentMethod))
         || companyAccounts[0];
 
+      // changed=false (e.g. 'already_disbursed' / 'duplicate_operation') means it was already paid — not an error.
       await disburseRequest(request.id, {
         paymentMethod,
         referenceNumber: referenceNumber.trim(),
@@ -208,14 +236,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
         accountId: targetAcc?.id || disburseAccountId || undefined,
         accountName: targetAcc?.name,
         notes: disbursementNotes.trim() || undefined,
-      });
-      setActiveAction('none');
-      onClose();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsSubmitting(false);
-    }
+      }, { idempotencyKey });
+    });
   };
 
   return (
@@ -1110,6 +1132,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                     </button>
                     <button
                       type="submit"
+                      disabled={isActionPending('approve')}
                       className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg"
                     >
                       تأكيد الاعتماد
@@ -1140,6 +1163,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                     </button>
                     <button
                       type="submit"
+                      disabled={isActionPending('clarify')}
                       className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg"
                     >
                       إرسال الاستفسار للموظف
@@ -1170,6 +1194,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                     </button>
                     <button
                       type="submit"
+                      disabled={isActionPending('reject')}
                       className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg"
                     >
                       تأكيد الرفض
@@ -1426,6 +1451,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 <div className="flex justify-end">
                   <button
                     type="submit"
+                    disabled={isActionPending('reply')}
                     className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5"
                   >
                     <Send className="h-3.5 w-3.5" />

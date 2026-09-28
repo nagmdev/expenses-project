@@ -25,6 +25,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { processAndUploadInvoice } from '../utils/fileUpload';
+import { useSubmitGuard } from '../hooks/useSubmitGuard';
 import { InvoiceViewerModal } from './InvoiceViewerModal';
 import { 
   PaymentMethod, 
@@ -415,7 +416,10 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [paymentAccountDetails, setPaymentAccountDetails] = useState('');
   const [beneficiaryName, setBeneficiaryName] = useState('');
   const [activeTemplateType, setActiveTemplateType] = useState<'visa' | 'installment' | 'wallet_topup' | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  // Synchronous submit lock + idempotency key (a retry of the same submission reuses the key)
+  const submitGuard = useSubmitGuard();
+  const submitting = submitGuard.pending;
+  const { rotateKey: rotateSubmitKey } = submitGuard;
 
   // Dedicated Invoice & Prepayment States
   const [isPrepaidByRequester, setIsPrepaidByRequester] = useState<boolean>(false);
@@ -615,7 +619,16 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         setWalletTransferAttachment(null);
       }
     }
-  }, [isOpen, editingRequest, currentUser, getProfilePayoutDetail, currentOrg]);
+    // Runs only when the form is (re)opened or switches to another request. Real-time
+    // snapshots create new object identities on every change; depending on the objects
+    // themselves would wipe what the user is typing / an invoice they just uploaded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editingRequest?.id]);
+
+  // Each new opening of the form is a new submission intent → fresh idempotency key
+  useEffect(() => {
+    if (isOpen) rotateSubmitKey();
+  }, [isOpen, editingRequest?.id, rotateSubmitKey]);
 
   // Validation & Error Handling States
   const [formError, setFormError] = useState<string | null>(null);
@@ -843,10 +856,19 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     Boolean(editingRequest?.walletTransferAttachment) ||
     Boolean(walletTransferAttachment);
 
+  const isAnyUploadInProgress =
+    isUploadingInvoice || isUploadingVisaDoc || isUploadingInstallmentTransfer || isUploadingWalletTransfer;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
     setFieldHighlight(null);
+
+    // Never submit while an attachment is still uploading (it would be silently missing).
+    if (isAnyUploadInProgress) {
+      setFormError('⚠️ يرجى الانتظار حتى يكتمل رفع المرفقات قبل إرسال الطلب');
+      return;
+    }
 
     // ==========================================
     // 0. EDIT MODE SUBMISSION (تعديل طلب موجود)
@@ -886,8 +908,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         return;
       }
 
-      if (submitting) return;
-
       const selectedService = effectiveServices.find(s => s.id === selectedServiceId) || effectiveServices[0];
       const serviceId = selectedService?.id || editingRequest.serviceCategoryId;
       const serviceName = selectedService?.name || editingRequest.serviceCategoryName;
@@ -908,49 +928,50 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       );
       const finalAttachments = [...additionalAtts, ...otherAttachments];
 
-      setSubmitting(true);
-      try {
-        await updateRequest(editingRequest.id, {
-          title: activeTitle,
-          description: requestType === 'income'
-            ? `طلب توريد مالي بقيمة ${Number(amount).toLocaleString()} ${currency}`
-            : (effectiveDescription.trim() || editingRequest.description),
-          justification: requestType === 'income'
-            ? 'إيداع وتوريد مالي مباشر'
-            : (isVisaRequest ? (effectiveJustification.trim() || 'استخراج وتخليص تأشيرة سفر رسمية معتمدة') : (effectiveJustification.trim() || editingRequest.justification)),
-          amount: Number(amount),
-          currency: currency || currentOrg?.currency || 'EGP',
-          serviceCategoryId: serviceId,
-          serviceCategoryName: serviceName,
-          providerId: providerId,
-          providerName: providerName,
-          urgency,
-          requestType,
-          targetAccountId: targetAccountId || undefined,
-          itemsDetail: itemsDetail.trim() || undefined,
-          isPrepaidByRequester,
-          invoiceNumber: invoiceNumber.trim() || undefined,
-          invoiceDate: invoiceDate || undefined,
-          invoiceAttachment: invoiceAttachment || undefined,
-          visaDocumentAttachment: visaDocumentAttachment || undefined,
-          installmentTransferAttachment: installmentTransferAttachment || undefined,
-          installmentDeviceType: isInstallmentRequest ? installmentDeviceType : undefined,
-          installmentDeviceDescription: isInstallmentRequest ? installmentDeviceDescription.trim() : undefined,
-          walletTransferAttachment: walletTransferAttachment || undefined,
-          attachments: finalAttachments,
-          preferredPaymentMethod,
-          paymentAccountDetails: paymentAccountDetails.trim(),
-          beneficiaryName: preferredPaymentMethod === 'instapay' ? beneficiaryName.trim() : undefined,
-          orgId: selectedOrgId,
-        });
+      await submitGuard.run(async (idempotencyKey) => {
+        try {
+          await updateRequest(editingRequest.id, {
+            title: activeTitle,
+            description: requestType === 'income'
+              ? `طلب توريد مالي بقيمة ${Number(amount).toLocaleString()} ${currency}`
+              : (effectiveDescription.trim() || editingRequest.description),
+            justification: requestType === 'income'
+              ? 'إيداع وتوريد مالي مباشر'
+              : (isVisaRequest ? (effectiveJustification.trim() || 'استخراج وتخليص تأشيرة سفر رسمية معتمدة') : (effectiveJustification.trim() || editingRequest.justification)),
+            amount: Number(amount),
+            currency: currency || currentOrg?.currency || 'EGP',
+            serviceCategoryId: serviceId,
+            serviceCategoryName: serviceName,
+            providerId: providerId,
+            providerName: providerName,
+            urgency,
+            requestType,
+            targetAccountId: targetAccountId || undefined,
+            itemsDetail: itemsDetail.trim() || undefined,
+            isPrepaidByRequester,
+            invoiceNumber: invoiceNumber.trim() || undefined,
+            invoiceDate: invoiceDate || undefined,
+            invoiceAttachment: invoiceAttachment || undefined,
+            visaDocumentAttachment: visaDocumentAttachment || undefined,
+            installmentTransferAttachment: installmentTransferAttachment || undefined,
+            installmentDeviceType: isInstallmentRequest ? installmentDeviceType : undefined,
+            installmentDeviceDescription: isInstallmentRequest ? installmentDeviceDescription.trim() : undefined,
+            walletTransferAttachment: walletTransferAttachment || undefined,
+            attachments: finalAttachments,
+            preferredPaymentMethod,
+            paymentAccountDetails: paymentAccountDetails.trim(),
+            beneficiaryName: preferredPaymentMethod === 'instapay' ? beneficiaryName.trim() : undefined,
+            orgId: selectedOrgId,
+          }, { idempotencyKey });
 
-        handleClose();
-      } catch (err: any) {
-        console.error('[NewRequestModal] Error updating request:', err);
-        setFormError(err?.message || 'حدث خطأ أثناء حفظ التعديلات على الطلب، يرجى المحاولة ثانية');
-      } finally {
-        setSubmitting(false);
-      }
+          submitGuard.rotateKey();
+          handleClose();
+        } catch (err: any) {
+          // Keep the idempotency key so a retry resolves to the same operation
+          console.error('[NewRequestModal] Error updating request:', err);
+          setFormError(err?.message || 'حدث خطأ أثناء حفظ التعديلات على الطلب، يرجى المحاولة ثانية');
+        }
+      });
       return;
     }
 
@@ -966,8 +987,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         return;
       }
 
-      if (submitting) return;
-
       const shapeObj = INCOME_PAYMENT_SHAPES.find(s => s.id === selectedIncomeShape) || INCOME_PAYMENT_SHAPES[0];
       const matchingAccount = availableAccounts.find(a => a.id === targetAccountId) || 
         availableAccounts.find(a => a.type === shapeObj.accountType);
@@ -976,38 +995,40 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         ? `توريد مالي - ${paymentAccountDetails.trim()}`
         : `توريد مالي عبر ${shapeObj.title} (+ IN)`;
 
-      setSubmitting(true);
-      try {
-        await createRequest({
-          title: titleText,
-          description: `طلب توريد مالي بقيمة ${Number(amount).toLocaleString()} ${currency} عبر ${shapeObj.title}`,
-          justification: 'إيداع وتوريد مالي مباشر لحساب وخزينة الشركة',
-          amount: Number(amount),
-          currency: currency || currentOrg?.currency || 'EGP',
-          serviceCategoryId: 'srv-income-general',
-          serviceCategoryName: 'توريدات ومتحصلات نقدية',
-          providerId: 'prov-income-general',
-          providerName: paymentAccountDetails.trim() ? `المودع: ${paymentAccountDetails.trim()}` : 'توريد مباشر / عميل',
-          urgency: 'medium',
-          requestType: 'income',
-          targetAccountId: matchingAccount?.id || targetAccountId || undefined,
-          isPrepaidByRequester,
-          invoiceNumber: invoiceNumber.trim() || undefined,
-          invoiceDate: invoiceDate || undefined,
-          invoiceAttachment: invoiceAttachment || undefined,
-          attachments: invoiceAttachment ? [invoiceAttachment] : [],
-          preferredPaymentMethod: shapeObj.method,
-          paymentAccountDetails: paymentAccountDetails.trim(),
-          orgId: selectedOrgId,
-        });
+      await submitGuard.run(async (idempotencyKey) => {
+        try {
+          await createRequest({
+            title: titleText,
+            description: `طلب توريد مالي بقيمة ${Number(amount).toLocaleString()} ${currency} عبر ${shapeObj.title}`,
+            justification: 'إيداع وتوريد مالي مباشر لحساب وخزينة الشركة',
+            amount: Number(amount),
+            currency: currency || currentOrg?.currency || 'EGP',
+            serviceCategoryId: 'srv-income-general',
+            serviceCategoryName: 'توريدات ومتحصلات نقدية',
+            providerId: 'prov-income-general',
+            providerName: paymentAccountDetails.trim() ? `المودع: ${paymentAccountDetails.trim()}` : 'توريد مباشر / عميل',
+            urgency: 'medium',
+            requestType: 'income',
+            targetAccountId: matchingAccount?.id || targetAccountId || undefined,
+            isPrepaidByRequester,
+            invoiceNumber: invoiceNumber.trim() || undefined,
+            invoiceDate: invoiceDate || undefined,
+            invoiceAttachment: invoiceAttachment || undefined,
+            attachments: invoiceAttachment ? [invoiceAttachment] : [],
+            preferredPaymentMethod: shapeObj.method,
+            paymentAccountDetails: paymentAccountDetails.trim(),
+            orgId: selectedOrgId,
+            idempotencyKey,
+          });
 
-        handleClose();
-      } catch (err: any) {
-        console.error('[NewRequestModal] Error creating income request:', err);
-        setFormError(err?.message || 'حدث خطأ أثناء إرسال طلب التوريد، يرجى المحاولة ثانية');
-      } finally {
-        setSubmitting(false);
-      }
+          submitGuard.rotateKey();
+          handleClose();
+        } catch (err: any) {
+          // Keep the idempotency key so a retry resolves to the same record
+          console.error('[NewRequestModal] Error creating income request:', err);
+          setFormError(err?.message || 'حدث خطأ أثناء إرسال طلب التوريد، يرجى المحاولة ثانية');
+        }
+      });
       return;
     }
 
@@ -1047,8 +1068,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       return;
     }
 
-    if (submitting) return;
-
     // Resolve Service (with safe fallbacks so no submission is ever blocked)
     const selectedService = effectiveServices.find(s => s.id === selectedServiceId) || effectiveServices[0];
     const serviceId = selectedService?.id || 'srv-general';
@@ -1079,47 +1098,49 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       walletTransferAttachment
     ].filter(Boolean) as RequestAttachment[];
 
-    setSubmitting(true);
-    try {
-      await createRequest({
-        title: effectiveTitle.trim(),
-        description: effectiveDescription.trim() || 'سداد مباشر للمصروفات الموضحة بالطلب',
-        justification: isVisaRequest 
-          ? (effectiveJustification.trim() || 'استخراج وتخليص تأشيرة سفر رسمية معتمدة') 
-          : (effectiveJustification.trim() || 'دعم استمرارية العمليات والتشغيل'),
-        amount: Number(amount),
-        currency: currency || currentOrg?.currency || 'EGP',
-        serviceCategoryId: serviceId,
-        serviceCategoryName: serviceName,
-        providerId: providerId,
-        providerName: providerName,
-        urgency,
-        requestType: 'expense',
-        targetAccountId: targetAccountId || undefined,
-        itemsDetail: itemsDetail.trim() || undefined,
-        isPrepaidByRequester,
-        invoiceNumber: invoiceNumber.trim() || undefined,
-        invoiceDate: invoiceDate || undefined,
-        invoiceAttachment: invoiceAttachment || undefined,
-        visaDocumentAttachment: visaDocumentAttachment || undefined,
-        installmentTransferAttachment: installmentTransferAttachment || undefined,
-        installmentDeviceType: isInstallmentRequest ? installmentDeviceType : undefined,
-        installmentDeviceDescription: isInstallmentRequest ? installmentDeviceDescription.trim() : undefined,
-        walletTransferAttachment: walletTransferAttachment || undefined,
-        attachments: finalNewAttachments,
-        preferredPaymentMethod,
-        paymentAccountDetails: paymentAccountDetails.trim(),
-        beneficiaryName: preferredPaymentMethod === 'instapay' ? beneficiaryName.trim() : undefined,
-        orgId: selectedOrgId,
-      });
+    await submitGuard.run(async (idempotencyKey) => {
+      try {
+        await createRequest({
+          title: effectiveTitle.trim(),
+          description: effectiveDescription.trim() || 'سداد مباشر للمصروفات الموضحة بالطلب',
+          justification: isVisaRequest
+            ? (effectiveJustification.trim() || 'استخراج وتخليص تأشيرة سفر رسمية معتمدة')
+            : (effectiveJustification.trim() || 'دعم استمرارية العمليات والتشغيل'),
+          amount: Number(amount),
+          currency: currency || currentOrg?.currency || 'EGP',
+          serviceCategoryId: serviceId,
+          serviceCategoryName: serviceName,
+          providerId: providerId,
+          providerName: providerName,
+          urgency,
+          requestType: 'expense',
+          targetAccountId: targetAccountId || undefined,
+          itemsDetail: itemsDetail.trim() || undefined,
+          isPrepaidByRequester,
+          invoiceNumber: invoiceNumber.trim() || undefined,
+          invoiceDate: invoiceDate || undefined,
+          invoiceAttachment: invoiceAttachment || undefined,
+          visaDocumentAttachment: visaDocumentAttachment || undefined,
+          installmentTransferAttachment: installmentTransferAttachment || undefined,
+          installmentDeviceType: isInstallmentRequest ? installmentDeviceType : undefined,
+          installmentDeviceDescription: isInstallmentRequest ? installmentDeviceDescription.trim() : undefined,
+          walletTransferAttachment: walletTransferAttachment || undefined,
+          attachments: finalNewAttachments,
+          preferredPaymentMethod,
+          paymentAccountDetails: paymentAccountDetails.trim(),
+          beneficiaryName: preferredPaymentMethod === 'instapay' ? beneficiaryName.trim() : undefined,
+          orgId: selectedOrgId,
+          idempotencyKey,
+        });
 
-      handleClose();
-    } catch (err: any) {
-      console.error('[NewRequestModal] Error creating expense request:', err);
-      setFormError(err?.message || 'حدث خطأ أثناء حفظ طلب الصرف، يرجى المحاولة ثانية');
-    } finally {
-      setSubmitting(false);
-    }
+        submitGuard.rotateKey();
+        handleClose();
+      } catch (err: any) {
+        // Keep the idempotency key so a retry resolves to the same record
+        console.error('[NewRequestModal] Error creating expense request:', err);
+        setFormError(err?.message || 'حدث خطأ أثناء حفظ طلب الصرف، يرجى المحاولة ثانية');
+      }
+    });
   };
 
   return (
@@ -2663,7 +2684,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               </button>
               <button
                 type="submit"
-                disabled={submitting}
+                disabled={submitting || isAnyUploadInProgress}
                 className={`px-6 py-2.5 text-white font-extrabold rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 text-xs ${
                   isEditMode
                     ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/20'

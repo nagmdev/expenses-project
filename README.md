@@ -1,3 +1,10 @@
+# مصروفي — Expense System
+
+- **Data integrity, idempotency & deployment steps:** see [docs/05-data-integrity-and-idempotency.md](docs/05-data-integrity-and-idempotency.md) — the updated `firestore.rules` must be deployed together with this version.
+- Tests: `npm test`.
+
+---
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.

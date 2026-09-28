@@ -11,6 +11,8 @@ import {
   SUPPORTED_CURRENCIES
 } from '../types';
 import { compressImage } from '../utils/fileUpload';
+import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import { newId } from '../utils/ids';
 import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
 import { 
   Plane, 
@@ -97,8 +99,8 @@ export const VisaManagement: React.FC = () => {
 
   // Validation & feedback state for create modal
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const isSubmittingRef = useRef(false);
+  const createGuard = useSubmitGuard();
+  const isSubmitting = createGuard.pending;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Detail Modal Action states
@@ -112,7 +114,9 @@ export const VisaManagement: React.FC = () => {
   const [receiptReference, setReceiptReference] = useState('');
   const [paymentNotes, setPaymentNotes] = useState('');
   const [paymentError, setPaymentError] = useState('');
-  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+  const paymentGuard = useSubmitGuard();
+  const isProcessingPayment = paymentGuard.pending;
+  const visaActions = useKeyedSubmitGuard();
 
   // Active Visa Provider Options (filtered by current org)
   const availableProviders = useMemo(() => {
@@ -323,9 +327,7 @@ export const VisaManagement: React.FC = () => {
       return;
     }
 
-    if (isSubmittingRef.current || isSubmitting) return;
-    isSubmittingRef.current = true;
-    setIsSubmitting(true);
+    await createGuard.run(async (idempotencyKey) => {
     try {
       const selectedProviderObj = availableProviders.find(p => p.id === serviceProviderId);
       const targetOrgId = effectiveOrgId === 'all' ? (organizations[0]?.id || 'org-main') : (effectiveOrgId || 'org-main');
@@ -353,28 +355,29 @@ export const VisaManagement: React.FC = () => {
         requesterName: currentUser.name,
         requesterEmail: currentUser.email,
         notes: notes.trim() || undefined,
-      });
+      }, { idempotencyKey });
 
+      createGuard.rotateKey();
       setIsCreateModalOpen(false);
       resetCreateForm();
     } catch (err: any) {
       alert(`حدث خطأ أثناء حفظ الطلب: ${err?.message || 'تعذر الاتصال'}`);
-    } finally {
-      isSubmittingRef.current = false;
-      setIsSubmitting(false);
     }
+    });
   };
 
   // Approval Handlers
   const handleApprove = async (visaId: string) => {
+    await visaActions.run(`approve:${visaId}`, async () => {
     try {
       await approveVisaRequest(visaId, 'محمود');
       if (selectedVisa && selectedVisa.id === visaId) {
         setSelectedVisa(prev => prev ? { ...prev, status: prev.paidAmount > 0 ? 'partially_paid' : 'approved', approvedByName: 'محمود', approvedAt: new Date().toISOString() } : null);
       }
     } catch (err: any) {
-      alert(`فشل اعتماد الطلب: ${err?.message}`);
+      alert(`فشل اعتماد الطلب: ${err?.message || 'تعذر تنفيذ العملية'}`);
     }
+    });
   };
 
   const handleReject = async (visaId: string) => {
@@ -382,6 +385,7 @@ export const VisaManagement: React.FC = () => {
       alert('يرجى ذكر سبب الرفض');
       return;
     }
+    await visaActions.run(`reject:${visaId}`, async () => {
     try {
       await rejectVisaRequest(visaId, rejectionReason.trim(), 'محمود');
       setIsRejecting(false);
@@ -390,8 +394,9 @@ export const VisaManagement: React.FC = () => {
         setSelectedVisa(prev => prev ? { ...prev, status: 'rejected', rejectionReason } : null);
       }
     } catch (err: any) {
-      alert(`فشل رفض الطلب: ${err?.message}`);
+      alert(`فشل رفض الطلب: ${err?.message || 'تعذر تنفيذ العملية'}`);
     }
+    });
   };
 
   // Add Payment / Installment Handler
@@ -411,7 +416,7 @@ export const VisaManagement: React.FC = () => {
       return;
     }
 
-    setIsProcessingPayment(true);
+    await paymentGuard.run(async (idempotencyKey) => {
     try {
       const selectedAcc = availableAccounts.find(a => a.id === paymentAccountId);
       await addVisaPayment(selectedVisa.id, {
@@ -423,7 +428,8 @@ export const VisaManagement: React.FC = () => {
         accountName: selectedAcc?.name || undefined,
         receiptReference: receiptReference.trim() || undefined,
         notes: paymentNotes.trim() || undefined,
-      });
+      }, { idempotencyKey });
+      paymentGuard.rotateKey();
 
       // Update local modal view
       const newPaid = Number(selectedVisa.paidAmount || 0) + numericAmount;
@@ -436,7 +442,7 @@ export const VisaManagement: React.FC = () => {
         payments: [
           ...(prev.payments || []),
           {
-            id: `vpay_${Date.now()}`,
+            id: newId('vpay'),
             visaRequestId: prev.id,
             amount: numericAmount,
             currency: prev.currency,
@@ -457,9 +463,8 @@ export const VisaManagement: React.FC = () => {
       setPaymentNotes('');
     } catch (err: any) {
       setPaymentError(err?.message || 'فشل تسجيل الدفعة');
-    } finally {
-      setIsProcessingPayment(false);
     }
+    });
   };
 
   return (
@@ -485,7 +490,7 @@ export const VisaManagement: React.FC = () => {
 
         <button
           type="button"
-          onClick={() => { resetCreateForm(); setIsCreateModalOpen(true); }}
+          onClick={() => { resetCreateForm(); createGuard.rotateKey(); setIsCreateModalOpen(true); }}
           className="bg-[#0d9488] hover:bg-[#0f766e] text-white px-5 py-2.5 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-xs transition cursor-pointer active:scale-98"
         >
           <Plus className="h-4 w-4 stroke-[2.5]" />
@@ -1378,6 +1383,7 @@ export const VisaManagement: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => handleApprove(selectedVisa.id)}
+                          disabled={visaActions.isPending(`approve:${selectedVisa.id}`)}
                           className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-2xs transition flex items-center gap-1 cursor-pointer"
                         >
                           <CheckCircle2 className="h-3.5 w-3.5" />
@@ -1448,6 +1454,7 @@ export const VisaManagement: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => handleReject(selectedVisa.id)}
+                        disabled={visaActions.isPending(`reject:${selectedVisa.id}`)}
                         className="px-4 py-1 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg"
                       >
                         تأكيد الرفض
@@ -1535,6 +1542,7 @@ export const VisaManagement: React.FC = () => {
                               : selectedVisa.remainingBalance;
                             setPaymentAmount(defaultPay);
                             setPaymentError('');
+                            paymentGuard.rotateKey();
                             setIsAddingPayment(true);
                           }}
                           className="px-3 py-1.5 bg-[#0d9488] hover:bg-[#0f766e] text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
@@ -1720,10 +1728,18 @@ export const VisaManagement: React.FC = () => {
                   type="button"
                   onClick={async () => {
                     if (confirm(`هل أنت متأكد من حذف طلب تأشيرة المسافر "${selectedVisa.travelerName}"؟`)) {
-                      await deleteVisaRequest(selectedVisa.id);
-                      setSelectedVisa(null);
+                      const visaId = selectedVisa.id;
+                      await visaActions.run(`delete:${visaId}`, async () => {
+                        try {
+                          await deleteVisaRequest(visaId);
+                          setSelectedVisa(null);
+                        } catch (err: any) {
+                          alert(err?.message || 'تعذر تنفيذ العملية');
+                        }
+                      });
                     }
                   }}
+                  disabled={visaActions.isPending(`delete:${selectedVisa.id}`)}
                   className="text-rose-600 hover:text-rose-700 text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-rose-50 transition cursor-pointer flex items-center gap-1.5"
                 >
                   <Trash2 className="h-3.5 w-3.5" />

@@ -40,6 +40,17 @@ import {
 } from 'lucide-react';
 import { NewRequestModal } from './NewRequestModal';
 import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
+import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import { newOperationKey } from '../utils/ids';
+
+const errorText = (err: unknown, fallback: string) =>
+  err instanceof Error && err.message ? err.message : fallback;
+
+const newBatchRef = (key: string = newOperationKey()) => `BATCH-${key.replace(/-/g, '').slice(0, 8).toUpperCase()}`;
+
+/** Deterministic per-request idempotency key inside one batch (must match /^[A-Za-z0-9_-]{8,128}$/). */
+const batchItemKey = (batchKey: string, requestId: string) =>
+  `${batchKey}__${requestId}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 128);
 
 interface ExpenseRequestsListProps {
   onSelectRequest: (request: ExpenseRequest) => void;
@@ -126,16 +137,21 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   const [disburseRefNumber, setDisburseRefNumber] = useState(`TXN-${Math.floor(10000000 + Math.random() * 90000000)}`);
   const [disburseBankName, setDisburseBankName] = useState('انستاباي / المصرف الرئيسي');
   const [disburseNotes, setDisburseNotes] = useState('');
-  const [disbursing, setDisbursing] = useState(false);
+  // Per-request action locks + idempotency keys (scope = `${action}:${requestId}`)
+  const actionGuard = useKeyedSubmitGuard();
 
   // Batch Disbursement States (الصرف المجمع)
   const [selectedApprovedIds, setSelectedApprovedIds] = useState<string[]>([]);
   const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
   const [batchAccountId, setBatchAccountId] = useState<string>('');
   const [batchPaymentMethod, setBatchPaymentMethod] = useState<'auto' | PaymentMethod>('auto');
-  const [batchRefNumber, setBatchRefNumber] = useState(`BATCH-${Math.floor(10000000 + Math.random() * 90000000)}`);
+  const [batchRefNumber, setBatchRefNumber] = useState(() => newBatchRef());
   const [batchNotes, setBatchNotes] = useState('صرف دفعة مجمعة معتمدة');
-  const [isBatchDisbursing, setIsBatchDisbursing] = useState(false);
+  // Batch lock; its idempotency key is the batch key (rotated when the batch modal opens)
+  const batchGuard = useSubmitGuard();
+  const isBatchDisbursing = batchGuard.pending;
+  // Stable sequence number per request within the current batch (so retries keep the same reference suffix)
+  const batchSeqRef = React.useRef(new Map<string, number>());
 
   // Instant QR Code Modal State
   const [qrModalRequest, setQrModalRequest] = useState<ExpenseRequest | null>(null);
@@ -272,6 +288,17 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     setActiveAction('none');
   }, [activeRequest?.id, paymentAccounts]);
 
+  // Opening an action panel starts a new intent: give it a fresh idempotency key
+  // (retries while the panel stays open keep reusing the same key).
+  const rotateActionKey = actionGuard.rotateKey; // stable callback
+  useEffect(() => {
+    if (activeAction !== 'none' && activeRequest?.id) {
+      rotateActionKey(`${activeAction}:${activeRequest.id}`);
+    }
+  }, [activeAction, activeRequest?.id, rotateActionKey]);
+
+  const disbursing = activeRequest ? actionGuard.isPending(`disburse:${activeRequest.id}`) : false;
+
   // Copy Bank Account Details to Clipboard with Visual Feedback
   const handleCopyAccountDetails = (text: string, itemId?: string) => {
     if (!text) return;
@@ -324,49 +351,81 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     if (paymentAccounts.length > 0 && !batchAccountId) {
       setBatchAccountId(paymentAccounts[0].id);
     }
-    setBatchRefNumber(`BATCH-${Math.floor(10000000 + Math.random() * 90000000)}`);
+    if (!batchGuard.pending) {
+      // New batch intent: new batch key (per-request keys derive from it) and a fresh reference.
+      batchGuard.rotateKey();
+      batchSeqRef.current = new Map();
+      setBatchRefNumber(newBatchRef(batchGuard.idempotencyKey));
+    }
     setIsBatchModalOpen(true);
   };
 
   // Execute Batch Pay (الصرف المجمع)
   const handleConfirmBatchDisburse = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (selectedBatchRequests.length === 0 || isBatchDisbursing) return;
+    if (selectedBatchRequests.length === 0) return;
+    const batchRequests = [...selectedBatchRequests];
 
-    setIsBatchDisbursing(true);
-    try {
+    await batchGuard.run(async (batchKey) => {
       const selectedAccount = paymentAccounts.find(a => a.id === batchAccountId);
-      const accName = selectedAccount 
-        ? `${selectedAccount.name} (${selectedAccount.accountIdentifier})` 
+      const accName = selectedAccount
+        ? `${selectedAccount.name} (${selectedAccount.accountIdentifier})`
         : (paymentAccounts[0] ? `${paymentAccounts[0].name} (${paymentAccounts[0].accountIdentifier})` : 'الخزينة المعتمدة');
       const accountId = selectedAccount?.id || paymentAccounts[0]?.id;
 
-      for (let i = 0; i < selectedBatchRequests.length; i++) {
-        const req = selectedBatchRequests[i];
-        const singleRef = `${batchRefNumber.trim()}-${i + 1}`;
+      let paidCount = 0;
+      let skippedCount = 0;
+      const doneIds = new Set<string>();
+      const failures: string[] = [];
+
+      // Process EVERY selected request; one failure must not hide the others' outcome.
+      for (const req of batchRequests) {
+        let seq = batchSeqRef.current.get(req.id);
+        if (!seq) {
+          seq = batchSeqRef.current.size + 1;
+          batchSeqRef.current.set(req.id, seq);
+        }
+        const singleRef = `${batchRefNumber.trim()}-${seq}`;
         const methodToUse: PaymentMethod = batchPaymentMethod === 'auto'
           ? (req.preferredPaymentMethod || 'instapay')
           : batchPaymentMethod;
 
-        await disburseRequest(req.id, {
-          paymentMethod: methodToUse,
-          referenceNumber: singleRef,
-          bankName: accName,
-          accountId: accountId,
-          accountName: selectedAccount?.name || paymentAccounts[0]?.name,
-          notes: batchNotes.trim() 
-            ? `${batchNotes.trim()} [دفعة مجمعة ${batchRefNumber.trim()}]` 
-            : `صرف دفعة مجمعة [${batchRefNumber.trim()}]`,
-        });
+        try {
+          const outcome = await disburseRequest(req.id, {
+            paymentMethod: methodToUse,
+            referenceNumber: singleRef,
+            bankName: accName,
+            accountId: accountId,
+            accountName: selectedAccount?.name || paymentAccounts[0]?.name,
+            notes: batchNotes.trim()
+              ? `${batchNotes.trim()} [دفعة مجمعة ${batchRefNumber.trim()}]`
+              : `صرف دفعة مجمعة [${batchRefNumber.trim()}]`,
+          }, { idempotencyKey: batchItemKey(batchKey, req.id), batchId: batchKey });
+
+          if (outcome.changed) paidCount++;
+          else skippedCount++; // already disbursed (earlier attempt / another user) — never pay again
+          doneIds.add(req.id);
+        } catch (err) {
+          console.error('[Batch Disburse Error]', req.id, err);
+          failures.push(`${req.requestNumber || req.id}: ${errorText(err, 'خطأ غير متوقع')}`);
+        }
       }
 
-      setSelectedApprovedIds([]);
-      setIsBatchModalOpen(false);
-    } catch (err) {
-      console.error('[Batch Disburse Error]', err);
-    } finally {
-      setIsBatchDisbursing(false);
-    }
+      if (doneIds.size > 0) {
+        setSelectedApprovedIds(prev => prev.filter(id => !doneIds.has(id)));
+      }
+
+      const summary: string[] = [];
+      if (paidCount > 0) summary.push(`تم صرف ${paidCount} طلب`);
+      if (skippedCount > 0) summary.push(`تم تخطي ${skippedCount} (مصروف مسبقاً)`);
+      if (failures.length > 0) summary.push(`فشل ${failures.length}:\n${failures.join('\n')}`);
+      if (summary.length > 0) alert(summary.join('\n'));
+
+      if (failures.length === 0) {
+        batchGuard.rotateKey();
+        setIsBatchModalOpen(false);
+      }
+    });
   };
 
   // Export Filtered Requests to Excel / CSV with UTF-8 BOM
@@ -444,47 +503,83 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   // Inline Action Handlers
   const handleApprove = async () => {
     if (!activeRequest) return;
-    await approveRequest(activeRequest.id, approvalNote.trim() || undefined);
-    setApprovalNote('');
-    setActiveAction('none');
+    const requestId = activeRequest.id;
+    const scope = `approve:${requestId}`;
+    await actionGuard.run(scope, async (idempotencyKey) => {
+      try {
+        await approveRequest(requestId, approvalNote.trim() || undefined, { idempotencyKey });
+        actionGuard.rotateKey(scope);
+        setApprovalNote('');
+        setActiveAction('none');
+      } catch (err) {
+        console.error('[Approve Error]', err);
+        alert(errorText(err, 'حدث خطأ أثناء اعتماد الطلب.'));
+      }
+    });
   };
 
   const handleReject = async () => {
     if (!activeRequest || !rejectionReason.trim()) return;
-    await rejectRequest(activeRequest.id, rejectionReason.trim());
-    setRejectionReason('');
-    setActiveAction('none');
+    const requestId = activeRequest.id;
+    const scope = `reject:${requestId}`;
+    await actionGuard.run(scope, async (idempotencyKey) => {
+      try {
+        await rejectRequest(requestId, rejectionReason.trim(), { idempotencyKey });
+        actionGuard.rotateKey(scope);
+        setRejectionReason('');
+        setActiveAction('none');
+      } catch (err) {
+        console.error('[Reject Error]', err);
+        alert(errorText(err, 'حدث خطأ أثناء رفض الطلب.'));
+      }
+    });
   };
 
   const handleClarify = async () => {
     if (!activeRequest || !clarificationQuestion.trim()) return;
-    await requestClarification(activeRequest.id, clarificationQuestion.trim());
-    setClarificationQuestion('');
-    setActiveAction('none');
+    const requestId = activeRequest.id;
+    const scope = `clarify:${requestId}`;
+    await actionGuard.run(scope, async (idempotencyKey) => {
+      try {
+        await requestClarification(requestId, clarificationQuestion.trim(), { idempotencyKey });
+        actionGuard.rotateKey(scope);
+        setClarificationQuestion('');
+        setActiveAction('none');
+      } catch (err) {
+        console.error('[Clarification Error]', err);
+        alert(errorText(err, 'حدث خطأ أثناء إرسال الاستفسار.'));
+      }
+    });
   };
 
   const handleDisburse = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeRequest || !disburseRefNumber.trim()) return;
 
-    setDisbursing(true);
-    try {
-      const selectedAccount = paymentAccounts.find(a => a.id === disburseAccountId);
-      await disburseRequest(activeRequest.id, {
-        paymentMethod: disburseMethod,
-        referenceNumber: disburseRefNumber.trim(),
-        bankName: selectedAccount ? `${selectedAccount.name} (${selectedAccount.accountIdentifier})` : (disburseBankName.trim() || 'المصرف الرئيسي'),
-        accountId: disburseAccountId || undefined,
-        accountName: selectedAccount?.name,
-        notes: disburseNotes.trim() || undefined,
-      });
-      setActiveAction('none');
-      setDisburseNotes('');
-    } catch (err) {
-      console.error('[Disbursement Error]', err);
-    } finally {
-      setDisbursing(false);
-    }
+    const requestId = activeRequest.id;
+    const scope = `disburse:${requestId}`;
+    await actionGuard.run(scope, async (idempotencyKey) => {
+      try {
+        const selectedAccount = paymentAccounts.find(a => a.id === disburseAccountId);
+        const outcome = await disburseRequest(requestId, {
+          paymentMethod: disburseMethod,
+          referenceNumber: disburseRefNumber.trim(),
+          bankName: selectedAccount ? `${selectedAccount.name} (${selectedAccount.accountIdentifier})` : (disburseBankName.trim() || 'المصرف الرئيسي'),
+          accountId: disburseAccountId || undefined,
+          accountName: selectedAccount?.name,
+          notes: disburseNotes.trim() || undefined,
+        }, { idempotencyKey });
+        actionGuard.rotateKey(scope);
+        setActiveAction('none');
+        setDisburseNotes('');
+        if (!outcome.changed) {
+          alert('تم صرف هذا الطلب مسبقاً، ولم يتم تنفيذ أي صرف إضافي.');
+        }
+      } catch (err) {
+        console.error('[Disbursement Error]', err);
+        alert(errorText(err, 'حدث خطأ أثناء تنفيذ الصرف.'));
+      }
+    });
   };
 
   // Financial KPIs Calculations
@@ -1759,6 +1854,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                             <button
                               type="button"
                               onClick={handleReject}
+                              disabled={actionGuard.isPending(`reject:${activeRequest.id}`)}
                               className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer"
                             >
                               تأكيد الرفض
@@ -1826,6 +1922,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                           <button
                             type="button"
                             onClick={handleApprove}
+                            disabled={actionGuard.isPending(`approve:${activeRequest.id}`)}
                             className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer"
                           >
                             تأكيد الاعتماد المالي
@@ -1856,6 +1953,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                           <button
                             type="button"
                             onClick={handleClarify}
+                            disabled={actionGuard.isPending(`clarify:${activeRequest.id}`)}
                             className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer"
                           >
                             إرسال الاستفسار
@@ -1887,6 +1985,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                           <button
                             type="button"
                             onClick={handleReject}
+                            disabled={actionGuard.isPending(`reject:${activeRequest.id}`)}
                             className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer"
                           >
                             تأكيد الرفض
@@ -2289,7 +2388,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                     />
                     <button
                       type="button"
-                      onClick={() => setBatchRefNumber(`BATCH-${Math.floor(10000000 + Math.random() * 90000000)}`)}
+                      onClick={() => setBatchRefNumber(newBatchRef())}
                       className="px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-[11px] font-bold shrink-0 cursor-pointer"
                       title="توليد كود جديد"
                     >
