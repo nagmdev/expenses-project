@@ -9,51 +9,123 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // Anyone can create an email/password account for an address they do not own
+    // (the provider is enabled for admin provisioning), so an email only proves
+    // identity once Firebase has verified it. Google sign-in emails are verified.
+    function hasVerifiedEmail() {
+      return request.auth.token.get('email_verified', false) == true &&
+        request.auth.token.get('email', null) is string &&
+        request.auth.token.email != '';
+    }
+
+    // Only call after hasVerifiedEmail().
+    function verifiedEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    // Keep in sync with DEFAULT_SUPER_ADMINS in src/context/AppContext.tsx.
+    function builtInSuperAdmins() {
+      return ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com', 'h.moubarak@tieapps.com', 'marwanagib813@gmail.com'];
+    }
+
     function isSuperAdmin() {
       return isAuthenticated() && (
         exists(/databases/$(database)/documents/super_admins/$(request.auth.uid)) ||
-        (request.auth.token.email != null && (
-          exists(/databases/$(database)/documents/super_admins/$(request.auth.token.email)) ||
-          request.auth.token.email == 'mahmoud@tieapps.com' ||
-          request.auth.token.email == 'awadhsaudi2030@gmail.com' ||
-          request.auth.token.email == 'h.moubarak@tieapps.com' ||
-          request.auth.token.email == 'marwanagib813@gmail.com' ||
-          request.auth.token.email.matches('.*@tieapps-verify[.]com')
+        (hasVerifiedEmail() && (
+          exists(/databases/$(database)/documents/super_admins/$(verifiedEmail())) ||
+          verifiedEmail() in builtInSuperAdmins() ||
+          verifiedEmail().matches('.*@tieapps-verify[.]com')
         ))
       );
     }
 
-    function getUserRecord() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    function profilePath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function ownMemberPath(orgId) {
+      return /databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId);
+    }
+
+    // users/{uid} holds the caller's primary org and their role in THAT org only.
+    // A suspended profile (active: false) grants nothing.
+    function inOrgViaProfile(orgId) {
+      return exists(profilePath()) &&
+        get(profilePath()).data.get('orgId', null) == orgId &&
+        get(profilePath()).data.get('active', true) != false;
+    }
+
+    // members/{uid}_{orgId} holds the caller's role in orgId. The orgId field is
+    // checked as well as the document id, so an id that names another org grants nothing.
+    // A suspended membership (active: false) grants nothing.
+    function inOrgViaMember(orgId) {
+      return exists(ownMemberPath(orgId)) &&
+        get(ownMemberPath(orgId)).data.get('orgId', null) == orgId &&
+        get(ownMemberPath(orgId)).data.get('active', true) != false;
+    }
+
+    // A role held in one org never applies to another org.
+    function hasOrgRole(orgId, roles) {
+      return (inOrgViaProfile(orgId) && get(profilePath()).data.get('role', null) in roles) ||
+        (inOrgViaMember(orgId) && get(ownMemberPath(orgId)).data.get('role', null) in roles);
     }
 
     function isOrgMember(orgId) {
-      return isSuperAdmin() || (
-        isAuthenticated() && (
-          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRecord().orgId == orgId) ||
-          exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId))
-        )
-      );
+      return isSuperAdmin() || (isAuthenticated() && (inOrgViaProfile(orgId) || inOrgViaMember(orgId)));
     }
 
     function isOrgAdmin(orgId) {
-      return isSuperAdmin() || (
-        isOrgMember(orgId) && (
-          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRecord().role == 'org_admin') ||
-          (exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId)) &&
-           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId)).data.role == 'org_admin')
-        )
-      );
+      return isSuperAdmin() || (isAuthenticated() && hasOrgRole(orgId, ['org_admin']));
     }
 
     function isFinance(orgId) {
-      return isSuperAdmin() || (
-        isOrgMember(orgId) && (
-          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-           (getUserRecord().role == 'finance' || getUserRecord().role == 'org_admin')) ||
-          (exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId)) &&
-           (get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId)).data.role in ['finance', 'org_admin']))
-        )
+      return isSuperAdmin() || (isAuthenticated() && hasOrgRole(orgId, ['finance', 'org_admin']));
+    }
+
+    // members/{memberId} records that an admin of orgId gave the caller `role` there:
+    // same org and role, not suspended, and addressed either to the caller's UID or to
+    // the caller's verified email (members invited by email before their first
+    // sign-in). Member documents are written only by admins of their org (see
+    // /members), so this cannot be forged. The id is taken from the caller, which is
+    // why legacy placeholder ids (pending-<base64>, temp_…, usr-…) keep working.
+    function grantsMembership(memberId, orgId, role) {
+      return memberId is string && memberId.matches('[^/]+') &&
+        orgId is string && orgId != '' &&
+        role in ['org_admin', 'finance', 'data_entry', 'employee'] &&
+        exists(/databases/$(database)/documents/members/$(memberId)) &&
+        isGrantFor(get(/databases/$(database)/documents/members/$(memberId)).data, orgId, role);
+    }
+
+    function isGrantFor(member, orgId, role) {
+      return member.get('orgId', null) == orgId &&
+        member.get('role', null) == role &&
+        member.get('active', true) != false && (
+          member.get('userId', null) == request.auth.uid ||
+          (hasVerifiedEmail() && member.get('userEmail', null) == verifiedEmail())
+        );
+    }
+
+    function sameField(after, before, field, fallback) {
+      return after.get(field, fallback) == before.get(field, fallback);
+    }
+
+    // A user may write their own users/{uid} profile (name, phone, payout details…),
+    // but the fields that grant access may only take values an admin granted:
+    //  - role / orgId / active: unchanged; or no org at all (a bare profile grants
+    //    nothing); or exactly the membership named in memberId (self-link on first
+    //    sign-in, see forceRefreshUserState).
+    //  - email: unchanged, or the caller's own verified address. Admin tooling looks
+    //    profiles up by email, so nobody may claim someone else's address.
+    // `before` is {} on create.
+    function isOwnProfileWrite(userId, before) {
+      let after = request.resource.data;
+      return isAuthenticated() && request.auth.uid == userId && (
+        sameField(after, before, 'email', null) ||
+        (hasVerifiedEmail() && after.get('email', null) == verifiedEmail())
+      ) && (
+        (sameField(after, before, 'role', null) && sameField(after, before, 'orgId', null) && sameField(after, before, 'active', true)) ||
+        (after.get('orgId', null) in [null, ''] && after.get('role', 'employee') == 'employee') ||
+        (after.get('active', true) == true && grantsMembership(after.get('memberId', null), after.get('orgId', null), after.get('role', null)))
       );
     }
 
@@ -73,7 +145,14 @@ service cloud.firestore {
     // 1. SUPER ADMINS (System Management)
     // =========================================================================
     match /super_admins/{adminId} {
-      allow read: if isAuthenticated();
+      // The list (with each admin's contact and payout details) is for super admins
+      // only; anyone may read the record about themselves.
+      allow get: if isAuthenticated() && (
+        isSuperAdmin() ||
+        adminId == request.auth.uid ||
+        (hasVerifiedEmail() && adminId == verifiedEmail())
+      );
+      allow list: if isSuperAdmin();
       allow write: if isSuperAdmin();
     }
 
@@ -83,21 +162,21 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if isAuthenticated() && (isMissing() || request.auth.uid == userId || isSuperAdmin() || (resource.data.orgId != null && isOrgAdmin(resource.data.orgId)));
       allow list: if isAuthenticated() && (isSuperAdmin() || (resource.data.orgId != null && isOrgAdmin(resource.data.orgId)));
+      // Self-writes never grant a role or org the caller was not given (isOwnProfileWrite).
       allow create: if isAuthenticated() && (
-        request.auth.uid == userId ||
         isSuperAdmin() ||
+        isOwnProfileWrite(userId, {}) ||
         (isOrgAdmin(request.resource.data.orgId) && request.resource.data.role != 'super_admin')
       );
-      // Self-update permitted ONLY for display preferences, never for role/orgId escalation
+      // Org admins manage profiles in their org, and may detach one from it (member
+      // removed: org cleared, role reset), but never move a profile to another org.
       allow update: if isSuperAdmin() || (
         isOrgAdmin(resource.data.orgId) &&
-        request.resource.data.role != 'super_admin' &&
-        request.resource.data.orgId == resource.data.orgId
-      ) || (
-        isAuthenticated() && request.auth.uid == userId &&
-        request.resource.data.role == resource.data.role &&
-        request.resource.data.orgId == resource.data.orgId
-      );
+        request.resource.data.role != 'super_admin' && (
+          request.resource.data.orgId == resource.data.orgId ||
+          (request.resource.data.get('orgId', null) in [null, ''] && request.resource.data.get('role', 'employee') == 'employee')
+        )
+      ) || isOwnProfileWrite(userId, resource.data);
       allow delete: if isSuperAdmin();
     }
 
@@ -135,9 +214,11 @@ service cloud.firestore {
         request.resource.data.role != 'super_admin' &&
         request.resource.data.orgId == resource.data.orgId
       ) || (
+        // Self-service edits of contact / payout details only. Who the membership
+        // belongs to (userId, userEmail) and what it grants (role, orgId, active) are
+        // admin-only: grantsMembership() trusts these fields.
         isAuthenticated() && resource.data.userId == request.auth.uid &&
-        request.resource.data.role == resource.data.role &&
-        request.resource.data.orgId == resource.data.orgId
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'orgId', 'userId', 'userEmail', 'active'])
       );
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
@@ -364,24 +445,134 @@ service cloud.firestore {
         return isSuperAdmin() || resource.data.createdBy == request.auth.uid ||
           (resource.data.orgId != '' && isFinance(resource.data.orgId));
       }
+      // eventId = <eventType>__<entityId>[__<operationKey>] (see outboxEventId), or
+      // test_email__<key> for a settings-page test email.
+      function idParts() {
+        return eventId.split('__');
+      }
+
+      // Where an org's admin-facing notifications may go: its active org admins
+      // (organizations/{orgId}.notificationRecipients, maintained with memberships) and
+      // the platform super admins (system_settings/notification_recipients + built-ins).
+      function adminRecipients(orgId) {
+        return get(/databases/$(database)/documents/organizations/$(orgId)).data.get('notificationRecipients', [])
+          .concat(builtInSuperAdmins())
+          .concat(exists(/databases/$(database)/documents/system_settings/notification_recipients)
+            ? get(/databases/$(database)/documents/system_settings/notification_recipients).data.get('emails', [])
+            : []);
+      }
+
+      // The request as it will be after this write (created / updated in the same transaction).
+      function requestAfter(e) {
+        return getAfter(/databases/$(database)/documents/requests/$(e.entityId)).data;
+      }
+
+      function requesterEmailOf(req) {
+        return req.get('requesterEmail', '').trim().lower();
+      }
+
+      function isRequesterOf(req) {
+        return req.get('requesterId', null) == request.auth.uid ||
+          (hasVerifiedEmail() && requesterEmailOf(req) == verifiedEmail());
+      }
+
+      // Each request event is bound to a request of the same org, raised by the party
+      // the workflow allows, and addressed only to the people that event notifies.
+      function isRequestEvent(e) {
+        return e.entityType == 'request' && e.entityId is string &&
+          idParts()[0] == e.eventType && idParts()[1] == e.entityId &&
+          existsAfter(/databases/$(database)/documents/requests/$(e.entityId)) &&
+          requestAfter(e).get('orgId', null) == e.orgId && (
+            (e.eventType == 'new_request' && idParts().size() == 2 &&
+              requestAfter(e).get('requesterId', null) == request.auth.uid &&
+              e.recipients.hasOnly(adminRecipients(e.orgId))) ||
+            (e.eventType == 'clarification_replied' && idParts().size() == 3 &&
+              isRequesterOf(requestAfter(e)) &&
+              e.recipients.hasOnly(adminRecipients(e.orgId))) ||
+            (e.eventType in ['request_approved', 'request_rejected', 'clarification_requested'] && idParts().size() == 3 &&
+              isFinance(e.orgId) &&
+              e.recipients == [requesterEmailOf(requestAfter(e))]) ||
+            (e.eventType == 'request_paid' && idParts().size() == 2 &&
+              isFinance(e.orgId) &&
+              e.recipients == [requesterEmailOf(requestAfter(e))])
+          );
+      }
+
+      // Settings-page test email: org admins, to their org's admin recipients or themselves.
+      function isTestEvent(e) {
+        return e.entityType == 'system' && e.entityId == 'test' &&
+          idParts()[0] == 'test_email' && idParts().size() == 2 &&
+          isOrgAdmin(e.orgId) &&
+          e.recipients.hasOnly(adminRecipients(e.orgId).concat(hasVerifiedEmail() ? [verifiedEmail()] : []));
+      }
+
       allow get: if isAuthenticated() && (isMissing() || canManageOutbox());
       allow list: if isAuthenticated() && (isSuperAdmin() || (resource.data.orgId != '' && isFinance(resource.data.orgId)));
       allow create: if isAuthenticated() &&
         request.resource.data.status == 'pending' &&
         request.resource.data.createdBy == request.auth.uid &&
-        (request.resource.data.orgId == '' || isOrgMember(request.resource.data.orgId));
-      // Delivery-state transitions only: the message and recipients are immutable.
+        request.resource.data.get('attempts', 0) == 0 &&
+        request.resource.data.get('maxAttempts', 0) <= 10 &&
+        (isSuperAdmin() || (
+          request.resource.data.orgId is string && request.resource.data.orgId != '' &&
+          isOrgMember(request.resource.data.orgId) &&
+          request.resource.data.recipients is list &&
+          request.resource.data.recipients.size() > 0 && request.resource.data.recipients.size() <= 50 &&
+          (isRequestEvent(request.resource.data) || isTestEvent(request.resource.data))
+        ));
+      // Delivery-state transitions only (everything else is immutable), never out of a
+      // terminal state, and each claim adds exactly one attempt, so an event is
+      // delivered at most maxAttempts + 1 times.
       allow update: if isAuthenticated() && canManageOutbox() &&
-        request.resource.data.recipients == resource.data.recipients &&
-        request.resource.data.message == resource.data.message &&
-        request.resource.data.createdBy == resource.data.createdBy;
+        !(resource.data.status in ['sent', 'dead']) &&
+        request.resource.data.status in ['sending', 'sent', 'failed', 'dead'] &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'attempts', 'leaseUntil', 'nextAttemptAt', 'lastError', 'deliveredTo', 'sentAt', 'updatedAt']) &&
+        (request.resource.data.get('attempts', 0) == resource.data.get('attempts', 0) ||
+          (request.resource.data.status == 'sending' &&
+            request.resource.data.get('attempts', 0) == resource.data.get('attempts', 0) + 1)) &&
+        request.resource.data.get('attempts', 0) <= resource.data.get('maxAttempts', 6) + 1;
       allow delete: if isSuperAdmin();
     }
 
-    // Trigger-Email extension queue (one deterministic doc per event+recipient)
+    // Trigger-Email extension queue. A mail document is only ever the delivery of one
+    // recipient of an outbox event currently claimed for sending: same recipient,
+    // content and sender as the event, deterministic id, no cc/bcc/attachments.
     match /mail/{mailId} {
-      allow get: if isAuthenticated() && (isMissing() || isSuperAdmin());
-      allow create: if isAuthenticated();
+      function outboxPath(eventId) {
+        return /databases/$(database)/documents/outbox/$(eventId);
+      }
+
+      function canDispatch(ev) {
+        return isSuperAdmin() || ev.get('createdBy', null) == request.auth.uid || isFinance(ev.orgId);
+      }
+
+      function isDeliveryOf(m, ev) {
+        return ev.channel == 'firestore_mail' && ev.status == 'sending' && canDispatch(ev) &&
+          m.keys().hasOnly(['to', 'message', 'from', 'replyTo', 'metadata']) &&
+          m.to is list && m.to.size() == 1 && m.to[0] in ev.recipients &&
+          !(m.to[0] in ev.get('deliveredTo', [])) &&
+          mailId == (m.metadata.eventId + ':' + m.to[0]).replace('[^A-Za-z0-9_-]', '_') &&
+          m.message.keys().hasOnly(['subject', 'html', 'text']) &&
+          m.message.subject == ev.message.subject &&
+          m.message.html == ev.message.html &&
+          m.message.get('text', '') == ev.message.get('text', '') &&
+          m.from == '"' + ev.meta.senderName + '" <' + ev.meta.senderEmail + '>' &&
+          m.replyTo == ev.meta.replyTo;
+      }
+
+      allow get: if isAuthenticated() && (
+        isMissing() || isSuperAdmin() || (
+          resource.data.metadata.eventId is string &&
+          exists(outboxPath(resource.data.metadata.eventId)) &&
+          canDispatch(get(outboxPath(resource.data.metadata.eventId)).data)
+        )
+      );
+      allow create: if isAuthenticated() &&
+        request.resource.data.metadata.eventId is string &&
+        request.resource.data.metadata.eventId.matches('[^/]+') &&
+        exists(outboxPath(request.resource.data.metadata.eventId)) &&
+        isDeliveryOf(request.resource.data, get(outboxPath(request.resource.data.metadata.eventId)).data);
       allow update, delete: if false;
     }
 

@@ -11,6 +11,8 @@ export interface Organization {
   status?: 'active' | 'archived';
   archived?: boolean;
   archivedAt?: string;
+  /** Emails admin-facing notifications may go to (active org admins); see firestore.rules → outbox. */
+  notificationRecipients?: string[];
 }
 
 export type Role = 'super_admin' | 'org_admin' | 'finance' | 'employee' | 'data_entry';

@@ -55,9 +55,11 @@ import {
   purgeSampleDataFromFirestore,
   deleteFirestoreDoc,
   sanitizeForFirestore,
+  auth,
 } from '../lib/firebase';
 import { User as FirebaseUser } from 'firebase/auth';
 import type { Query, DocumentData } from 'firebase/firestore';
+import { arrayRemove, arrayUnion, updateDoc } from 'firebase/firestore';
 import { createFirestoreStore } from '../domain/firestoreStore';
 import type { DataStore } from '../domain/store';
 import { COL, DomainError, isDomainError, normalizeEmail, normalizeKeyValue, type Actor } from '../domain/common';
@@ -90,7 +92,9 @@ import {
   createMember,
   createOrganization,
   deleteEntity,
+  ensureOrgNotificationRecipients,
   isRealUid,
+  pickMembershipToLink,
   removeMember as removeMemberOp,
   removeOrganization,
   updateEntity,
@@ -318,6 +322,8 @@ interface AppContextType {
   openFirebaseModal: () => void;
   closeFirebaseModal: () => void;
   forceRefreshUserState: () => Promise<boolean>;
+  /** The account is suspended (active: false) in its org; the security rules deny it all org data. */
+  isAccountSuspended: boolean;
 
   // Auth & Roles
   superAdminEmails: string[];
@@ -501,6 +507,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [legacyEmailLogs, setLegacyEmailLogs] = useState<EmailLogEntry[]>([]);
   const [emailLogsClearedAt, setEmailLogsClearedAt] = useState<string>('');
   const [emailSettings, setEmailSettings] = useState<EmailNotificationSettings>(DEFAULT_EMAIL_SETTINGS);
+  // system_settings/notification_recipients: platform super admins notified about every org
+  // (emails: null while the document does not exist yet).
+  const [platformRecipients, setPlatformRecipients] = useState<{ loaded: boolean; emails: string[] | null }>({ loaded: false, emails: null });
+  // Scope of the last complete members snapshot ('*' = all orgs), for the recipients backfill.
+  const [membersSnapshotScope, setMembersSnapshotScope] = useState('');
 
   const [activeOrgId, setActiveOrgIdState] = useState<string>(() => {
     const saved = readPref(PREF_KEYS.ACTIVE_ORG);
@@ -557,6 +568,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     name?: string;
     role?: Role;
     orgId?: string;
+    active?: boolean;
     department?: string;
     phone?: string;
     payoutProfile?: any;
@@ -620,28 +632,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setMyMemberships(found);
       setMembershipsLoaded(true);
 
-      const resolvedOrg = profileData?.orgId || found.find(m => m.orgId?.trim())?.orgId || '';
+      // Link the user's own profile to the membership an admin created for them. The
+      // security rules accept a self-written role/orgId only when it matches the
+      // membership named in memberId, so all three come from the same record.
+      const link = profileData?.orgId
+        ? null
+        : pickMembershipToLink(found, { uid: firebaseUser.uid, email: firebaseUser.email, emailVerified: firebaseUser.emailVerified });
+      const resolvedOrg = profileData?.orgId || link?.orgId || '';
       if (!resolvedOrg) return false;
 
-      setActiveOrgId(resolvedOrg);
-      if (!profileData?.orgId && found[0]) {
-        // Link the user's own profile to the membership an admin created for them.
-        await setDoc(
-          doc(db, 'users', firebaseUser.uid),
-          sanitizeForFirestore({
-            id: firebaseUser.uid,
-            email: normalizeEmail(firebaseUser.email),
-            name: found[0].userName || firebaseUser.displayName || 'موظف',
-            role: found[0].role || 'employee',
-            orgId: resolvedOrg,
-            department: found[0].department || '',
-            phone: found[0].phone || '',
-            active: true,
-            updatedAt: new Date().toISOString(),
-          }),
-          { merge: true }
-        ).catch(err => console.warn('[forceRefresh] profile link skipped:', err?.message || err));
+      if (link) {
+        try {
+          await setDoc(
+            doc(db, 'users', firebaseUser.uid),
+            sanitizeForFirestore({
+              id: firebaseUser.uid,
+              // Only a verified address may be written to one's own profile.
+              ...(firebaseUser.emailVerified ? { email: normalizeEmail(firebaseUser.email) } : {}),
+              name: link.userName || firebaseUser.displayName || 'موظف',
+              role: link.role,
+              orgId: link.orgId,
+              memberId: link.id,
+              department: link.department || '',
+              phone: link.phone || '',
+              active: true,
+              updatedAt: new Date().toISOString(),
+            }),
+            { merge: true }
+          );
+        } catch (err: any) {
+          console.warn('[forceRefresh] profile link rejected:', err?.message || err);
+          return false;
+        }
       }
+      setActiveOrgId(resolvedOrg);
       setFirebaseSyncCounter(prev => prev + 1);
       return true;
     } catch (err) {
@@ -713,6 +737,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }, err => console.warn('[Firebase] Email settings listener:', err?.message || err)));
 
+    unsubs.push(onSnapshot(doc(db, 'system_settings', 'notification_recipients'), snap => {
+      const emails = snap.exists() ? snap.data().emails : null;
+      setPlatformRecipients({ loaded: true, emails: Array.isArray(emails) ? emails : snap.exists() ? [] : null });
+    }, err => console.warn('[Firebase] Notification recipients listener:', err?.message || err)));
+
     return () => unsubs.forEach(u => {
       try { u(); } catch {}
     });
@@ -739,6 +768,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!userEmail) return false;
     return superAdminEmails.some(e => e.trim().toLowerCase() === userEmail);
   }, [userEmail, superAdminEmails]);
+
+  // Suspended accounts (active: false) get no org data under firestore.rules; the UI
+  // says so instead of showing an empty or "awaiting assignment" screen.
+  const isAccountSuspended = useMemo(() => {
+    if (!firebaseUser || isSuperAdmin) return false;
+    if (userDocProfile?.orgId) return userDocProfile.active === false;
+    return myMemberships.length > 0 && myMemberships.every(m => m.active === false);
+  }, [firebaseUser, isSuperAdmin, userDocProfile, myMemberships]);
 
   const resolvedRole: Role = useMemo(() => {
     if (isSuperAdmin) return 'super_admin';
@@ -1051,7 +1088,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // 2. Directory
-    listen<OrganizationMember>('Members', orgScoped('members'), setRawMembers, notDummy);
+    setMembersSnapshotScope('');
+    const membersScope = isSuperAdmin ? '*' : effectiveOrgId;
+    listen<OrganizationMember>('Members', orgScoped('members'), list => {
+      setRawMembers(list);
+      setMembersSnapshotScope(membersScope);
+    }, notDummy);
     listen<ServiceCategory>('Services', orgScoped('services'), setRawServices, notDummy);
     listen<ServiceProvider>('Providers', orgScoped('providers'), setRawProviders, notDummy);
     listen<Department>('Departments', orgScoped('departments'), setRawDepartments, notDummy);
@@ -1201,7 +1243,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const getDispatcher = () => {
     const store = getStore();
     if (!outboxDispatchRef.current || outboxDispatchRef.current.store !== store) {
-      outboxDispatchRef.current = { store, transport: createNotificationTransport(store) };
+      outboxDispatchRef.current = { store, transport: createNotificationTransport(store, async () => (await auth.currentUser?.getIdToken()) ?? null) };
     }
     return outboxDispatchRef.current;
   };
@@ -1258,23 +1300,68 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [firebaseUser, isSuperAdmin, resolvedRole, effectiveOrgId]);
 
+  // One-time initialization of the notification recipient lists firestore.rules checks
+  // outbox events against, for orgs / platforms that predate them. Only a MISSING list
+  // is filled, and only from a complete members snapshot, so this never overwrites the
+  // list the membership operations maintain.
+  const orgRecipientsBackfillRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!firebaseUser || !(isSuperAdmin || resolvedRole === 'org_admin')) return;
+    if (!membersSnapshotScope || membersSnapshotScope !== (isSuperAdmin ? '*' : effectiveOrgId)) return;
+    for (const org of rawOrganizations) {
+      if (Array.isArray(org.notificationRecipients) || orgRecipientsBackfillRef.current.has(org.id)) continue;
+      if (!isSuperAdmin && org.id !== effectiveOrgId) continue;
+      orgRecipientsBackfillRef.current.add(org.id);
+      ensureOrgNotificationRecipients(getStore(), actor, org.id, rawMembers).catch(err => {
+        orgRecipientsBackfillRef.current.delete(org.id);
+        console.warn('[notifications] org recipients not initialized:', org.id, err?.message || err);
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firebaseUser, isSuperAdmin, resolvedRole, effectiveOrgId, membersSnapshotScope, rawOrganizations, rawMembers]);
+
+  const platformRecipientsBackfillRef = useRef(false);
+  useEffect(() => {
+    if (!isSuperAdmin || !platformRecipients.loaded || platformRecipients.emails || platformRecipientsBackfillRef.current) return;
+    const db = getDb();
+    if (!db) return;
+    platformRecipientsBackfillRef.current = true;
+    (async () => {
+      const snap = await getDocs(collection(db, 'super_admins'));
+      const emails = Array.from(new Set(
+        [...DEFAULT_SUPER_ADMINS, ...envSuperAdmins(), ...snap.docs.map(d => String(d.data().email || d.id))].map(normalizeEmail)
+      )).filter(e => e.includes('@')).sort();
+      await getStore().runTransaction(async tx => {
+        if (await tx.get('system_settings', 'notification_recipients')) return;
+        tx.set('system_settings', 'notification_recipients', { emails, updatedAt: new Date().toISOString() });
+      });
+    })().catch(err => {
+      platformRecipientsBackfillRef.current = false;
+      console.warn('[notifications] platform recipients not initialized:', err?.message || err);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSuperAdmin, platformRecipients]);
+
   /** True when `entity` is the record created by this very idempotency key (i.e. a retry of a success). */
   const isSameOperation = (entity: { id: string } | undefined, prefix: string, key?: string) =>
     Boolean(entity && key && ((entity as any).operationKey === key || entity.id === `${prefix}-${key}`));
 
   const orgById = (orgId?: string) => rawOrganizations.find(o => o.id === orgId);
 
-  const adminRecipientsFor = (orgId: string, includeSystemInbox = false) =>
+  // Admin-facing notifications may only address what firestore.rules → outbox accepts:
+  // the org's notificationRecipients, the platform list and the built-in super admins
+  // (which include the system inbox, awadhsaudi2030@gmail.com).
+  const adminRecipientsFor = (orgId: string) =>
     Array.from(new Set([
-      ...rawMembers.filter(m => m.orgId === orgId && m.role === 'org_admin').map(m => m.userEmail || ''),
-      ...superAdminEmails,
-      ...(includeSystemInbox ? ['awadhsaudi2030@gmail.com'] : []),
-    ])).filter(e => e && e.includes('@'));
+      ...(orgById(orgId)?.notificationRecipients || []),
+      ...(platformRecipients.emails || []),
+      ...DEFAULT_SUPER_ADMINS,
+    ].map(normalizeEmail))).filter(e => e.includes('@'));
 
-  const notifyFor = (orgId: string, includeSystemInbox = false): NotifyContext => ({
+  const notifyFor = (orgId: string): NotifyContext => ({
     settings: emailSettings,
     org: orgById(orgId),
-    adminRecipients: adminRecipientsFor(orgId, includeSystemInbox),
+    adminRecipients: adminRecipientsFor(orgId),
   });
 
   // =========================================================================
@@ -1344,6 +1431,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         promotedAt: new Date().toISOString(),
         active: true,
       }, { merge: true });
+      // Platform notification recipients (a missing list is filled by the backfill below).
+      await updateDoc(doc(db, 'system_settings', 'notification_recipients'), { emails: arrayUnion(cleanEmail), updatedAt: new Date().toISOString() })
+        .catch(err => console.warn('[superAdmin] notification recipients not updated:', err?.message || err));
     });
     setSuperAdminEmails(prev => Array.from(new Set([...prev, cleanEmail])));
     await logAuditAction({
@@ -1362,6 +1452,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await deleteFirestoreDoc('super_admins', cleanEmail);
       const legacyId = cleanEmail.replace(/[^a-zA-Z0-9]/g, '_');
       if (legacyId !== cleanEmail) await deleteFirestoreDoc('super_admins', legacyId).catch(() => {});
+      await updateDoc(doc(getDb()!, 'system_settings', 'notification_recipients'), { emails: arrayRemove(cleanEmail), updatedAt: new Date().toISOString() })
+        .catch(err => console.warn('[superAdmin] notification recipients not updated:', err?.message || err));
     });
     setSuperAdminEmails(prev => prev.filter(e => e.trim().toLowerCase() !== cleanEmail));
     await logAuditAction({
@@ -1542,23 +1634,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  /**
+   * users/{uid} profiles that may carry a membership's access and that this user can
+   * read: the member's own UID, and profiles self-linked to the membership (memberId)
+   * — members invited by email keep a placeholder userId after their first sign-in.
+   * (Profiles are no longer matched by email: that field is not proof of identity.)
+   */
+  const linkedProfileIds = async (mem: OrganizationMember | undefined): Promise<string[]> => {
+    const db = getDb();
+    if (!db || !mem) return [];
+    const ids = new Set<string>();
+    if (isRealUid(mem.userId)) {
+      try {
+        await getDoc(doc(db, 'users', mem.userId)); // readable: missing, own, or in an org we administer
+        ids.add(mem.userId);
+      } catch {
+        // The profile's primary org is one we do not administer: not this membership's to change.
+      }
+    }
+    try {
+      const snap = await getDocs(query(collection(db, 'users'), where('orgId', '==', mem.orgId), where('memberId', '==', mem.id)));
+      snap.docs.forEach(d => ids.add(d.id));
+    } catch (e) {
+      console.warn('[members] linked profile lookup skipped:', e);
+    }
+    return Array.from(ids);
+  };
+
   const updateMember = async (memberId: string, updates: Partial<OrganizationMember>) => {
     const mem = rawMembers.find(m => m.id === memberId) || myMemberships.find(m => m.id === memberId);
-    await mutate('updateMember', fingerprint(memberId, updates), async store => {
-      // Members provisioned before first sign-in carry a placeholder id: find their
-      // real profile(s) by email so the role change reaches the security profile too.
-      let linked: string[] = [];
-      const email = normalizeEmail(updates.userEmail || mem?.userEmail);
-      if (mem && !isRealUid(mem.userId) && email) {
-        try {
-          const snap = await getDocs(query(collection(getDb()!, 'users'), where('email', '==', email)));
-          linked = snap.docs.map(d => d.id);
-        } catch (e) {
-          console.warn('[updateMember] user lookup by email skipped:', e);
-        }
-      }
-      return updateMemberRecord(store, actor, memberId, updates, linked, newOperationKey());
-    });
+    await mutate('updateMember', fingerprint(memberId, updates), async store =>
+      updateMemberRecord(store, actor, memberId, updates, await linkedProfileIds(mem), newOperationKey())
+    );
   };
 
   const toggleMemberStatus = async (memberId: string, active: boolean) => {
@@ -1566,7 +1673,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const removeMember = async (memberId: string) => {
-    await mutate('removeMember', memberId, store => removeMemberOp(store, actor, memberId, newOperationKey()));
+    const mem = rawMembers.find(m => m.id === memberId);
+    await mutate('removeMember', memberId, async store =>
+      removeMemberOp(store, actor, memberId, await linkedProfileIds(mem), newOperationKey())
+    );
   };
 
   const adminResetUserPassword = async (email: string): Promise<{ success: boolean; message?: string }> => {
@@ -1854,7 +1964,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const { idempotencyKey: _ignored, ...fingerprintable } = data;
     const res = await mutate('createRequest', data.idempotencyKey || fingerprint(fingerprintable), store =>
-      createExpenseRequest(store, actor, draft, opKey, notifyFor(targetOrgId, true))
+      createExpenseRequest(store, actor, draft, opKey, notifyFor(targetOrgId))
     );
     dispatchEvents(res.outboxEventIds);
     return res.value;
@@ -2008,6 +2118,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const sendTestEmail = async (recipientEmail: string, templateType: EmailEventType = 'test_email') => {
     if (!recipientEmail || !recipientEmail.includes('@')) {
       return { success: false, message: 'يرجى إدخال عنوان بريد إلكتروني صحيح.' };
+    }
+    // Mirrors firestore.rules → outbox (isTestEvent): outside the platform team, a test
+    // email may only go to the org's notification recipients or to yourself.
+    const testOrgId = activeOrgId || rawOrganizations[0]?.id || '';
+    if (!isSuperAdmin && ![...adminRecipientsFor(testOrgId), normalizeEmail(currentUser.email)].includes(normalizeEmail(recipientEmail))) {
+      return { success: false, message: 'يمكن إرسال البريد التجريبي إلى بريدك أو إلى مديري الشركة المسجلين فقط.' };
     }
     try {
       const nowIso = new Date().toISOString();
@@ -2175,6 +2291,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activeOrg,
         effectiveOrgId,
         forceRefreshUserState,
+        isAccountSuspended,
         users,
         currentUser,
         firebaseUser,

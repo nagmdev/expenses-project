@@ -72,8 +72,13 @@ const logInfo = (msg) => console.log('  ℹ ' + msg);
     // STEP 1: Authenticate Super Admin
     // -------------------------------------------------------------
     logStep(1, 'Super Admin Authentication & Verification');
-    const superAdminEmail = 'awadhsaudi2030@gmail.com';
-    const superAdminPass = 'Test123456!';
+    // Credentials of a super-admin test account come from the environment, never the repo:
+    //   E2E_SUPER_ADMIN_EMAIL=... E2E_SUPER_ADMIN_PASSWORD=... node scripts/e2e-test.cjs
+    const superAdminEmail = process.env.E2E_SUPER_ADMIN_EMAIL;
+    const superAdminPass = process.env.E2E_SUPER_ADMIN_PASSWORD;
+    if (!superAdminEmail || !superAdminPass) {
+      throw new Error('Set E2E_SUPER_ADMIN_EMAIL and E2E_SUPER_ADMIN_PASSWORD to run this script.');
+    }
     
     const superCred = await signInWithEmailAndPassword(auth, superAdminEmail, superAdminPass);
     logSuccess('Super Admin logged in successfully! UID: ' + superCred.user.uid);

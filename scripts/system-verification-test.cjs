@@ -86,8 +86,13 @@ const logInfo = (msg) => console.log(`  ℹ INFO: ${msg}`);
     logStep(1, 'Super Admin Authentication & System Privileges');
     const runId = Date.now();
     const defaultPassword = 'SysTestPass2026@';
-    const superAdminEmail = 'awadhsaudi2030@gmail.com';
-    const superAdminPass = 'Test123456!';
+    // Credentials of a super-admin test account come from the environment, never the repo:
+    //   E2E_SUPER_ADMIN_EMAIL=... E2E_SUPER_ADMIN_PASSWORD=... node scripts/system-verification-test.cjs
+    const superAdminEmail = process.env.E2E_SUPER_ADMIN_EMAIL;
+    const superAdminPass = process.env.E2E_SUPER_ADMIN_PASSWORD;
+    if (!superAdminEmail || !superAdminPass) {
+      throw new Error('Set E2E_SUPER_ADMIN_EMAIL and E2E_SUPER_ADMIN_PASSWORD to run this script.');
+    }
 
     const saCred = await signInWithEmailAndPassword(auth, superAdminEmail, superAdminPass);
     logPass(`Super Admin signed in successfully! UID: ${saCred.user.uid} (${saCred.user.email})`);

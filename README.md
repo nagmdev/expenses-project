@@ -1,6 +1,7 @@
 # مصروفي — Expense System
 
 - **Data integrity, idempotency & deployment steps:** see [docs/05-data-integrity-and-idempotency.md](docs/05-data-integrity-and-idempotency.md) — the updated `firestore.rules` must be deployed together with this version.
+- **Security fixes (profile escalation, email relay, access revocation) — deploy order and notes:** [docs/06-security-rules-deploy.md](docs/06-security-rules-deploy.md).
 - Tests: `npm test`.
 
 ---

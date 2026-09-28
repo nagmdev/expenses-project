@@ -21,6 +21,66 @@ function rememberDelivery(key: string | undefined, body: any) {
   recentDeliveries.set(key, { at: now, body });
 }
 
+// ---------------------------------------------------------------------------
+// Authorization. This endpoint is NOT a generic mailer: it delivers one recipient of
+// an outbox/{eventId} notification. The event is read from Firestore with the
+// caller's own Firebase ID token, so the Firestore rules decide whether the caller
+// may dispatch it (its creator, the org's finance/admins, or a super admin), and the
+// rules on outbox creation decide who an event may address. Subject, body and sender
+// come from the event, never from the request body.
+// ---------------------------------------------------------------------------
+const FIRESTORE_TIMEOUT_MS = 8_000;
+
+function firestoreDocsBase() {
+  const projectId = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || 'expenses-project-ce1f9';
+  const emulator = process.env.FIRESTORE_EMULATOR_HOST;
+  const origin = emulator ? `http://${emulator}` : 'https://firestore.googleapis.com';
+  return `${origin}/v1/projects/${projectId}/databases/(default)/documents`;
+}
+
+/** Firestore REST value → plain JS value. */
+export function decodeFirestoreValue(v: any): any {
+  if (!v || typeof v !== 'object') return null;
+  if ('stringValue' in v) return v.stringValue;
+  if ('integerValue' in v) return Number(v.integerValue);
+  if ('doubleValue' in v) return Number(v.doubleValue);
+  if ('booleanValue' in v) return Boolean(v.booleanValue);
+  if ('timestampValue' in v) return v.timestampValue;
+  if ('nullValue' in v) return null;
+  if ('arrayValue' in v) return (v.arrayValue?.values || []).map(decodeFirestoreValue);
+  if ('mapValue' in v) return decodeFirestoreFields(v.mapValue?.fields || {});
+  return null;
+}
+
+export function decodeFirestoreFields(fields: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(fields || {})) out[k] = decodeFirestoreValue(v);
+  return out;
+}
+
+export type OutboxLookup =
+  | { ok: true; event: Record<string, any> }
+  | { ok: false; status: number; error: string };
+
+/** Reads outbox/{eventId} as the caller (Firestore rules apply). */
+export async function loadOutboxEventAsCaller(eventId: string, idToken: string): Promise<OutboxLookup> {
+  const res = await fetchWithTimeout(
+    `${firestoreDocsBase()}/outbox/${encodeURIComponent(eventId)}`,
+    { method: 'GET', headers: { Authorization: `Bearer ${idToken}` } },
+    FIRESTORE_TIMEOUT_MS,
+  );
+  if (res.status === 401 || res.status === 403) return { ok: false, status: 403, error: 'not_allowed_to_dispatch_event' };
+  if (res.status === 404) return { ok: false, status: 404, error: 'event_not_found' };
+  if (!res.ok) return { ok: false, status: 502, error: `firestore_http_${res.status}` };
+  const doc = await res.json();
+  return { ok: true, event: decodeFirestoreFields(doc?.fields || {}) };
+}
+
+function bearerToken(header: unknown): string | null {
+  const m = typeof header === 'string' ? /^Bearer\s+(\S+)$/i.exec(header.trim()) : null;
+  return m ? m[1] : null;
+}
+
 async function fetchWithTimeout(url: string, init: any, timeoutMs = PROVIDER_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -86,51 +146,61 @@ export default async function handler(req: any, res: any) {
 
   try {
     const parsedBody = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-    const {
-      to,
-      subject,
-      html,
-      text,
-      senderName = 'مصروفي',
-      senderEmail = 'awadhsaudi2030@gmail.com',
-      replyTo = 'awadhsaudi2030@gmail.com',
-      provider = 'auto',
-    } = parsedBody;
-
-    const headerKey = req.headers['idempotency-key'];
-    const idempotencyKey: string | undefined =
-      (typeof headerKey === 'string' && headerKey) || (typeof parsedBody.idempotencyKey === 'string' && parsedBody.idempotencyKey) || undefined;
-    if (idempotencyKey && !/^[A-Za-z0-9:_@.\-]{8,300}$/.test(idempotencyKey)) {
-      return res.status(400).json({ success: false, error: 'Invalid Idempotency-Key' });
+    const idToken = bearerToken(req.headers.authorization);
+    if (!idToken) {
+      return res.status(401).json({ success: false, error: 'unauthenticated' });
     }
-    const cached = idempotencyKey ? recentDeliveries.get(idempotencyKey) : undefined;
+    const eventId = typeof parsedBody.eventId === 'string' ? parsedBody.eventId : '';
+    const target = typeof parsedBody.to === 'string' ? parsedBody.to.trim().toLowerCase() : '';
+    if (!/^[A-Za-z0-9_-]{1,700}$/.test(eventId) || !target.includes('@')) {
+      return res.status(400).json({ success: false, error: 'eventId and a single recipient (to) are required' });
+    }
+
+    const lookup = await loadOutboxEventAsCaller(eventId, idToken);
+    if (!lookup.ok) {
+      return res.status(lookup.status).json({ success: false, error: lookup.error });
+    }
+    const event = lookup.event;
+    if (event.channel !== 'email_api') {
+      return res.status(422).json({ success: false, error: 'event_is_not_for_email_api' });
+    }
+    if (event.status !== 'sending') {
+      // Only an event claimed by a dispatcher (outbox lease) is delivered.
+      return res.status(409).json({ success: false, error: 'event_not_claimed' });
+    }
+    const eventRecipients: string[] = Array.isArray(event.recipients) ? event.recipients.map((e: any) => String(e).toLowerCase()) : [];
+    if (!eventRecipients.includes(target)) {
+      return res.status(403).json({ success: false, error: 'recipient_not_in_event' });
+    }
+    if (Array.isArray(event.deliveredTo) && event.deliveredTo.includes(target)) {
+      return res.status(200).json({ success: true, deduplicated: true, recipients: [target] });
+    }
+
+    const message = event.message || {};
+    const meta = event.meta || {};
+    const subject: string = message.subject;
+    const html: string = message.html;
+    const text: string = message.text || '';
+    const senderName: string = meta.senderName || 'مصروفي';
+    const senderEmail: string = meta.senderEmail || 'awadhsaudi2030@gmail.com';
+    const replyTo: string = meta.replyTo || senderEmail;
+    const provider: string = meta.provider || 'auto';
+    if (!subject || !html) {
+      return res.status(422).json({ success: false, error: 'event_has_no_content' });
+    }
+
+    const idempotencyKey = `${eventId}:${target}`;
+    const cached = recentDeliveries.get(idempotencyKey);
     if (cached && Date.now() - cached.at <= IDEMPOTENCY_TTL_MS) {
       return res.status(200).json({ ...cached.body, deduplicated: true });
     }
     // Deterministic Message-ID: mail clients collapse copies of the same message.
-    const messageId = idempotencyKey
-      ? `<${idempotencyKey.replace(/[^A-Za-z0-9._-]/g, '.').slice(0, 180)}@masrofy.mail>`
-      : undefined;
+    const messageId = `<${idempotencyKey.replace(/[^A-Za-z0-9._-]/g, '.').slice(0, 180)}@masrofy.mail>`;
     const sendOk = (body: any) => {
       rememberDelivery(idempotencyKey, body);
       return res.status(200).json(body);
     };
-
-    if (!to || (Array.isArray(to) && to.length === 0)) {
-      return res.status(400).json({ error: 'Missing required recipient: to' });
-    }
-
-    if (!subject || !html) {
-      return res.status(400).json({ error: 'Missing required email content: subject or html' });
-    }
-
-    const recipients = (Array.isArray(to) ? to : [to])
-      .map((e: string) => (e || '').trim().toLowerCase())
-      .filter((e: string) => e && e.includes('@'));
-
-    if (recipients.length === 0) {
-      return res.status(400).json({ error: 'No valid recipient email address provided.' });
-    }
+    const recipients = [target];
 
     // Determine API Key strictly from server-side environment secrets (never trust client payload)
     const activeGmailAppPass = process.env.GMAIL_APP_PASSWORD 
