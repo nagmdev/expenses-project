@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { OrganizationMember, Role, SUPPORTED_CURRENCIES } from '../types';
 import { isValidEmail, sanitizePhone } from '../utils/validation';
+import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 
 export const UsersManagement: React.FC = () => {
   const {
@@ -54,6 +55,8 @@ export const UsersManagement: React.FC = () => {
   const [editMemberOrgId, setEditMemberOrgId] = useState('');
   const [editMemberStatus, setEditMemberStatus] = useState<'active' | 'inactive'>('active');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const editGuard = useSubmitGuard();
+  const isSavingEdit = editGuard.pending;
 
   // Provision Modal States
   const [isProvisionModalOpen, setIsProvisionModalOpen] = useState(false);
@@ -65,10 +68,12 @@ export const UsersManagement: React.FC = () => {
   const [provTitle, setProvTitle] = useState('');
   const [provPhone, setProvPhone] = useState('');
   const [provError, setProvError] = useState('');
-  const [isProvisioning, setIsProvisioning] = useState(false);
+  const provisionGuard = useSubmitGuard();
+  const isProvisioning = provisionGuard.pending;
 
   // Deletion Confirmation
   const [deletingMember, setDeletingMember] = useState<OrganizationMember | null>(null);
+  const memberActions = useKeyedSubmitGuard();
 
   // Reset Password State
   const [resettingPasswordEmail, setResettingPasswordEmail] = useState<string | null>(null);
@@ -149,6 +154,7 @@ export const UsersManagement: React.FC = () => {
   // Super Admin Promotion / Demotion
   const handleToggleSuperAdmin = async (email: string) => {
     if (!email || currentRole !== 'super_admin') return;
+    await memberActions.run(`superadmin:${email.toLowerCase().trim()}`, async () => {
     const isAlreadySuper = superAdminEmails.some(e => e.toLowerCase().trim() === email.toLowerCase().trim());
     try {
       if (isAlreadySuper) {
@@ -167,6 +173,7 @@ export const UsersManagement: React.FC = () => {
     } finally {
       setTimeout(() => setFeedbackMessage(null), 5000);
     }
+    });
   };
 
   // Open Edit Modal
@@ -186,8 +193,10 @@ export const UsersManagement: React.FC = () => {
   // Save Edit
   const handleSaveEdit = async () => {
     if (!editingMember) return;
+    await editGuard.run(async () => {
+    try {
     const isCurrentlySuper = superAdminEmails.some(e => e.toLowerCase().trim() === editingMember.userEmail?.toLowerCase().trim());
-    
+
     // Role change handling for Super Admin
     if (editMemberRole === 'super_admin' && !isCurrentlySuper && editingMember.userEmail) {
       await addSuperAdminEmail(editingMember.userEmail);
@@ -210,6 +219,10 @@ export const UsersManagement: React.FC = () => {
     setEditingMember(null);
     setFeedbackMessage({ message: `تم حفظ تعديلات المستخدم ${editMemberName} بنجاح`, isError: false });
     setTimeout(() => setFeedbackMessage(null), 4000);
+    } catch (err: any) {
+      alert(err?.message || 'تعذر تنفيذ العملية');
+    }
+    });
   };
 
   // Provision New User
@@ -248,14 +261,14 @@ export const UsersManagement: React.FC = () => {
       console.warn(`[Users] Email ${normalizedEmail} exists in another org (${existingAnywhere.orgId}), adding to ${targetOrgId}`);
     }
 
-    setIsProvisioning(true);
+    await provisionGuard.run(async (idempotencyKey) => {
     try {
       const isSuper = provRole === 'super_admin';
       const effectiveRole: Role = isSuper ? 'org_admin' : provRole;
 
       await addMember({
         orgId: targetOrgId,
-        userId: 'temp_' + Date.now(),
+        userId: '',
         userName: provName.trim(),
         userEmail: provEmail.trim().toLowerCase(),
         role: effectiveRole,
@@ -263,12 +276,13 @@ export const UsersManagement: React.FC = () => {
         jobTitle: provTitle.trim() || 'موظف',
         phone: provPhone.trim(),
         active: true,
-      });
+      }, { idempotencyKey });
 
       if (isSuper) {
         await addSuperAdminEmail(provEmail.trim().toLowerCase());
       }
 
+      provisionGuard.rotateKey();
       setIsProvisionModalOpen(false);
       setProvName('');
       setProvEmail('');
@@ -278,26 +292,27 @@ export const UsersManagement: React.FC = () => {
     } catch (err: any) {
       setProvError(err?.message || 'فشلت إضافة الموظف');
     } finally {
-      setIsProvisioning(false);
       setTimeout(() => setFeedbackMessage(null), 5000);
     }
+    });
   };
 
   // Delete Member
   const handleConfirmDelete = async () => {
     if (!deletingMember) return;
+    await memberActions.run(`delete:${deletingMember.id}`, async () => {
     try {
       await removeMember(deletingMember.id);
       if (deletingMember.userEmail) {
         await removeSuperAdminEmail(deletingMember.userEmail).catch(() => {});
       }
-      setFeedbackMessage({ message: `تم حذف حساب ${deletingMember.userName} نهائياً`, isError: false });
-    } catch (err: any) {
-      setFeedbackMessage({ message: err?.message || 'تعذر حذف الحساب', isError: true });
-    } finally {
       setDeletingMember(null);
+      setFeedbackMessage({ message: `تم حذف حساب ${deletingMember.userName} نهائياً`, isError: false });
       setTimeout(() => setFeedbackMessage(null), 4000);
+    } catch (err: any) {
+      alert(err?.message || 'تعذر حذف الحساب');
     }
+    });
   };
 
   return (
@@ -407,7 +422,7 @@ export const UsersManagement: React.FC = () => {
           {/* Add User Action */}
           <button
             type="button"
-            onClick={() => setIsProvisionModalOpen(true)}
+            onClick={() => { provisionGuard.rotateKey(); setIsProvisionModalOpen(true); }}
             className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer shadow-xs"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -730,6 +745,7 @@ export const UsersManagement: React.FC = () => {
               <button
                 type="button"
                 onClick={handleSaveEdit}
+                disabled={isSavingEdit}
                 className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs"
               >
                 حفظ التعديلات
@@ -902,6 +918,7 @@ export const UsersManagement: React.FC = () => {
               <button
                 type="button"
                 onClick={handleConfirmDelete}
+                disabled={memberActions.isPending(`delete:${deletingMember.id}`)}
                 className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer"
               >
                 تأكيد الحذف

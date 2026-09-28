@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
-import { 
+import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import {
   Building2, 
   Plus, 
   Users, 
@@ -152,6 +153,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const targetDepartments = canManageOrgs ? allDepartments : departments;
   const targetAuditLogs = canManageOrgs ? allAuditLogs : auditLogs;
 
+  // Per-row / confirm-dialog actions (toggle, delete, promote...): one in-flight call per scope.
+  const rowGuard = useKeyedSubmitGuard();
+
   // Active View Tab
   const [activeSection, setActiveSection] = useState<AdminSection>(
     initialSection || (canManageOrgs ? 'companies' : 'users')
@@ -166,7 +170,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [orgCurrency, setOrgCurrency] = useState('EGP');
   const [orgBudget, setOrgBudget] = useState('500000');
   const [orgDescription, setOrgDescription] = useState('');
-  const [isCreatingOrg, setIsCreatingOrg] = useState(false);
+  const orgGuard = useSubmitGuard();
+  const isCreatingOrg = orgGuard.pending;
   const [orgFormError, setOrgFormError] = useState<string | null>(null);
 
   const [editingOrg, setEditingOrg] = useState<Organization | null>(null);
@@ -175,6 +180,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [editOrgCurrency, setEditOrgCurrency] = useState('EGP');
   const [editOrgBudget, setEditOrgBudget] = useState('');
   const [editOrgDescription, setEditOrgDescription] = useState('');
+  const editOrgGuard = useSubmitGuard();
 
   const [deletingOrg, setDeletingOrg] = useState<Organization | null>(null);
   const [deleteOrgLoading, setDeleteOrgLoading] = useState(false);
@@ -195,7 +201,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [department, setDepartment] = useState('العمليات والتشغيل');
   const [jobTitle, setJobTitle] = useState('موظف');
   
-  const [provisionLoading, setProvisionLoading] = useState(false);
+  const provisionGuard = useSubmitGuard();
+  const provisionLoading = provisionGuard.pending;
   const [provisionError, setProvisionError] = useState<string | null>(null);
   const [createdCredentials, setCreatedCredentials] = useState<{
     name: string;
@@ -214,7 +221,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [editMemberDept, setEditMemberDept] = useState('');
   const [editMemberJob, setEditMemberJob] = useState('');
   const [editMemberActive, setEditMemberActive] = useState(true);
-  const [editMemberLoading, setEditMemberLoading] = useState(false);
+  const editMemberGuard = useSubmitGuard();
+  const editMemberLoading = editMemberGuard.pending;
 
   const [deletingMember, setDeletingMember] = useState<OrganizationMember | null>(null);
   const [resetFeedback, setResetFeedback] = useState<{ email: string; message: string; isError?: boolean } | null>(null);
@@ -244,6 +252,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [serviceCostCenter, setServiceCostCenter] = useState('');
   const [serviceColor, setServiceColor] = useState('#10b981');
   const [serviceOrgIds, setServiceOrgIds] = useState<string[]>([]);
+  const serviceGuard = useSubmitGuard();
+  const isSavingService = serviceGuard.pending;
   const [deletingService, setDeletingService] = useState<ServiceCategory | null>(null);
   const [serviceSearch, setServiceSearch] = useState('');
 
@@ -263,6 +273,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [vendorAddress, setVendorAddress] = useState('');
   const [vendorOrgId, setVendorOrgId] = useState(activeOrgId || displayOrgs[0]?.id || '');
   const [vendorServiceIds, setVendorServiceIds] = useState<string[]>([]);
+  const vendorGuard = useSubmitGuard();
+  const isSavingVendor = vendorGuard.pending;
   const [deletingVendor, setDeletingVendor] = useState<ServiceProvider | null>(null);
   const [vendorSearch, setVendorSearch] = useState('');
 
@@ -278,6 +290,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [vaultCurrency, setVaultCurrency] = useState('EGP');
   const [vaultDescription, setVaultDescription] = useState('');
   const [vaultOrgId, setVaultOrgId] = useState(activeOrgId || displayOrgs[0]?.id || '');
+  const vaultGuard = useSubmitGuard();
+  const isSavingVault = vaultGuard.pending;
   const [deletingVault, setDeletingVault] = useState<PaymentAccount | null>(null);
   const [vaultSearch, setVaultSearch] = useState('');
 
@@ -291,6 +305,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [deptDescription, setDeptDescription] = useState('');
   const [deptManager, setDeptManager] = useState('');
   const [deptOrgId, setDeptOrgId] = useState(activeOrgId || displayOrgs[0]?.id || '');
+  const deptGuard = useSubmitGuard();
+  const isSavingDept = deptGuard.pending;
   const [deletingDept, setDeletingDept] = useState<Department | null>(null);
   const [deptSearch, setDeptSearch] = useState('');
 
@@ -359,35 +375,35 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     e.preventDefault();
     if (!orgName.trim() || isCreatingOrg) return;
 
-    setOrgFormError(null);
-    setIsCreatingOrg(true);
-
-    try {
-      const res = await addOrganization({
-        name: orgName.trim(),
-        code: orgCode.trim().toUpperCase() || orgName.trim().slice(0, 3).toUpperCase() || 'ORG',
-        currency: orgCurrency,
-        budget: Number(orgBudget) || 0,
-        description: orgDescription.trim() || 'مؤسسة معتمدة في المنصة',
-        status: 'active',
-      });
-
-      if (!res.success) {
-        setOrgFormError(res.message || 'تعذر إضافة الشركة.');
-        setIsCreatingOrg(false);
-        return;
-      }
-
-      setOrgName('');
-      setOrgCode('');
-      setOrgDescription('');
+    await orgGuard.run(async (idempotencyKey) => {
       setOrgFormError(null);
-      setIsOrgModalOpen(false);
-    } catch {
-      setOrgFormError('حدث خطأ غير متوقع أثناء إنشاء الشركة.');
-    } finally {
-      setIsCreatingOrg(false);
-    }
+
+      try {
+        const res = await addOrganization({
+          name: orgName.trim(),
+          code: orgCode.trim().toUpperCase() || orgName.trim().slice(0, 3).toUpperCase() || 'ORG',
+          currency: orgCurrency,
+          budget: Number(orgBudget) || 0,
+          description: orgDescription.trim() || 'مؤسسة معتمدة في المنصة',
+          status: 'active',
+        }, { idempotencyKey });
+
+        if (!res.success) {
+          // Keep the same idempotency key so a retry resolves to the same intent.
+          setOrgFormError(res.message || 'تعذر إضافة الشركة.');
+          return;
+        }
+
+        orgGuard.rotateKey();
+        setOrgName('');
+        setOrgCode('');
+        setOrgDescription('');
+        setOrgFormError(null);
+        setIsOrgModalOpen(false);
+      } catch (err: any) {
+        setOrgFormError(err?.message || 'حدث خطأ غير متوقع أثناء إنشاء الشركة.');
+      }
+    });
   };
 
   const handleStartEditOrg = (org: Organization) => {
@@ -403,26 +419,41 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     e.preventDefault();
     if (!editingOrg || !editOrgName.trim()) return;
 
-    await updateOrganization(editingOrg.id, {
-      name: editOrgName.trim(),
-      code: editOrgCode.trim().toUpperCase() || editingOrg.code,
-      currency: editOrgCurrency,
-      budget: Number(editOrgBudget) || 0,
-      description: editOrgDescription.trim(),
-    });
+    await editOrgGuard.run(async () => {
+      try {
+        await updateOrganization(editingOrg.id, {
+          name: editOrgName.trim(),
+          code: editOrgCode.trim().toUpperCase() || editingOrg.code,
+          currency: editOrgCurrency,
+          budget: Number(editOrgBudget) || 0,
+          description: editOrgDescription.trim(),
+        });
 
-    setEditingOrg(null);
+        setEditingOrg(null);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   const handleConfirmDeleteOrg = async () => {
     if (!deletingOrg) return;
-    setDeleteOrgLoading(true);
-    try {
-      await deleteOrganization(deletingOrg.id);
-      setDeletingOrg(null);
-    } finally {
-      setDeleteOrgLoading(false);
-    }
+    const target = deletingOrg;
+    await rowGuard.run(`delete-org:${target.id}`, async () => {
+      setDeleteOrgLoading(true);
+      try {
+        const res = await deleteOrganization(target.id);
+        if (!res.success) {
+          alert(res.message || 'تعذر تنفيذ العملية');
+          return;
+        }
+        setDeletingOrg(null);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      } finally {
+        setDeleteOrgLoading(false);
+      }
+    });
   };
 
   // =========================================================================
@@ -430,8 +461,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // =========================================================================
   const handleProvisionSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (provisionLoading) return;
     setProvisionError(null);
-    setProvisionLoading(true);
 
     const targetOrgId = selectedOrgForMember || (displayOrgs[0]?.id || '');
     const cleanEmail = memberEmail.trim().toLowerCase();
@@ -439,48 +470,57 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
     if (!cleanEmail || !cleanPassword) {
       setProvisionError('يرجى كتابة البريد الإلكتروني وكلمة المرور.');
-      setProvisionLoading(false);
       return;
     }
 
     if (cleanPassword.length < 6) {
       setProvisionError('كلمة المرور يجب ألا تقل عن 6 أحرف أو أرقام.');
-      setProvisionLoading(false);
       return;
     }
 
-    const res = await createCompanyUser({
-      name: memberName.trim(),
-      email: cleanEmail,
-      password: cleanPassword,
-      phone: memberPhone.trim(),
-      role: memberRole,
-      department: department.trim(),
-      jobTitle: jobTitle.trim(),
-      orgId: targetOrgId,
-    });
+    await provisionGuard.run(async (idempotencyKey) => {
+      try {
+        const res = await createCompanyUser({
+          name: memberName.trim(),
+          email: cleanEmail,
+          password: cleanPassword,
+          phone: memberPhone.trim(),
+          role: memberRole,
+          department: department.trim(),
+          jobTitle: jobTitle.trim(),
+          orgId: targetOrgId,
+          idempotencyKey,
+        });
 
-    setProvisionLoading(false);
-
-    if (res.success && res.credentials) {
-      if (memberRole === 'super_admin') {
-        await addSuperAdminEmail(cleanEmail);
+        if (res.success && res.credentials) {
+          // The account now exists: this intent is done, never replay it.
+          provisionGuard.rotateKey();
+          if (memberRole === 'super_admin') {
+            try {
+              await addSuperAdminEmail(cleanEmail);
+            } catch (err: any) {
+              alert(err?.message || 'تعذر تنفيذ العملية');
+            }
+          }
+          const orgObj = displayOrgs.find(o => o.id === targetOrgId);
+          setCreatedCredentials({
+            name: memberName.trim(),
+            email: res.credentials.email,
+            password: res.credentials.password,
+            phone: memberPhone.trim(),
+            orgName: orgObj?.name || 'الشركة المحددة',
+          });
+          setMemberName('');
+          setMemberEmail('');
+          setMemberPassword('');
+          setMemberPhone('');
+        } else {
+          setProvisionError(res.message || 'تعذر إضافة المستخدم.');
+        }
+      } catch (err: any) {
+        setProvisionError(err?.message || 'تعذر إضافة المستخدم.');
       }
-      const orgObj = displayOrgs.find(o => o.id === targetOrgId);
-      setCreatedCredentials({
-        name: memberName.trim(),
-        email: res.credentials.email,
-        password: res.credentials.password,
-        phone: memberPhone.trim(),
-        orgName: orgObj?.name || 'الشركة المحددة',
-      });
-      setMemberName('');
-      setMemberEmail('');
-      setMemberPassword('');
-      setMemberPhone('');
-    } else {
-      setProvisionError(res.message || 'تعذر إضافة المستخدم.');
-    }
+    });
   };
 
   const handleStartEditMember = (mem: OrganizationMember) => {
@@ -499,35 +539,36 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     e.preventDefault();
     if (!editingMember || !editMemberName.trim()) return;
 
-    setEditMemberLoading(true);
-    try {
-      const finalOrgId = editMemberOrgId || editingMember.orgId || displayOrgs[0]?.id || '';
-      const email = editingMember.userEmail?.toLowerCase().trim();
-      const wasSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === email) || editingMember.role === 'super_admin';
+    await editMemberGuard.run(async () => {
+      try {
+        const finalOrgId = editMemberOrgId || editingMember.orgId || displayOrgs[0]?.id || '';
+        const email = editingMember.userEmail?.toLowerCase().trim();
+        const wasSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === email) || editingMember.role === 'super_admin';
 
-      if (editMemberRole === 'super_admin') {
-        if (email) {
-          await addSuperAdminEmail(email);
+        if (editMemberRole === 'super_admin') {
+          if (email) {
+            await addSuperAdminEmail(email);
+          }
+        } else if (wasSuperAdmin) {
+          if (email) {
+            await removeSuperAdminEmail(email);
+          }
         }
-      } else if (wasSuperAdmin) {
-        if (email) {
-          await removeSuperAdminEmail(email);
-        }
+
+        await updateMember(editingMember.id, {
+          userName: editMemberName.trim(),
+          phone: editMemberPhone.trim(),
+          orgId: finalOrgId,
+          role: editMemberRole,
+          department: editMemberDept.trim(),
+          jobTitle: editMemberJob.trim(),
+          active: editMemberActive,
+        });
+        setEditingMember(null);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
       }
-
-      await updateMember(editingMember.id, {
-        userName: editMemberName.trim(),
-        phone: editMemberPhone.trim(),
-        orgId: finalOrgId,
-        role: editMemberRole,
-        department: editMemberDept.trim(),
-        jobTitle: editMemberJob.trim(),
-        active: editMemberActive,
-      });
-      setEditingMember(null);
-    } finally {
-      setEditMemberLoading(false);
-    }
+    });
   };
 
   const handleTriggerPasswordReset = async (email: string) => {
@@ -553,14 +594,22 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   const handleConfirmDeleteMember = async () => {
     if (!deletingMember) return;
-    await removeMember(deletingMember.id);
-    setDeletingMember(null);
+    const target = deletingMember;
+    await rowGuard.run(`delete-member:${target.id}`, async () => {
+      try {
+        await removeMember(target.id);
+        setDeletingMember(null);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   // =========================================================================
   // HANDLERS: SERVICES
   // =========================================================================
   const handleOpenAddService = () => {
+    serviceGuard.rotateKey();
     setEditingService(null);
     setServiceName('');
     setServiceCode(`SRV-${Math.floor(100 + Math.random() * 900)}`);
@@ -612,60 +661,75 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     const chosenVendor = targetVendors.find(v => v.id === serviceVendorId);
     const vendorName = chosenVendor ? chosenVendor.name : undefined;
 
-    if (editingService) {
-      await updateService({
-        ...editingService,
-        name: serviceName.trim(),
-        code: serviceCode.trim().toUpperCase() || editingService.code,
-        description: serviceDescription.trim(),
-        budgetLimit: Number(serviceBudget) || 0,
-        budgetPeriod: serviceBudgetPeriod,
-        recurringFrequency: serviceRecurringFrequency,
-        fixedAccountRef: serviceFixedAccountRef.trim() || undefined,
-        vendorId: serviceVendorId || undefined,
-        vendorName: vendorName,
-        serviceNature: serviceServiceNature.trim() || undefined,
-        defaultPaymentMethod: (serviceDefaultPaymentMethod as PaymentMethod) || undefined,
-        defaultAccountId: serviceDefaultAccountId || undefined,
-        costCenter: serviceCostCenter.trim() || undefined,
-        color: serviceColor,
-        orgId: primaryOrgId,
-        orgIds: serviceOrgIds,
-      });
-    } else {
-      await addService({
-        name: serviceName.trim(),
-        code: serviceCode.trim().toUpperCase() || `SRV-${Math.floor(100 + Math.random() * 900)}`,
-        description: serviceDescription.trim(),
-        budgetLimit: Number(serviceBudget) || 0,
-        budgetPeriod: serviceBudgetPeriod,
-        recurringFrequency: serviceRecurringFrequency,
-        fixedAccountRef: serviceFixedAccountRef.trim() || undefined,
-        vendorId: serviceVendorId || undefined,
-        vendorName: vendorName,
-        serviceNature: serviceServiceNature.trim() || undefined,
-        defaultPaymentMethod: (serviceDefaultPaymentMethod as PaymentMethod) || undefined,
-        defaultAccountId: serviceDefaultAccountId || undefined,
-        costCenter: serviceCostCenter.trim() || undefined,
-        color: serviceColor,
-        iconName: 'Layers',
-        orgId: primaryOrgId,
-        orgIds: serviceOrgIds,
-      });
-    }
-    setIsServiceModalOpen(false);
+    await serviceGuard.run(async (idempotencyKey) => {
+      try {
+        if (editingService) {
+          await updateService({
+            ...editingService,
+            name: serviceName.trim(),
+            code: serviceCode.trim().toUpperCase() || editingService.code,
+            description: serviceDescription.trim(),
+            budgetLimit: Number(serviceBudget) || 0,
+            budgetPeriod: serviceBudgetPeriod,
+            recurringFrequency: serviceRecurringFrequency,
+            fixedAccountRef: serviceFixedAccountRef.trim() || undefined,
+            vendorId: serviceVendorId || undefined,
+            vendorName: vendorName,
+            serviceNature: serviceServiceNature.trim() || undefined,
+            defaultPaymentMethod: (serviceDefaultPaymentMethod as PaymentMethod) || undefined,
+            defaultAccountId: serviceDefaultAccountId || undefined,
+            costCenter: serviceCostCenter.trim() || undefined,
+            color: serviceColor,
+            orgId: primaryOrgId,
+            orgIds: serviceOrgIds,
+          });
+        } else {
+          await addService({
+            name: serviceName.trim(),
+            code: serviceCode.trim().toUpperCase() || `SRV-${Math.floor(100 + Math.random() * 900)}`,
+            description: serviceDescription.trim(),
+            budgetLimit: Number(serviceBudget) || 0,
+            budgetPeriod: serviceBudgetPeriod,
+            recurringFrequency: serviceRecurringFrequency,
+            fixedAccountRef: serviceFixedAccountRef.trim() || undefined,
+            vendorId: serviceVendorId || undefined,
+            vendorName: vendorName,
+            serviceNature: serviceServiceNature.trim() || undefined,
+            defaultPaymentMethod: (serviceDefaultPaymentMethod as PaymentMethod) || undefined,
+            defaultAccountId: serviceDefaultAccountId || undefined,
+            costCenter: serviceCostCenter.trim() || undefined,
+            color: serviceColor,
+            iconName: 'Layers',
+            orgId: primaryOrgId,
+            orgIds: serviceOrgIds,
+          }, { idempotencyKey });
+        }
+        serviceGuard.rotateKey();
+        setIsServiceModalOpen(false);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   const handleConfirmDeleteService = async () => {
     if (!deletingService) return;
-    await deleteService(deletingService.id);
-    setDeletingService(null);
+    const target = deletingService;
+    await rowGuard.run(`delete-service:${target.id}`, async () => {
+      try {
+        await deleteService(target.id);
+        setDeletingService(null);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   // =========================================================================
   // HANDLERS: VENDORS
   // =========================================================================
   const handleOpenAddVendor = () => {
+    vendorGuard.rotateKey();
     setEditingVendor(null);
     setVendorName('');
     setVendorContact('');
@@ -710,53 +774,68 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       .filter(s => vendorServiceIds.includes(s.id))
       .map(s => s.name);
 
-    if (editingVendor) {
-      await updateProvider({
-        ...editingVendor,
-        name: vendorName.trim(),
-        contactPerson: vendorContact.trim(),
-        phone: vendorPhone.trim(),
-        email: vendorEmail.trim(),
-        taxNumber: vendorTaxNumber.trim(),
-        crNumber: vendorCrNumber.trim(),
-        bankName: vendorBankName.trim(),
-        iban: vendorIban.trim().toUpperCase(),
-        address: vendorAddress.trim(),
-        orgId: targetOrgId,
-        serviceCategoryIds: vendorServiceIds,
-        serviceCategoryNames: matchedServiceNames,
-      });
-    } else {
-      await addProvider({
-        name: vendorName.trim(),
-        contactPerson: vendorContact.trim(),
-        phone: vendorPhone.trim(),
-        email: vendorEmail.trim(),
-        taxNumber: vendorTaxNumber.trim(),
-        crNumber: vendorCrNumber.trim(),
-        bankName: vendorBankName.trim(),
-        iban: vendorIban.trim().toUpperCase(),
-        address: vendorAddress.trim(),
-        orgId: targetOrgId,
-        serviceCategoryIds: vendorServiceIds,
-        serviceCategoryNames: matchedServiceNames,
-        rating: 5,
-        active: true,
-      });
-    }
-    setIsVendorModalOpen(false);
+    await vendorGuard.run(async (idempotencyKey) => {
+      try {
+        if (editingVendor) {
+          await updateProvider({
+            ...editingVendor,
+            name: vendorName.trim(),
+            contactPerson: vendorContact.trim(),
+            phone: vendorPhone.trim(),
+            email: vendorEmail.trim(),
+            taxNumber: vendorTaxNumber.trim(),
+            crNumber: vendorCrNumber.trim(),
+            bankName: vendorBankName.trim(),
+            iban: vendorIban.trim().toUpperCase(),
+            address: vendorAddress.trim(),
+            orgId: targetOrgId,
+            serviceCategoryIds: vendorServiceIds,
+            serviceCategoryNames: matchedServiceNames,
+          });
+        } else {
+          await addProvider({
+            name: vendorName.trim(),
+            contactPerson: vendorContact.trim(),
+            phone: vendorPhone.trim(),
+            email: vendorEmail.trim(),
+            taxNumber: vendorTaxNumber.trim(),
+            crNumber: vendorCrNumber.trim(),
+            bankName: vendorBankName.trim(),
+            iban: vendorIban.trim().toUpperCase(),
+            address: vendorAddress.trim(),
+            orgId: targetOrgId,
+            serviceCategoryIds: vendorServiceIds,
+            serviceCategoryNames: matchedServiceNames,
+            rating: 5,
+            active: true,
+          }, { idempotencyKey });
+        }
+        vendorGuard.rotateKey();
+        setIsVendorModalOpen(false);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   const handleConfirmDeleteVendor = async () => {
     if (!deletingVendor) return;
-    await deleteProvider(deletingVendor.id);
-    setDeletingVendor(null);
+    const target = deletingVendor;
+    await rowGuard.run(`delete-vendor:${target.id}`, async () => {
+      try {
+        await deleteProvider(target.id);
+        setDeletingVendor(null);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   // =========================================================================
   // HANDLERS: VAULTS & PAYMENT ACCOUNTS
   // =========================================================================
   const handleOpenAddVault = () => {
+    vaultGuard.rotateKey();
     setEditingVault(null);
     setVaultName('');
     setVaultType('bank');
@@ -784,45 +863,60 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     e.preventDefault();
     if (!vaultName.trim() || !vaultIdentifier.trim()) return;
 
-    if (editingVault) {
-      await updatePaymentAccount(editingVault.id, {
-        name: vaultName.trim(),
-        type: vaultType,
-        accountIdentifier: vaultIdentifier.trim(),
-        bankName: vaultBankName.trim(),
-        currency: vaultCurrency,
-        description: vaultDescription.trim(),
-        orgId: vaultOrgId || editingVault.orgId,
-      });
-    } else {
-      await addPaymentAccount({
-        name: vaultName.trim(),
-        type: vaultType,
-        accountIdentifier: vaultIdentifier.trim(),
-        bankName: vaultBankName.trim(),
-        currency: vaultCurrency,
-        description: vaultDescription.trim(),
-        orgId: vaultOrgId || activeOrgId || displayOrgs[0]?.id || '',
-        initialBalance: 0,
-        currentBalance: 0,
-        totalIn: 0,
-        totalOut: 0,
-        active: true,
-      });
-    }
-    setIsVaultModalOpen(false);
+    await vaultGuard.run(async (idempotencyKey) => {
+      try {
+        if (editingVault) {
+          await updatePaymentAccount(editingVault.id, {
+            name: vaultName.trim(),
+            type: vaultType,
+            accountIdentifier: vaultIdentifier.trim(),
+            bankName: vaultBankName.trim(),
+            currency: vaultCurrency,
+            description: vaultDescription.trim(),
+            orgId: vaultOrgId || editingVault.orgId,
+          });
+        } else {
+          await addPaymentAccount({
+            name: vaultName.trim(),
+            type: vaultType,
+            accountIdentifier: vaultIdentifier.trim(),
+            bankName: vaultBankName.trim(),
+            currency: vaultCurrency,
+            description: vaultDescription.trim(),
+            orgId: vaultOrgId || activeOrgId || displayOrgs[0]?.id || '',
+            initialBalance: 0,
+            currentBalance: 0,
+            totalIn: 0,
+            totalOut: 0,
+            active: true,
+          }, { idempotencyKey });
+        }
+        vaultGuard.rotateKey();
+        setIsVaultModalOpen(false);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   const handleConfirmDeleteVault = async () => {
     if (!deletingVault) return;
-    await deletePaymentAccount(deletingVault.id);
-    setDeletingVault(null);
+    const target = deletingVault;
+    await rowGuard.run(`delete-vault:${target.id}`, async () => {
+      try {
+        await deletePaymentAccount(target.id);
+        setDeletingVault(null);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   // =========================================================================
   // HANDLERS: DEPARTMENTS
   // =========================================================================
   const handleOpenAddDept = () => {
+    deptGuard.rotateKey();
     setEditingDept(null);
     setDeptName('');
     setDeptCode(`DEP-${Math.floor(10 + Math.random() * 90)}`);
@@ -846,30 +940,44 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     e.preventDefault();
     if (!deptName.trim()) return;
 
-    if (editingDept) {
-      await updateDepartment(editingDept.id, {
-        name: deptName.trim(),
-        code: deptCode.trim().toUpperCase() || editingDept.code,
-        description: deptDescription.trim(),
-        managerName: deptManager.trim(),
-        orgId: deptOrgId || editingDept.orgId,
-      });
-    } else {
-      await addDepartment({
-        name: deptName.trim(),
-        code: deptCode.trim().toUpperCase() || `DEP-${Math.floor(10 + Math.random() * 90)}`,
-        description: deptDescription.trim(),
-        managerName: deptManager.trim(),
-        orgId: deptOrgId || activeOrgId || displayOrgs[0]?.id || '',
-      });
-    }
-    setIsDeptModalOpen(false);
+    await deptGuard.run(async (idempotencyKey) => {
+      try {
+        if (editingDept) {
+          await updateDepartment(editingDept.id, {
+            name: deptName.trim(),
+            code: deptCode.trim().toUpperCase() || editingDept.code,
+            description: deptDescription.trim(),
+            managerName: deptManager.trim(),
+            orgId: deptOrgId || editingDept.orgId,
+          });
+        } else {
+          await addDepartment({
+            name: deptName.trim(),
+            code: deptCode.trim().toUpperCase() || `DEP-${Math.floor(10 + Math.random() * 90)}`,
+            description: deptDescription.trim(),
+            managerName: deptManager.trim(),
+            orgId: deptOrgId || activeOrgId || displayOrgs[0]?.id || '',
+          }, { idempotencyKey });
+        }
+        deptGuard.rotateKey();
+        setIsDeptModalOpen(false);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   const handleConfirmDeleteDept = async () => {
     if (!deletingDept) return;
-    await deleteDepartment(deletingDept.id);
-    setDeletingDept(null);
+    const target = deletingDept;
+    await rowGuard.run(`delete-dept:${target.id}`, async () => {
+      try {
+        await deleteDepartment(target.id);
+        setDeletingDept(null);
+      } catch (err: any) {
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   // =========================================================================
@@ -891,18 +999,20 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       return;
     }
 
-    try {
-      await addSuperAdminEmail(email);
-      const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === email);
-      if (memberRecord) {
-        await updateMember(memberRecord.id, { role: 'super_admin' });
+    await rowGuard.run(`super-admin:${email}`, async () => {
+      try {
+        await addSuperAdminEmail(email);
+        const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === email);
+        if (memberRecord) {
+          await updateMember(memberRecord.id, { role: 'super_admin' });
+        }
+        setAdminSuccessMsg(`تمت ترقية الحساب (${email}) كمشرف عام للمنصة 👑.`);
+        setNewAdminEmail('');
+        setSelectedMemberEmailForSuperAdmin('');
+      } catch (err: any) {
+        setAdminErrorMsg(err?.message || 'حدث خطأ أثناء حفظ المشرف العام.');
       }
-      setAdminSuccessMsg(`تمت ترقية الحساب (${email}) كمشرف عام للمنصة 👑.`);
-      setNewAdminEmail('');
-      setSelectedMemberEmailForSuperAdmin('');
-    } catch {
-      setAdminErrorMsg('حدث خطأ أثناء حفظ المشرف العام.');
-    }
+    });
   };
 
   const handlePromoteSelectedMember = async () => {
@@ -916,18 +1026,20 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       return;
     }
 
-    try {
-      await addSuperAdminEmail(email);
-      const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === email);
-      if (memberRecord) {
-        await updateMember(memberRecord.id, { role: 'super_admin' });
+    await rowGuard.run(`super-admin:${email}`, async () => {
+      try {
+        await addSuperAdminEmail(email);
+        const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === email);
+        if (memberRecord) {
+          await updateMember(memberRecord.id, { role: 'super_admin' });
+        }
+        setAdminSuccessMsg(`تمت ترقية (${email}) إلى سوبر أدمن 👑 بنجاح.`);
+        setNewAdminEmail('');
+        setSelectedMemberEmailForSuperAdmin('');
+      } catch (err: any) {
+        setAdminErrorMsg(err?.message || 'حدث خطأ أثناء ترقية الموظف إلى سوبر أدمن.');
       }
-      setAdminSuccessMsg(`تمت ترقية (${email}) إلى سوبر أدمن 👑 بنجاح.`);
-      setNewAdminEmail('');
-      setSelectedMemberEmailForSuperAdmin('');
-    } catch {
-      setAdminErrorMsg('حدث خطأ أثناء ترقية الموظف إلى سوبر أدمن.');
-    }
+    });
   };
 
   const handleRemoveSuperAdmin = async (email: string) => {
@@ -941,19 +1053,21 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       return;
     }
 
-    try {
-      setSuperAdminActionLoading(true);
-      await removeSuperAdminEmail(cleanEmail);
-      const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === cleanEmail);
-      if (memberRecord) {
-        await updateMember(memberRecord.id, { role: 'employee' });
+    await rowGuard.run(`super-admin:${cleanEmail}`, async () => {
+      try {
+        setSuperAdminActionLoading(true);
+        await removeSuperAdminEmail(cleanEmail);
+        const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === cleanEmail);
+        if (memberRecord) {
+          await updateMember(memberRecord.id, { role: 'employee' });
+        }
+        setSuperAdminActionFeedback({ msg: `تم سحب صلاحيات السوبر أدمن عن (${cleanEmail}) بنجاح.` });
+      } catch (err: any) {
+        setSuperAdminActionFeedback({ msg: err?.message || 'حدث خطأ أثناء إزالة صلاحيات السوبر أدمن.', isError: true });
+      } finally {
+        setSuperAdminActionLoading(false);
       }
-      setSuperAdminActionFeedback({ msg: `تم سحب صلاحيات السوبر أدمن عن (${cleanEmail}) بنجاح.` });
-    } catch {
-      setSuperAdminActionFeedback({ msg: 'حدث خطأ أثناء إزالة صلاحيات السوبر أدمن.', isError: true });
-    } finally {
-      setSuperAdminActionLoading(false);
-    }
+    });
   };
 
   const handleOpenEditSuperAdminRole = (email: string) => {
@@ -976,16 +1090,18 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       return;
     }
 
-    try {
-      setSuperAdminActionLoading(true);
-      await updateSuperAdminRole(editingSuperAdminEmail, targetSuperAdminRole, targetSuperAdminOrgId);
-      setSuperAdminActionFeedback({ msg: `تم تحديث دور الحساب (${editingSuperAdminEmail}) إلى (${targetSuperAdminRole}) بنجاح.` });
-      setEditingSuperAdminEmail(null);
-    } catch {
-      setSuperAdminActionFeedback({ msg: 'حدث خطأ أثناء تعديل الصلاحية.', isError: true });
-    } finally {
-      setSuperAdminActionLoading(false);
-    }
+    await rowGuard.run(`super-admin:${editingSuperAdminEmail.trim().toLowerCase()}`, async () => {
+      try {
+        setSuperAdminActionLoading(true);
+        await updateSuperAdminRole(editingSuperAdminEmail, targetSuperAdminRole, targetSuperAdminOrgId);
+        setSuperAdminActionFeedback({ msg: `تم تحديث دور الحساب (${editingSuperAdminEmail}) إلى (${targetSuperAdminRole}) بنجاح.` });
+        setEditingSuperAdminEmail(null);
+      } catch (err: any) {
+        setSuperAdminActionFeedback({ msg: err?.message || 'حدث خطأ أثناء تعديل الصلاحية.', isError: true });
+      } finally {
+        setSuperAdminActionLoading(false);
+      }
+    });
   };
 
   // =========================================================================
@@ -1170,7 +1286,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           {activeSection === 'companies' && canManageOrgs && (
             <button
               type="button"
-              onClick={() => setIsOrgModalOpen(true)}
+              onClick={() => {
+                orgGuard.rotateKey();
+                setIsOrgModalOpen(true);
+              }}
               className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5"
             >
               <Plus className="h-4 w-4" />
@@ -1182,6 +1301,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             <button
               type="button"
               onClick={() => {
+                provisionGuard.rotateKey();
                 setCreatedCredentials(null);
                 setProvisionError(null);
                 setIsProvisionModalOpen(true);
@@ -1658,7 +1778,13 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                                   onChange={async (e) => {
                                     const newOrgId = e.target.value;
                                     if (newOrgId) {
-                                      await updateMember(mem.id, { orgId: newOrgId });
+                                      await rowGuard.run(`assign-org:${mem.id}`, async () => {
+                                        try {
+                                          await updateMember(mem.id, { orgId: newOrgId });
+                                        } catch (err: any) {
+                                          alert(err?.message || 'تعذر تنفيذ العملية');
+                                        }
+                                      });
                                     }
                                   }}
                                   className="text-[10px] bg-indigo-50 hover:bg-indigo-100 text-indigo-900 font-bold border border-indigo-200 rounded-lg px-1.5 py-1 cursor-pointer"
@@ -1702,7 +1828,16 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                         <td className="py-3 px-4">
                           <button
                             type="button"
-                            onClick={() => toggleMemberStatus(mem.id, mem.active === false)}
+                            onClick={async () => {
+                              await rowGuard.run(`toggle-member:${mem.id}`, async () => {
+                                try {
+                                  await toggleMemberStatus(mem.id, mem.active === false);
+                                } catch (err: any) {
+                                  alert(err?.message || 'تعذر تنفيذ العملية');
+                                }
+                              });
+                            }}
+                            disabled={rowGuard.isPending(`toggle-member:${mem.id}`)}
                             className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full cursor-pointer transition ${
                               mem.active !== false 
                                 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100' 
@@ -1736,8 +1871,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                                       return;
                                     }
                                     if (window.confirm(`هل أنت متأكد من سحب صلاحيات السوبر أدمن عن ${mem.userName} (${mem.userEmail})؟`)) {
-                                      await removeSuperAdminEmail(mem.userEmail);
-                                      await updateMember(mem.id, { role: 'employee' });
+                                      await rowGuard.run(`super-admin:${mem.userEmail?.trim().toLowerCase()}`, async () => {
+                                        try {
+                                          await removeSuperAdminEmail(mem.userEmail);
+                                          await updateMember(mem.id, { role: 'employee' });
+                                        } catch (err: any) {
+                                          alert(err?.message || 'تعذر تنفيذ العملية');
+                                        }
+                                      });
                                     }
                                   }}
                                   className="p-1.5 text-amber-600 bg-amber-50 hover:bg-rose-50 hover:text-rose-600 rounded-lg transition cursor-pointer border border-amber-200"
@@ -1750,8 +1891,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                                   type="button"
                                   onClick={async () => {
                                     if (window.confirm(`هل أنت متأكد من ترقية ${mem.userName} (${mem.userEmail}) إلى سوبر أدمن للمنصة 👑؟`)) {
-                                      await addSuperAdminEmail(mem.userEmail);
-                                      await updateMember(mem.id, { role: 'super_admin' });
+                                      await rowGuard.run(`super-admin:${mem.userEmail?.trim().toLowerCase()}`, async () => {
+                                        try {
+                                          await addSuperAdminEmail(mem.userEmail);
+                                          await updateMember(mem.id, { role: 'super_admin' });
+                                        } catch (err: any) {
+                                          alert(err?.message || 'تعذر تنفيذ العملية');
+                                        }
+                                      });
                                     }
                                   }}
                                   className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition cursor-pointer"
@@ -2228,7 +2375,16 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between">
                     <button
                       type="button"
-                      onClick={() => togglePaymentAccountStatus(vault.id, !vault.active)}
+                      onClick={async () => {
+                        await rowGuard.run(`toggle-vault:${vault.id}`, async () => {
+                          try {
+                            await togglePaymentAccountStatus(vault.id, !vault.active);
+                          } catch (err: any) {
+                            alert(err?.message || 'تعذر تنفيذ العملية');
+                          }
+                        });
+                      }}
+                      disabled={rowGuard.isPending(`toggle-vault:${vault.id}`)}
                       className={`text-[10px] font-bold px-2 py-0.5 rounded-full cursor-pointer transition ${
                         vault.active ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
                       }`}
@@ -2806,6 +2962,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </button>
                 <button
                   type="submit"
+                  disabled={editOrgGuard.pending}
                   className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs"
                 >
                   حفظ التعديلات
@@ -3483,6 +3640,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </button>
                 <button
                   type="submit"
+                  disabled={isSavingService}
                   className="px-6 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
                 >
                   حفظ البند
@@ -3693,6 +3851,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </button>
                 <button
                   type="submit"
+                  disabled={isSavingVendor}
                   className="px-5 py-2 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs"
                 >
                   حفظ المورد
@@ -3823,6 +3982,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </button>
                 <button
                   type="submit"
+                  disabled={isSavingVault}
                   className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl shadow-xs"
                 >
                   حفظ الخزينة
@@ -3936,6 +4096,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </button>
                 <button
                   type="submit"
+                  disabled={isSavingDept}
                   className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs"
                 >
                   حفظ القسم

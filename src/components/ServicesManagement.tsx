@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from '../utils/validation';
+import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 
 const budgetPeriodLabels: Record<string, string> = {
   monthly: 'شهرياً',
@@ -83,6 +84,8 @@ export const ServicesManagement: React.FC = () => {
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingService, setEditingService] = useState<ServiceCategory | null>(null);
+  const saveGuard = useSubmitGuard();
+  const serviceActions = useKeyedSubmitGuard();
 
   // Form State
   const [selectedOrgIds, setSelectedOrgIds] = useState<string[]>([]);
@@ -121,6 +124,7 @@ export const ServicesManagement: React.FC = () => {
       ? selectedOrgFilter 
       : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (orgList[0]?.id || ''));
     setSelectedOrgIds(defaultOrg ? [defaultOrg] : (orgList.length > 0 ? [orgList[0].id] : []));
+    saveGuard.rotateKey();
     setIsAddModalOpen(true);
   };
 
@@ -155,6 +159,8 @@ export const ServicesManagement: React.FC = () => {
     const chosenVendor = targetVendors.find(v => v.id === vendorId);
     const vendorName = chosenVendor ? chosenVendor.name : undefined;
 
+    await saveGuard.run(async (idempotencyKey) => {
+    try {
     if (editingService) {
       await updateService({
         ...editingService,
@@ -194,10 +200,15 @@ export const ServicesManagement: React.FC = () => {
         costCenter: costCenter.trim() || undefined,
         color,
         iconName: 'Layers',
-      });
+      }, { idempotencyKey });
+      saveGuard.rotateKey();
     }
 
     setIsAddModalOpen(false);
+    } catch (err: any) {
+      alert(err?.message || 'تعذر تنفيذ العملية');
+    }
+    });
   };
 
   return (
@@ -306,7 +317,14 @@ export const ServicesManagement: React.FC = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() => deleteService(srv.id)}
+                      onClick={() => serviceActions.run(`delete:${srv.id}`, async () => {
+                        try {
+                          await deleteService(srv.id);
+                        } catch (err: any) {
+                          alert(err?.message || 'تعذر تنفيذ العملية');
+                        }
+                      })}
+                      disabled={serviceActions.isPending(`delete:${srv.id}`)}
                       className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
                       title="حذف الخدمة"
                     >
@@ -774,6 +792,7 @@ export const ServicesManagement: React.FC = () => {
                 </button>
                 <button
                   type="submit"
+                  disabled={saveGuard.pending}
                   className="px-6 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
                 >
                   حفظ الخدمة

@@ -24,6 +24,7 @@ import {
 import { ExpenseRequest } from '../types';
 import { NewRequestModal } from './NewRequestModal';
 import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
+import { useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 
 interface RequesterTrackerProps {
   onOpenNewRequest: () => void;
@@ -42,6 +43,8 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [previewInvoice, setPreviewInvoice] = useState<InvoiceViewerAttachment | null>(null);
+  // Submit lock + idempotency key per request (scope `reply:${requestId}`)
+  const replyGuard = useKeyedSubmitGuard();
 
   // Strictly filter to personal requests with absolute deduplication (Zero duplicates, Zero data leakage)
   const myRequests = React.useMemo(() => {
@@ -79,12 +82,23 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
     ? myRequests.find(r => r.id === selectedReqId) || filteredRequests[0]
     : filteredRequests[0];
 
-  const handleSendClarification = (e: React.FormEvent) => {
+  const handleSendClarification = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeRequest || !replyText.trim()) return;
 
-    replyClarification(activeRequest.id, replyText);
-    setReplyText('');
+    const requestId = activeRequest.id;
+    const scope = `reply:${requestId}`;
+    await replyGuard.run(scope, async (idempotencyKey) => {
+      try {
+        await replyClarification(requestId, replyText, undefined, { idempotencyKey });
+        replyGuard.rotateKey(scope);
+        setReplyText('');
+      } catch (err: any) {
+        // Keep the text and the idempotency key so the user can retry safely
+        console.error('[RequesterTracker] replyClarification failed:', err);
+        alert(err?.message || 'تعذر تنفيذ العملية');
+      }
+    });
   };
 
   // Financial Metrics for Employee
@@ -604,6 +618,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                     <div className="flex justify-end">
                       <button
                         type="submit"
+                        disabled={replyGuard.isPending(`reply:${activeRequest.id}`)}
                         className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
                       >
                         <Send className="h-3.5 w-3.5" />

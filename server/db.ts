@@ -1,48 +1,82 @@
 import sqlite3 from 'sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const dbPath = path.resolve(__dirname, '../database.sqlite');
+export interface Queryable {
+  run(sql: string, params?: any[]): Promise<{ lastID: number; changes: number }>;
+  all<T = any>(sql: string, params?: any[]): Promise<T[]>;
+  get<T = any>(sql: string, params?: any[]): Promise<T | undefined>;
+}
 
-export const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error('Failed to open database:', err.message);
-  } else {
-    console.log('Connected to SQLite database at:', dbPath);
-  }
-});
+export interface Database extends Queryable {
+  /**
+   * Runs `fn` inside `BEGIN IMMEDIATE … COMMIT` (ROLLBACK on error).
+   *
+   * node-sqlite3 uses ONE connection: without serialization, statements from a
+   * concurrent HTTP request would silently execute inside another request's open
+   * transaction. Every transaction therefore holds an in-process mutex.
+   */
+  transaction<T>(fn: (q: Queryable) => Promise<T>): Promise<T>;
+  /** Serialized read (never interleaves with an open transaction). */
+  read<T>(fn: (q: Queryable) => Promise<T>): Promise<T>;
+  close(): Promise<void>;
+}
 
-export const dbRun = (sql: string, params: any[] = []): Promise<{ lastID: number; changes: number }> => {
+export function openDatabase(filename: string): Promise<Database> {
   return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) reject(err);
-      else resolve({ lastID: this.lastID, changes: this.changes });
+    const raw = new sqlite3.Database(filename, err => {
+      if (err) return reject(err);
+
+      const q: Queryable = {
+        run: (sql, params = []) =>
+          new Promise((res, rej) => {
+            raw.run(sql, params, function (e) {
+              if (e) rej(e);
+              else res({ lastID: this.lastID, changes: this.changes });
+            });
+          }),
+        all: (sql, params = []) =>
+          new Promise((res, rej) => raw.all(sql, params, (e, rows) => (e ? rej(e) : res(rows as any)))),
+        get: (sql, params = []) =>
+          new Promise((res, rej) => raw.get(sql, params, (e, row) => (e ? rej(e) : res(row as any)))),
+      };
+
+      let chain: Promise<unknown> = Promise.resolve();
+      const exclusive = <T>(fn: () => Promise<T>): Promise<T> => {
+        const next = chain.then(fn, fn);
+        chain = next.catch(() => undefined);
+        return next;
+      };
+
+      resolve({
+        ...q,
+        read: fn => exclusive(() => fn(q)),
+        transaction: fn =>
+          exclusive(async () => {
+            await q.run('BEGIN IMMEDIATE');
+            try {
+              const result = await fn(q);
+              await q.run('COMMIT');
+              return result;
+            } catch (e) {
+              await q.run('ROLLBACK').catch(() => undefined);
+              throw e;
+            }
+          }),
+        close: () => new Promise((res, rej) => raw.close(e => (e ? rej(e) : res()))),
+      });
     });
   });
-};
+}
 
-export const dbAll = <T = any>(sql: string, params: any[] = []): Promise<T[]> => {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows as T[]);
-    });
-  });
-};
+const UNIQUE_INDEXES: Array<[string, string]> = [
+  ['ux_requests_number', 'CREATE UNIQUE INDEX IF NOT EXISTS ux_requests_number ON requests(requestNumber)'],
+  ['ux_org_code', 'CREATE UNIQUE INDEX IF NOT EXISTS ux_org_code ON organizations(code COLLATE NOCASE)'],
+  ['ux_member_org_email', 'CREATE UNIQUE INDEX IF NOT EXISTS ux_member_org_email ON members(orgId, userEmail COLLATE NOCASE)'],
+  ['ux_service_org_code', 'CREATE UNIQUE INDEX IF NOT EXISTS ux_service_org_code ON services(orgId, code COLLATE NOCASE)'],
+  ['ux_provider_org_name', 'CREATE UNIQUE INDEX IF NOT EXISTS ux_provider_org_name ON providers(orgId, name COLLATE NOCASE)'],
+];
 
-export const dbGet = <T = any>(sql: string, params: any[] = []): Promise<T | undefined> => {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) reject(err);
-      else resolve(row as T);
-    });
-  });
-};
-
-export const initDB = async () => {
-  await dbRun(`
+export const initDB = async (db: Database) => {
+  await db.run(`
     CREATE TABLE IF NOT EXISTS organizations (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -54,7 +88,7 @@ export const initDB = async () => {
     )
   `);
 
-  await dbRun(`
+  await db.run(`
     CREATE TABLE IF NOT EXISTS members (
       id TEXT PRIMARY KEY,
       orgId TEXT NOT NULL,
@@ -69,7 +103,7 @@ export const initDB = async () => {
     )
   `);
 
-  await dbRun(`
+  await db.run(`
     CREATE TABLE IF NOT EXISTS services (
       id TEXT PRIMARY KEY,
       orgId TEXT NOT NULL,
@@ -83,7 +117,7 @@ export const initDB = async () => {
     )
   `);
 
-  await dbRun(`
+  await db.run(`
     CREATE TABLE IF NOT EXISTS providers (
       id TEXT PRIMARY KEY,
       orgId TEXT NOT NULL,
@@ -105,7 +139,7 @@ export const initDB = async () => {
     )
   `);
 
-  await dbRun(`
+  await db.run(`
     CREATE TABLE IF NOT EXISTS requests (
       id TEXT PRIMARY KEY,
       requestNumber TEXT NOT NULL,
@@ -134,5 +168,33 @@ export const initDB = async () => {
     )
   `);
 
-  console.log('Database tables verified and initialized successfully.');
+  // Atomic, transactional sequences (replaces SELECT COUNT(*) + 1).
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS sequences (
+      name TEXT PRIMARY KEY,
+      value INTEGER NOT NULL
+    )
+  `);
+
+  // Stored responses for Idempotency-Key replays.
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS idempotency_keys (
+      key TEXT PRIMARY KEY,
+      method TEXT NOT NULL,
+      path TEXT NOT NULL,
+      requestHash TEXT NOT NULL,
+      statusCode INTEGER NOT NULL,
+      responseBody TEXT NOT NULL,
+      createdAt TEXT NOT NULL
+    )
+  `);
+
+  for (const [name, sql] of UNIQUE_INDEXES) {
+    try {
+      await db.run(sql);
+    } catch (err: any) {
+      // Existing duplicate rows prevent the index; report instead of refusing to start.
+      console.warn(`[DB] Could not create unique index ${name} (existing duplicates must be cleaned first): ${err.message}`);
+    }
+  }
 };

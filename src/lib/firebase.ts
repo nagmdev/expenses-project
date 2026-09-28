@@ -16,6 +16,9 @@ import {
 } from 'firebase/auth';
 import {
   getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   collection,
   doc,
   setDoc,
@@ -27,6 +30,8 @@ import {
   onSnapshot,
   query,
   where,
+  or,
+  orderBy,
   limit,
   runTransaction,
   type Firestore,
@@ -183,7 +188,16 @@ export function initFirebase(): { app: FirebaseApp | null; db: Firestore | null;
     } else {
       appInstance = initializeApp(config as FirebaseOptions);
     }
-    dbInstance = getFirestore(appInstance);
+    // Firestore's own IndexedDB cache replaces localStorage as the offline / fast-start
+    // cache: it is transactional, consistent with the server and safe across tabs.
+    try {
+      dbInstance = initializeFirestore(appInstance, {
+        localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+      });
+    } catch {
+      // Already initialized for this app (e.g. HMR) or persistence unavailable.
+      dbInstance = getFirestore(appInstance);
+    }
     try {
       storageInstance = getStorage(appInstance);
     } catch (storageErr) {
@@ -628,6 +642,9 @@ export {
   onSnapshot,
   query,
   where,
+  or,
+  orderBy,
+  limit,
   type Firestore,
   type DocumentData,
   type Unsubscribe,

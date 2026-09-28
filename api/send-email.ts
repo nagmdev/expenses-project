@@ -5,6 +5,39 @@
  * 2. Brevo API (Free 300 emails/day)
  * 3. Fallback and direct health check
  */
+// Per-instance idempotency cache. The authoritative exactly-once guard is the
+// transactional outbox claim in Firestore; this cache additionally absorbs retries
+// that hit the same warm instance, and the key is forwarded to the provider.
+const IDEMPOTENCY_TTL_MS = 10 * 60_000;
+const PROVIDER_TIMEOUT_MS = 10_000;
+const recentDeliveries = new Map<string, { at: number; body: any }>();
+
+function rememberDelivery(key: string | undefined, body: any) {
+  if (!key) return;
+  const now = Date.now();
+  for (const [k, v] of recentDeliveries) {
+    if (now - v.at > IDEMPOTENCY_TTL_MS) recentDeliveries.delete(k);
+  }
+  recentDeliveries.set(key, { at: now, body });
+}
+
+async function fetchWithTimeout(url: string, init: any, timeoutMs = PROVIDER_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      const timeoutErr: any = new Error(`Provider timeout after ${timeoutMs}ms`);
+      timeoutErr.timeout = true;
+      throw timeoutErr;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export default async function handler(req: any, res: any) {
   // Production-grade CORS configuration
   const origin = req.headers.origin || '';
@@ -23,7 +56,7 @@ export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, Idempotency-Key'
   );
 
   if (req.method === 'OPTIONS') {
@@ -63,6 +96,25 @@ export default async function handler(req: any, res: any) {
       replyTo = 'awadhsaudi2030@gmail.com',
       provider = 'auto',
     } = parsedBody;
+
+    const headerKey = req.headers['idempotency-key'];
+    const idempotencyKey: string | undefined =
+      (typeof headerKey === 'string' && headerKey) || (typeof parsedBody.idempotencyKey === 'string' && parsedBody.idempotencyKey) || undefined;
+    if (idempotencyKey && !/^[A-Za-z0-9:_@.\-]{8,300}$/.test(idempotencyKey)) {
+      return res.status(400).json({ success: false, error: 'Invalid Idempotency-Key' });
+    }
+    const cached = idempotencyKey ? recentDeliveries.get(idempotencyKey) : undefined;
+    if (cached && Date.now() - cached.at <= IDEMPOTENCY_TTL_MS) {
+      return res.status(200).json({ ...cached.body, deduplicated: true });
+    }
+    // Deterministic Message-ID: mail clients collapse copies of the same message.
+    const messageId = idempotencyKey
+      ? `<${idempotencyKey.replace(/[^A-Za-z0-9._-]/g, '.').slice(0, 180)}@masrofy.mail>`
+      : undefined;
+    const sendOk = (body: any) => {
+      rememberDelivery(idempotencyKey, body);
+      return res.status(200).json(body);
+    };
 
     if (!to || (Array.isArray(to) && to.length === 0)) {
       return res.status(400).json({ error: 'Missing required recipient: to' });
@@ -126,6 +178,9 @@ export default async function handler(req: any, res: any) {
             user: effectiveSender,
             pass: cleanPassword,
           },
+          connectionTimeout: PROVIDER_TIMEOUT_MS,
+          greetingTimeout: PROVIDER_TIMEOUT_MS,
+          socketTimeout: PROVIDER_TIMEOUT_MS + 5_000,
         });
 
         const info = await transporter.sendMail({
@@ -135,9 +190,10 @@ export default async function handler(req: any, res: any) {
           subject,
           html,
           text: text || undefined,
+          messageId,
         });
 
-        return res.status(200).json({
+        return sendOk({
           success: true,
           provider: 'gmail',
           id: info.messageId,
@@ -159,7 +215,7 @@ export default async function handler(req: any, res: any) {
     // Provider 1: Resend
     // -------------------------------------------------------------
     if (targetProvider === 'resend') {
-      const keyToUse = activeResendKey || apiKey;
+      const keyToUse = activeResendKey;
       if (!keyToUse) {
         return res.status(200).json({
           success: false,
@@ -175,11 +231,13 @@ export default async function handler(req: any, res: any) {
       const effectiveReplyTo = replyTo || effectiveSender;
       const fromAddress = `${senderName} (${effectiveSender}) <onboarding@resend.dev>`;
 
-      const resendRes = await fetch('https://api.resend.com/emails', {
+      const resendRes = await fetchWithTimeout('https://api.resend.com/emails', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${keyToUse.trim()}`,
           'Content-Type': 'application/json',
+          // Resend de-duplicates requests carrying the same key for 24h.
+          ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey.slice(0, 256) } : {}),
         },
         body: JSON.stringify({
           from: fromAddress,
@@ -208,7 +266,7 @@ export default async function handler(req: any, res: any) {
         });
       }
 
-      return res.status(200).json({
+      return sendOk({
         success: true,
         provider: 'resend',
         id: resendData.id,
@@ -221,7 +279,7 @@ export default async function handler(req: any, res: any) {
     // Provider 2: Brevo (Sendinblue)
     // -------------------------------------------------------------
     if (targetProvider === 'brevo') {
-      const keyToUse = activeBrevoKey || apiKey;
+      const keyToUse = activeBrevoKey;
       if (!keyToUse) {
         return res.status(200).json({
           success: false,
@@ -235,7 +293,7 @@ export default async function handler(req: any, res: any) {
       const effectiveSender = senderEmail || 'awadhsaudi2030@gmail.com';
       const effectiveReplyTo = replyTo || effectiveSender;
 
-      const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+      const brevoRes = await fetchWithTimeout('https://api.brevo.com/v3/smtp/email', {
         method: 'POST',
         headers: {
           'api-key': keyToUse.trim(),
@@ -249,6 +307,7 @@ export default async function handler(req: any, res: any) {
           htmlContent: html,
           textContent: text || undefined,
           replyTo: { email: effectiveReplyTo },
+          ...(messageId ? { headers: { 'Message-Id': messageId, 'X-Idempotency-Key': idempotencyKey } } : {}),
         }),
       });
 
@@ -264,7 +323,7 @@ export default async function handler(req: any, res: any) {
         });
       }
 
-      return res.status(200).json({
+      return sendOk({
         success: true,
         provider: 'brevo',
         id: brevoData.messageId,
@@ -283,6 +342,9 @@ export default async function handler(req: any, res: any) {
 
   } catch (err: any) {
     console.error('[Vercel Serverless Email] Exception:', err);
+    if (err?.timeout) {
+      return res.status(504).json({ success: false, error: 'انتهت مهلة الاتصال بمزود البريد. ستتم إعادة المحاولة تلقائياً.' });
+    }
     return res.status(500).json({
       success: false,
       error: err?.message || 'Internal Server Error',
