@@ -12,6 +12,7 @@ import {
   EmailAuthProvider,
   signOut,
   onAuthStateChanged,
+  sendEmailVerification,
   type User as FirebaseUser,
 } from 'firebase/auth';
 import {
@@ -330,6 +331,28 @@ export async function logoutUser(): Promise<void> {
  */
 export function subscribeToAuth(callback: (user: FirebaseUser | null) => void) {
   return onAuthStateChanged(auth, callback);
+}
+
+/**
+ * Send Firebase's email-verification link to the signed-in user.
+ * The security rules only honour email-based grants (e.g. built-in super admins)
+ * for verified emails, because anyone can register an unverified email/password account.
+ */
+export async function sendVerificationEmailToCurrentUser(): Promise<void> {
+  if (!auth.currentUser) throw new Error('لا يوجد مستخدم مسجل حالياً.');
+  await sendEmailVerification(auth.currentUser);
+}
+
+/**
+ * Re-read the signed-in user and force a fresh ID token, so a just-verified email
+ * (email_verified=true) reaches the security rules without signing out.
+ * Returns the refreshed emailVerified flag.
+ */
+export async function refreshCurrentUserToken(): Promise<boolean> {
+  if (!auth.currentUser) return false;
+  await auth.currentUser.reload();
+  await auth.currentUser.getIdToken(true);
+  return Boolean(auth.currentUser.emailVerified);
 }
 
 export type { FirebaseUser };

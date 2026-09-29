@@ -5,7 +5,7 @@ import { Header } from './components/Header';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { ExpenseRequest, SUPPORTED_CURRENCIES } from './types';
-import { Building2, X, AlertTriangle, Loader2, Wallet, Ban } from 'lucide-react';
+import { Building2, X, AlertTriangle, Loader2, Wallet, Ban, ShieldAlert, MailCheck, RefreshCw, Copy } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
 import { useSubmitGuard } from './hooks/useSubmitGuard';
 
@@ -56,6 +56,10 @@ const MainApp: React.FC = () => {
     clearFirebaseError,
     forceRefreshUserState,
     isAccountSuspended,
+    superAdminNeedsVerification,
+    sendSuperAdminVerificationEmail,
+    recheckSuperAdminVerification,
+    permissionDeniedSources,
   } = useApp();
 
   const [isNewRequestModalOpen, setIsNewRequestModalOpen] = useState(false);
@@ -65,6 +69,24 @@ const MainApp: React.FC = () => {
   
   // Status check state for pending assignment screen
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
+
+  // Super-admin email verification (the security rules only honour verified emails)
+  const verifyGuard = useSubmitGuard();
+  const [verifyMessage, setVerifyMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const handleSendVerification = () => {
+    void verifyGuard.run(async () => {
+      const res = await sendSuperAdminVerificationEmail();
+      setVerifyMessage({ ok: res.success, text: res.message });
+    });
+  };
+  const handleRecheckVerification = () => {
+    void verifyGuard.run(async () => {
+      const verified = await recheckSuperAdminVerification();
+      setVerifyMessage(verified
+        ? { ok: true, text: 'تم تفعيل البريد بنجاح. جاري تحميل جميع الشركات والبيانات...' }
+        : { ok: false, text: 'البريد لم يُفعَّل بعد. افتح رابط التفعيل في بريدك أولاً ثم أعد المحاولة.' });
+    });
+  };
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   // Manual "check my access now": re-reads the user's profile + memberships once.
@@ -184,6 +206,16 @@ const MainApp: React.FC = () => {
         </div>
       )}
 
+      {/* Refused reads are reported, never shown as "no data" */}
+      {permissionDeniedSources.length > 0 && !superAdminNeedsVerification && (
+        <div className="bg-rose-50 border-b border-rose-200 px-4 py-2.5 text-xs text-rose-900 flex items-center gap-2 shadow-xs">
+          <ShieldAlert className="h-4 w-4 text-rose-600 shrink-0" />
+          <span className="font-semibold">
+            رفضت قاعدة البيانات عرض: {permissionDeniedSources.join('، ')} — البيانات موجودة ولم تُحذف، لكن حسابك لا يملك صلاحية قراءتها حالياً. تواصل مع المشرف العام للمنصة.
+          </span>
+        </div>
+      )}
+
       {/* Main Layout Container: Right Sidebar + Main Content (in RTL layout) */}
       <div className="flex-1 flex flex-row w-full min-h-[calc(100vh-4.5rem)] relative">
         {/* Right Navigation Sidebar */}
@@ -194,7 +226,59 @@ const MainApp: React.FC = () => {
 
         {/* Main Content Area */}
         <main className="flex-1 min-w-0 px-4 sm:px-6 lg:px-8 py-6 max-w-7xl mx-auto">
-          {!loading && organizations.length === 0 && currentRole === 'super_admin' && activeTab === 'dashboard' ? (
+          {superAdminNeedsVerification ? (
+            <div className="bg-white rounded-3xl border border-amber-200 p-8 max-w-xl mx-auto text-center shadow-md my-10 animate-in fade-in duration-200">
+              <div className="h-16 w-16 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto mb-4 border border-amber-200">
+                <ShieldAlert className="h-8 w-8" />
+              </div>
+              <h2 className="text-lg font-bold text-slate-900">تفعيل صلاحية المشرف العام للمنصة</h2>
+              <p className="text-xs text-slate-600 mt-3 leading-relaxed">
+                حسابك <strong dir="ltr">{currentUser.email}</strong> مسجّل كمشرف عام، لكن بريدك الإلكتروني غير مُفعَّل (غير موثَّق) لدى Firebase.
+                قواعد الأمان لا تمنح صلاحيات المشرف العام إلا لبريد مُفعَّل، حتى لا يستطيع أي شخص إنشاء حساب بنفس البريد وانتحال صلاحياتك.
+              </p>
+              <p className="text-xs font-bold text-emerald-700 mt-3 leading-relaxed">
+                الشركات والمستخدمون وكل البيانات موجودة كما هي ولم يُحذف منها شيء — فقط لن تظهر حتى يتم تفعيل البريد.
+              </p>
+              <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-3">
+                <button
+                  type="button"
+                  disabled={verifyGuard.pending}
+                  onClick={handleSendVerification}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition cursor-pointer flex items-center gap-2 shadow-sm"
+                >
+                  <MailCheck className="h-4 w-4" />
+                  إرسال رابط التفعيل إلى بريدي
+                </button>
+                <button
+                  type="button"
+                  disabled={verifyGuard.pending}
+                  onClick={handleRecheckVerification}
+                  className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition cursor-pointer flex items-center gap-2 shadow-sm"
+                >
+                  {verifyGuard.pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  فعّلت البريد — تحقق الآن
+                </button>
+              </div>
+              {verifyMessage && (
+                <p className={`text-xs mt-4 font-semibold ${verifyMessage.ok ? 'text-emerald-700' : 'text-rose-600'}`}>{verifyMessage.text}</p>
+              )}
+              <div className="mt-6 text-[11px] text-slate-500 leading-relaxed bg-slate-50 border border-slate-200 rounded-xl p-3 text-right">
+                بديل فوري بدون بريد: من Firebase Console ← Firestore ← مجموعة <code>super_admins</code> أضف مستنداً معرّفه (Document ID) هو:
+                <span className="flex items-center gap-2 mt-1.5">
+                  <code dir="ltr" className="bg-white border border-slate-200 rounded px-2 py-0.5 select-all">{currentUser.id}</code>
+                  <button
+                    type="button"
+                    onClick={() => { void navigator.clipboard?.writeText(currentUser.id); }}
+                    className="text-slate-500 hover:text-slate-800 cursor-pointer"
+                    title="نسخ"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </button>
+                </span>
+                مع الحقول: <code>email</code> و <code>role = super_admin</code>، ثم اضغط «تحقق الآن».
+              </div>
+            </div>
+          ) : !loading && organizations.length === 0 && currentRole === 'super_admin' && activeTab === 'dashboard' ? (
             <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-xl mx-auto text-center shadow-md my-8">
               <div className="h-16 w-16 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto mb-4">
                 <Building2 className="h-8 w-8" />

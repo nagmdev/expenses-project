@@ -20,10 +20,16 @@
 - Membership self-updates can no longer change `userId`, `userEmail` or `active`
   (role/orgId were already locked).
 - `super_admins`: only super admins can list it. Anyone can read their own record.
-- Email-based super-admin checks (hard-coded list, `super_admins/{email}`,
-  `*@tieapps-verify.com`) now require `email_verified`. Anyone could previously
-  register an unverified email/password account at `anything@tieapps-verify.com` and
-  become super admin.
+- Email-based super-admin checks (hard-coded list, `super_admins/{email}`) now require
+  `email_verified`. The `*@tieapps-verify.com` wildcard grant was removed entirely
+  (anyone could register an unverified account on that domain and become super admin).
+- **Single platform owner.** The only built-in super admin is `mahmoud@tieapps.com`
+  (`builtInSuperAdmins()` in the rules = `DEFAULT_SUPER_ADMINS` in the app; the
+  `VITE_SUPER_ADMIN_EMAILS` env override was removed because the rules cannot see it).
+  Any other super admin must be a `super_admins/{uid}` or `super_admins/{email}`
+  record created by a super admin. The app shows a verification screen (send
+  verification link / re-check) when the owner's email is not verified yet, and a red
+  banner whenever the database refuses a read, instead of empty lists.
 
 ### Email relay
 
@@ -78,9 +84,13 @@
    `role`. Remove `role`/`orgId` from any profile without one, including members
    removed in the past. Also review `auditLogs` and `requests` changes made by those
    UIDs.
-3. **Rotate the password of the super-admin test account** (`awadhsaudi2030@gmail.com`).
+3. **Rotate the password of the former super-admin test account** (`awadhsaudi2030@gmail.com`).
    Its password was committed in `scripts/*.cjs`. The scripts now read
    `E2E_SUPER_ADMIN_EMAIL` / `E2E_SUPER_ADMIN_PASSWORD` from the environment.
+4. **Remove leftover super-admin records.** In Firestore → `super_admins`, delete every
+   document that is not the owner (by email id or by UID). Records there still grant
+   super admin. The app corrects `system_settings/notification_recipients` to the
+   current super admins the next time the owner opens it.
 
 ## Deploy (order matters)
 

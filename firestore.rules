@@ -23,9 +23,11 @@ service cloud.firestore {
       return request.auth.token.email.lower();
     }
 
-    // Keep in sync with DEFAULT_SUPER_ADMINS in src/context/AppContext.tsx.
+    // The ONLY built-in platform owner. Keep identical to DEFAULT_SUPER_ADMINS in
+    // src/context/AppContext.tsx. Other super admins exist only as super_admins/{uid}
+    // or super_admins/{verified email} records created by a super admin.
     function builtInSuperAdmins() {
-      return ['mahmoud@tieapps.com', 'awadhsaudi2030@gmail.com', 'h.moubarak@tieapps.com', 'marwanagib813@gmail.com'];
+      return ['mahmoud@tieapps.com'];
     }
 
     function isSuperAdmin() {
@@ -33,8 +35,7 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/super_admins/$(request.auth.uid)) ||
         (hasVerifiedEmail() && (
           exists(/databases/$(database)/documents/super_admins/$(verifiedEmail())) ||
-          verifiedEmail() in builtInSuperAdmins() ||
-          verifiedEmail().matches('.*@tieapps-verify[.]com')
+          verifiedEmail() in builtInSuperAdmins()
         ))
       );
     }

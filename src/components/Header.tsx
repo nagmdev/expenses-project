@@ -101,7 +101,7 @@ export const Header: React.FC<HeaderProps> = ({
                   <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
                   <div className="text-center">
                     <span className="block font-bold text-xs text-slate-900 leading-tight">
-                      {activeOrgId === 'all' ? 'جميع المؤسسات' : (activeOrg?.name || 'Tie-Tanta')}
+                      {activeOrgId === 'all' ? 'جميع المؤسسات' : (activeOrg?.name || 'لم يتم تحميل الشركة')}
                     </span>
                     <span className="block text-[10px] text-slate-400 font-medium leading-none mt-0.5">
                       اضغط لتبديل المؤسسة

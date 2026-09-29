@@ -52,6 +52,8 @@ import {
   sendPasswordReset,
   adminCreateUserAccount,
   subscribeToAuth,
+  sendVerificationEmailToCurrentUser,
+  refreshCurrentUserToken,
   purgeSampleDataFromFirestore,
   deleteFirestoreDoc,
   sanitizeForFirestore,
@@ -191,6 +193,25 @@ try {
   keysToRemove.forEach(k => localStorage.removeItem(k));
 } catch {}
 
+const LISTENER_LABELS: Record<string, string> = {
+  Organizations: 'الشركات',
+  Organization: 'بيانات الشركة',
+  Members: 'الموظفين',
+  Services: 'بنود الصرف',
+  Providers: 'الموردين',
+  Departments: 'الأقسام',
+  Requests: 'طلبات الصرف',
+  'Requests (fallback)': 'طلبات الصرف',
+  'Visa Requests': 'طلبات التأشيرات',
+  'Payment Accounts': 'الخزائن والحسابات',
+  'Account Transactions': 'الحركات المالية',
+  Custodies: 'العهد',
+  'Custody Settlements': 'تسويات العهد',
+  'Audit Logs': 'سجل التدقيق',
+  Outbox: 'سجل الإشعارات',
+  'Email Logs': 'سجل البريد القديم',
+};
+
 const DUMMY_IDS = new Set([
   'org-ofq', 'org-rwd', 'mem-1', 'mem-2', 'mem-3',
   'srv-cloud', 'srv-software', 'srv-hardware', 'srv-legal', 'srv-mkt', 'srv-travel',
@@ -198,18 +219,11 @@ const DUMMY_IDS = new Set([
   'req-101', 'req-102', 'req-103'
 ]);
 
-const DEFAULT_SUPER_ADMINS = [
-  'mahmoud@tieapps.com',
-  'awadhsaudi2030@gmail.com',
-  'h.moubarak@tieapps.com',
-  'marwanagib813@gmail.com',
-];
-
-const envSuperAdmins = (): string[] =>
-  String(import.meta.env.VITE_SUPER_ADMIN_EMAILS || '')
-    .split(',')
-    .map((e: string) => e.trim().toLowerCase())
-    .filter(Boolean);
+// The ONLY built-in platform owner. Must stay identical to builtInSuperAdmins() in
+// firestore.rules: the UI must never consider someone a super admin that the rules
+// do not (that mismatch makes every list come back empty). Additional super admins
+// can only be granted from the app (super_admins collection), never from env/config.
+const DEFAULT_SUPER_ADMINS = ['mahmoud@tieapps.com'];
 
 const readPref = (key: string, fallback = '') => {
   try {
@@ -324,6 +338,16 @@ interface AppContextType {
   forceRefreshUserState: () => Promise<boolean>;
   /** The account is suspended (active: false) in its org; the security rules deny it all org data. */
   isAccountSuspended: boolean;
+  /**
+   * The signed-in email is a listed super admin, but the security rules do not grant
+   * it (email not verified and no super_admins/{uid} record). Data is NOT gone — the
+   * database refuses to serve it until the email is verified.
+   */
+  superAdminNeedsVerification: boolean;
+  sendSuperAdminVerificationEmail: () => Promise<{ success: boolean; message: string }>;
+  recheckSuperAdminVerification: () => Promise<boolean>;
+  /** Data sources the database refused to serve (permission-denied), shown to the user instead of silently empty lists. */
+  permissionDeniedSources: string[];
 
   // Auth & Roles
   superAdminEmails: string[];
@@ -529,6 +553,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isFirebaseModalOpen, setIsFirebaseModalOpen] = useState(false);
   const [firebaseError, setFirebaseError] = useState<string | null>(null);
   const [firebaseSyncCounter, setFirebaseSyncCounter] = useState(0);
+  // Mirrors what the security rules can see about super-admin status.
+  const [emailVerified, setEmailVerified] = useState(false);
+  const [hasUidSuperAdminRecord, setHasUidSuperAdminRecord] = useState(false);
+  const [permissionDeniedSources, setPermissionDeniedSources] = useState<string[]>([]);
 
   const clearFirebaseError = () => setFirebaseError(null);
   const openFirebaseModal = () => setIsFirebaseModalOpen(true);
@@ -551,6 +579,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     const unsubscribe = subscribeToAuth(user => {
       setFirebaseUser(user);
+      setEmailVerified(Boolean(user?.emailVerified));
       setAuthLoading(false);
     });
     return () => {
@@ -559,7 +588,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   const [superAdminEmails, setSuperAdminEmails] = useState<string[]>(() =>
-    Array.from(new Set([...DEFAULT_SUPER_ADMINS, ...envSuperAdmins()]))
+    Array.from(new Set([...DEFAULT_SUPER_ADMINS]))
   );
 
   const [userDocProfile, setUserDocProfile] = useState<{
@@ -680,6 +709,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const { db } = initFirebase();
     if (!db || !firebaseUser) {
       setUserDocProfile(null);
+      setHasUidSuperAdminRecord(false);
       setMyMemberships([]);
       setUserDocLoaded(false);
       setMembershipsLoaded(false);
@@ -688,9 +718,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const unsubs: Array<() => void> = [];
 
+    // UID-keyed super-admin record: the rules honour it even without a verified email.
+    unsubs.push(onSnapshot(doc(db, 'super_admins', firebaseUser.uid), snap => {
+      setHasUidSuperAdminRecord(snap.exists());
+    }, err => {
+      console.warn('[Firebase] Own super-admin record:', err?.message || err);
+      setHasUidSuperAdminRecord(false);
+    }));
+
     unsubs.push(onSnapshot(collection(db, 'super_admins'), snapshot => {
       const dbAdmins = snapshot.docs.map(d => (d.data().email || d.id || '').toLowerCase().trim()).filter(Boolean);
-      setSuperAdminEmails(Array.from(new Set([...DEFAULT_SUPER_ADMINS, ...envSuperAdmins(), ...dbAdmins])));
+      setSuperAdminEmails(Array.from(new Set([...DEFAULT_SUPER_ADMINS, ...dbAdmins])));
     }, err => console.warn('[Firebase] Super admins listener:', err?.message || err)));
 
     unsubs.push(onSnapshot(doc(db, 'users', firebaseUser.uid), docSnap => {
@@ -764,10 +802,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return [...pool].sort((a, b) => (rolePriority[b.role] || 0) - (rolePriority[a.role] || 0))[0];
   }, [firebaseUser, userEmail, myMemberships]);
 
-  const isSuperAdmin = useMemo(() => {
+  // The email is on the super-admin list (built-in, env or super_admins collection).
+  const isListedSuperAdmin = useMemo(() => {
     if (!userEmail) return false;
     return superAdminEmails.some(e => e.trim().toLowerCase() === userEmail);
   }, [userEmail, superAdminEmails]);
+
+  // Super admin exactly as firestore.rules sees it: a super_admins/{uid} record, or a
+  // listed email that Firebase has VERIFIED. Treating an unverified listed email as
+  // super admin made the UI subscribe to every company while the database refused
+  // all of it — every list came back empty and the data looked deleted.
+  const isSuperAdmin = hasUidSuperAdminRecord || (isListedSuperAdmin && emailVerified);
+  const superAdminNeedsVerification = Boolean(firebaseUser) && isListedSuperAdmin && !isSuperAdmin;
 
   // Suspended accounts (active: false) get no org data under firestore.rules; the UI
   // says so instead of showing an empty or "awaiting assignment" screen.
@@ -808,11 +854,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!firebaseUser) {
       return { id: 'guest', name: 'زائر غير مسجل', email: '', role: 'employee' };
     }
-    const defaultAdminName = userEmail === 'mahmoud@tieapps.com'
-      ? 'محمود'
-      : userEmail === 'h.moubarak@tieapps.com'
-      ? 'حسين مبارك'
-      : userEmail.split('@')[0];
+    const defaultAdminName = userEmail === 'mahmoud@tieapps.com' ? 'محمود' : userEmail.split('@')[0];
 
     return {
       id: firebaseUser.uid,
@@ -820,7 +862,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       email: firebaseUser.email || userDocProfile?.email || userMemberRecord?.userEmail || '',
       role: resolvedRole,
       avatar: firebaseUser.photoURL || undefined,
-      phone: userDocProfile?.phone || userMemberRecord?.phone || (userEmail === 'h.moubarak@tieapps.com' ? '01117333908' : '') || firebaseUser.phoneNumber || '',
+      phone: userDocProfile?.phone || userMemberRecord?.phone || firebaseUser.phoneNumber || '',
       orgId: effectiveOrgId,
       instapay: userDocProfile?.instapay || userMemberRecord?.instapay || '',
       wallet: userDocProfile?.wallet || userMemberRecord?.wallet || '',
@@ -1021,6 +1063,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setIsFirebaseConnected(true);
     setFirebaseError(null);
+    setPermissionDeniedSources([]);
     // Legacy one-time cleanup (idempotent deletes of known demo ids); only super admins may delete.
     if (isSuperAdmin) purgeSampleDataFromFirestore().catch(() => {});
 
@@ -1029,6 +1072,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const handleListenerError = (name: string) => (err: any) => {
       console.warn(`[Firebase] ${name} listener:`, err?.message || err);
+      if (err?.code === 'permission-denied') {
+        // Never let a refused read look like "no data": tell the user what was refused.
+        const label = LISTENER_LABELS[name] || name;
+        setPermissionDeniedSources(prev => (prev.includes(label) ? prev : [...prev, label]));
+      }
       if (err?.code === 'unavailable') {
         setIsFirebaseConnected(false);
         setFirebaseError('تعذر الاتصال بقاعدة البيانات. يرجى التحقق من اتصال الإنترنت.');
@@ -1320,19 +1368,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [firebaseUser, isSuperAdmin, resolvedRole, effectiveOrgId, membersSnapshotScope, rawOrganizations, rawMembers]);
 
+  // The platform recipient list must equal the CURRENT super admins (built-in + super_admins
+  // collection). It is created when missing and also corrected once per session when it
+  // still contains removed admins, so a revoked admin stops receiving every org's
+  // notifications. Idempotent: writes only when the stored list differs.
   const platformRecipientsBackfillRef = useRef(false);
   useEffect(() => {
-    if (!isSuperAdmin || !platformRecipients.loaded || platformRecipients.emails || platformRecipientsBackfillRef.current) return;
+    if (!isSuperAdmin || !platformRecipients.loaded || platformRecipientsBackfillRef.current) return;
     const db = getDb();
     if (!db) return;
     platformRecipientsBackfillRef.current = true;
     (async () => {
       const snap = await getDocs(collection(db, 'super_admins'));
       const emails = Array.from(new Set(
-        [...DEFAULT_SUPER_ADMINS, ...envSuperAdmins(), ...snap.docs.map(d => String(d.data().email || d.id))].map(normalizeEmail)
+        [...DEFAULT_SUPER_ADMINS, ...snap.docs.map(d => String(d.data().email || d.id))].map(normalizeEmail)
       )).filter(e => e.includes('@')).sort();
+      const sameList = (stored: unknown) =>
+        Array.isArray(stored) &&
+        stored.length === emails.length &&
+        [...stored].map(e => normalizeEmail(String(e))).sort().every((e, i) => e === emails[i]);
       await getStore().runTransaction(async tx => {
-        if (await tx.get('system_settings', 'notification_recipients')) return;
+        const current = await tx.get<{ emails?: string[] }>('system_settings', 'notification_recipients');
+        if (current && sameList(current.emails)) return;
         tx.set('system_settings', 'notification_recipients', { emails, updatedAt: new Date().toISOString() });
       });
     })().catch(err => {
@@ -1349,8 +1406,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const orgById = (orgId?: string) => rawOrganizations.find(o => o.id === orgId);
 
   // Admin-facing notifications may only address what firestore.rules → outbox accepts:
-  // the org's notificationRecipients, the platform list and the built-in super admins
-  // (which include the system inbox, awadhsaudi2030@gmail.com).
+  // the org's notificationRecipients, the platform list and the built-in super admin.
   const adminRecipientsFor = (orgId: string) =>
     Array.from(new Set([
       ...(orgById(orgId)?.notificationRecipients || []),
@@ -2211,6 +2267,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const handleResetPassword = async (email: string) => sendPasswordReset(email);
 
+  const sendSuperAdminVerificationEmail = async (): Promise<{ success: boolean; message: string }> => {
+    try {
+      await singleFlight('verifyEmail', () => sendVerificationEmailToCurrentUser());
+      return { success: true, message: `تم إرسال رابط التفعيل إلى ${firebaseUser?.email || 'بريدك'}. افتح الرسالة واضغط الرابط، ثم ارجع واضغط "تحقق الآن".` };
+    } catch (err: any) {
+      if (err?.code === 'auth/too-many-requests') {
+        return { success: false, message: 'تم إرسال رابط مؤخراً. انتظر دقائق قليلة ثم أعد المحاولة، وتحقق من مجلد الرسائل غير المرغوب فيها (Spam).' };
+      }
+      return { success: false, message: err?.message || 'تعذر إرسال رابط التفعيل.' };
+    }
+  };
+
+  /** Pick up a just-verified email without signing out, then resubscribe every listener. */
+  const recheckSuperAdminVerification = async (): Promise<boolean> => {
+    const verified = await refreshCurrentUserToken().catch(() => false);
+    setEmailVerified(verified);
+    setFirebaseSyncCounter(prev => prev + 1);
+    return verified;
+  };
+
   const handleLogoutUser = async () => {
     await logoutUser();
     setFirebaseUser(null);
@@ -2292,6 +2368,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         effectiveOrgId,
         forceRefreshUserState,
         isAccountSuspended,
+        superAdminNeedsVerification,
+        sendSuperAdminVerificationEmail,
+        recheckSuperAdminVerification,
+        permissionDeniedSources,
         users,
         currentUser,
         firebaseUser,
