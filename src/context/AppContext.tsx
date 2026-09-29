@@ -180,18 +180,12 @@ const LEGACY_BUSINESS_KEYS = [
   'expenses_super_admin_emails_v3',
 ];
 
-// One-time cleanup of the old localStorage "database" (stale financial data must not
-// linger on shared machines or be resurrected into the UI).
-try {
-  const keysToRemove: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (!k) continue;
-    if (LEGACY_BUSINESS_KEYS.includes(k)) keysToRemove.push(k);
-    else if ((k.startsWith('expenses_') || k.includes('ofq')) && !k.endsWith('_v3')) keysToRemove.push(k);
-  }
-  keysToRemove.forEach(k => localStorage.removeItem(k));
-} catch {}
+// The old localStorage "database" (LEGACY_BUSINESS_KEYS) is NEVER deleted automatically.
+// The previous version saved writes locally first and only logged Firestore errors, so
+// some records (all visa requests, departments created by org admins, edits the old rules
+// rejected) exist ONLY in the browser that created them. Those keys are no longer read as
+// a data source, but they are kept intact so they can be recovered into Firestore.
+export const LEGACY_LOCAL_DATA_KEYS = LEGACY_BUSINESS_KEYS;
 
 const LISTENER_LABELS: Record<string, string> = {
   Organizations: 'الشركات',
