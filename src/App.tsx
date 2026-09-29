@@ -8,6 +8,7 @@ import { ExpenseRequest, SUPPORTED_CURRENCIES } from './types';
 import { Building2, X, AlertTriangle, Loader2, Wallet, Ban, ShieldAlert, MailCheck, RefreshCw, Copy } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
 import { useSubmitGuard } from './hooks/useSubmitGuard';
+import { LegacyDataRecovery } from './components/LegacyDataRecovery';
 
 // Code-split heavy page views and modals (loads only what the user actively visits)
 const DashboardAnalytics = lazy(() => import('./components/DashboardAnalytics').then(m => ({ default: m.DashboardAnalytics })));
@@ -81,8 +82,10 @@ const MainApp: React.FC = () => {
   };
   const handleRecheckVerification = () => {
     void verifyGuard.run(async () => {
-      const verified = await recheckSuperAdminVerification();
-      setVerifyMessage(verified
+      const res = await recheckSuperAdminVerification();
+      setVerifyMessage(res.error
+        ? { ok: false, text: res.error }
+        : res.verified
         ? { ok: true, text: 'تم تفعيل البريد بنجاح. جاري تحميل جميع الشركات والبيانات...' }
         : { ok: false, text: 'البريد لم يُفعَّل بعد. افتح رابط التفعيل في بريدك أولاً ثم أعد المحاولة.' });
     });
@@ -215,6 +218,9 @@ const MainApp: React.FC = () => {
           </span>
         </div>
       )}
+
+      {/* Records the old version kept only in this browser: review & restore (never deletes) */}
+      <LegacyDataRecovery />
 
       {/* Main Layout Container: Right Sidebar + Main Content (in RTL layout) */}
       <div className="flex-1 flex flex-row w-full min-h-[calc(100vh-4.5rem)] relative">

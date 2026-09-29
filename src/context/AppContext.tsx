@@ -339,7 +339,7 @@ interface AppContextType {
    */
   superAdminNeedsVerification: boolean;
   sendSuperAdminVerificationEmail: () => Promise<{ success: boolean; message: string }>;
-  recheckSuperAdminVerification: () => Promise<boolean>;
+  recheckSuperAdminVerification: () => Promise<{ verified: boolean; error?: string }>;
   /** Data sources the database refused to serve (permission-denied), shown to the user instead of silently empty lists. */
   permissionDeniedSources: string[];
 
@@ -548,8 +548,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [firebaseError, setFirebaseError] = useState<string | null>(null);
   const [firebaseSyncCounter, setFirebaseSyncCounter] = useState(0);
   // Mirrors what the security rules can see about super-admin status.
+  // email_verified as carried by the ID TOKEN (what the rules see), not user.emailVerified.
   const [emailVerified, setEmailVerified] = useState(false);
+  const [tokenChecked, setTokenChecked] = useState(false);
   const [hasUidSuperAdminRecord, setHasUidSuperAdminRecord] = useState(false);
+  const [uidRecordLoaded, setUidRecordLoaded] = useState(false);
+  const [hasEmailSuperAdminRecord, setHasEmailSuperAdminRecord] = useState(false);
+  const [emailRecordLoaded, setEmailRecordLoaded] = useState(false);
+  // Full super_admins collection (management UI + recipient list) — super admins only.
+  const [superAdminRecords, setSuperAdminRecords] = useState<Array<{ docId: string; email: string }>>([]);
+  const [superAdminRecordsLoaded, setSuperAdminRecordsLoaded] = useState(false);
   const [permissionDeniedSources, setPermissionDeniedSources] = useState<string[]>([]);
 
   const clearFirebaseError = () => setFirebaseError(null);
@@ -571,10 +579,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Subscribe to Firebase Authentication state
   useEffect(() => {
+    let latestUid: string | null = null;
     const unsubscribe = subscribeToAuth(user => {
+      latestUid = user?.uid || null;
       setFirebaseUser(user);
-      setEmailVerified(Boolean(user?.emailVerified));
+      setEmailVerified(false);
+      setTokenChecked(false);
       setAuthLoading(false);
+      if (!user) return;
+      // The rules read email_verified from the ID token. After the user clicks the
+      // verification link, user.emailVerified can be true while the cached token still
+      // says false — force a refresh in that case so the UI and the rules agree.
+      (async () => {
+        let verified = false;
+        try {
+          verified = (await user.getIdTokenResult()).claims.email_verified === true;
+          if (!verified && user.emailVerified) {
+            verified = (await user.getIdTokenResult(true)).claims.email_verified === true;
+          }
+        } catch (err) {
+          console.warn('[Auth] Could not read ID token claims:', err);
+        }
+        if (latestUid !== user.uid) return;
+        setEmailVerified(verified);
+        setTokenChecked(true);
+      })();
     });
     return () => {
       if (unsubscribe) unsubscribe();
@@ -701,9 +730,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (!isFirebaseConfigured()) return;
     const { db } = initFirebase();
+    // Reset per-user identity state (also covers a direct switch from one user to another).
+    setHasUidSuperAdminRecord(false);
+    setUidRecordLoaded(false);
+    setHasEmailSuperAdminRecord(false);
+    setEmailRecordLoaded(false);
     if (!db || !firebaseUser) {
       setUserDocProfile(null);
-      setHasUidSuperAdminRecord(false);
       setMyMemberships([]);
       setUserDocLoaded(false);
       setMembershipsLoaded(false);
@@ -712,18 +745,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const unsubs: Array<() => void> = [];
 
-    // UID-keyed super-admin record: the rules honour it even without a verified email.
+    // Super-admin status is resolved from the caller's OWN records only, exactly like
+    // isSuperAdmin() in firestore.rules — never from the full list (which only super
+    // admins may read, so relying on it was circular).
     unsubs.push(onSnapshot(doc(db, 'super_admins', firebaseUser.uid), snap => {
       setHasUidSuperAdminRecord(snap.exists());
+      setUidRecordLoaded(true);
     }, err => {
-      console.warn('[Firebase] Own super-admin record:', err?.message || err);
+      console.warn('[Firebase] Own super-admin record (uid):', err?.message || err);
       setHasUidSuperAdminRecord(false);
+      setUidRecordLoaded(true);
     }));
 
-    unsubs.push(onSnapshot(collection(db, 'super_admins'), snapshot => {
-      const dbAdmins = snapshot.docs.map(d => (d.data().email || d.id || '').toLowerCase().trim()).filter(Boolean);
-      setSuperAdminEmails(Array.from(new Set([...DEFAULT_SUPER_ADMINS, ...dbAdmins])));
-    }, err => console.warn('[Firebase] Super admins listener:', err?.message || err)));
+    const ownEmail = normalizeEmail(firebaseUser.email);
+    if (ownEmail) {
+      // Readable only with a verified email — which is also the only case the rules honour it.
+      unsubs.push(onSnapshot(doc(db, 'super_admins', ownEmail), snap => {
+        setHasEmailSuperAdminRecord(snap.exists());
+        setEmailRecordLoaded(true);
+      }, () => {
+        setHasEmailSuperAdminRecord(false);
+        setEmailRecordLoaded(true);
+      }));
+    } else {
+      setEmailRecordLoaded(true);
+    }
 
     unsubs.push(onSnapshot(doc(db, 'users', firebaseUser.uid), docSnap => {
       setUserDocProfile(docSnap.exists() ? (docSnap.data() as any) : null);
@@ -797,17 +843,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [firebaseUser, userEmail, myMemberships]);
 
   // The email is on the super-admin list (built-in, env or super_admins collection).
-  const isListedSuperAdmin = useMemo(() => {
-    if (!userEmail) return false;
-    return superAdminEmails.some(e => e.trim().toLowerCase() === userEmail);
-  }, [userEmail, superAdminEmails]);
+  // The built-in platform owner (DEFAULT_SUPER_ADMINS, identical to builtInSuperAdmins() in the rules).
+  const isBuiltInSuperAdmin = Boolean(userEmail) && DEFAULT_SUPER_ADMINS.includes(userEmail);
 
   // Super admin exactly as firestore.rules sees it: a super_admins/{uid} record, or a
-  // listed email that Firebase has VERIFIED. Treating an unverified listed email as
-  // super admin made the UI subscribe to every company while the database refused
-  // all of it — every list came back empty and the data looked deleted.
-  const isSuperAdmin = hasUidSuperAdminRecord || (isListedSuperAdmin && emailVerified);
-  const superAdminNeedsVerification = Boolean(firebaseUser) && isListedSuperAdmin && !isSuperAdmin;
+  // VERIFIED email that is built in or has a super_admins/{email} record. Treating an
+  // unverified listed email as super admin made the UI subscribe to every company while
+  // the database refused all of it — every list came back empty and the data looked deleted.
+  const isSuperAdmin = hasUidSuperAdminRecord || (emailVerified && (isBuiltInSuperAdmin || hasEmailSuperAdminRecord));
+  const superAdminStatusResolved = !firebaseUser || (tokenChecked && uidRecordLoaded && emailRecordLoaded);
+  const superAdminNeedsVerification =
+    Boolean(firebaseUser) && superAdminStatusResolved && isBuiltInSuperAdmin && !isSuperAdmin;
+
+  // Full super_admins list for the management screens and the platform recipient list.
+  // Only super admins may list it, so subscribe once the status is confirmed (and
+  // re-subscribe after verification without a page reload).
+  useEffect(() => {
+    setSuperAdminRecords([]);
+    setSuperAdminRecordsLoaded(false);
+    if (!firebaseUser || !isSuperAdmin || !isFirebaseConfigured()) return;
+    const db = getDb();
+    if (!db) return;
+    return onSnapshot(collection(db, 'super_admins'), snapshot => {
+      setSuperAdminRecords(snapshot.docs.map(d => ({ docId: d.id, email: normalizeEmail(String(d.data().email || '')) })));
+      setSuperAdminRecordsLoaded(true);
+    }, err => console.warn('[Firebase] Super admins listener:', err?.message || err));
+  }, [firebaseUser, isSuperAdmin, firebaseSyncCounter]);
+
+  // What each record grants under the rules: an email-keyed doc grants its id (verified
+  // email); a UID-keyed doc grants its owner (shown by its email field, else the uid).
+  // Legacy "name_domain_com" ids grant nothing and are shown only so they can be removed.
+  useEffect(() => {
+    const shown = superAdminRecords.map(r => (r.docId.includes('@') ? normalizeEmail(r.docId) : r.email || r.docId));
+    setSuperAdminEmails(Array.from(new Set([...DEFAULT_SUPER_ADMINS, ...shown].filter(Boolean))));
+  }, [superAdminRecords]);
 
   // Suspended accounts (active: false) get no org data under firestore.rules; the UI
   // says so instead of showing an empty or "awaiting assignment" screen.
@@ -867,9 +936,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [firebaseUser, userDocProfile, userMemberRecord, userEmail, resolvedRole, effectiveOrgId]);
 
-  // Adjust active tab on role switch (e.g. employee defaults to my-requests / tracker)
+  // Adjust active tab on role switch (e.g. employee defaults to my-requests / tracker).
+  // Wait until the role is actually known, or a super admin gets bounced to "my requests"
+  // while their super-admin record is still loading.
   useEffect(() => {
-    if (!firebaseUser) return;
+    if (!firebaseUser || !superAdminStatusResolved || !userDocLoaded || !membershipsLoaded) return;
     if (resolvedRole === 'employee') {
       if (['dashboard', 'services', 'providers', 'organizations', 'settings'].includes(activeTab)) setActiveTab('my-requests');
     } else if (resolvedRole === 'data_entry') {
@@ -878,7 +949,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (['organizations', 'settings'].includes(activeTab)) setActiveTab('treasury');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedRole, firebaseUser, activeTab]);
+  }, [resolvedRole, firebaseUser, activeTab, superAdminStatusResolved, userDocLoaded, membershipsLoaded]);
 
   // =========================================================================
   // ZERO DATA LEAKAGE: Strict Tenant and Employee Scoping
@@ -1234,10 +1305,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setOutboxEvents([]);
     setLegacyEmailLogs([]);
     setOrgsLoaded(false);
+    setSuperAdminRecords([]);
+    setPermissionDeniedSources([]);
+    platformRecipientsBackfillRef.current = false;
   }, [firebaseUser]);
 
   const loading = Boolean(
-    firebaseUser && isFirebaseConfigured() && (!userDocLoaded || !membershipsLoaded || ((isSuperAdmin || Boolean(effectiveOrgId)) && !orgsLoaded))
+    firebaseUser && isFirebaseConfigured() &&
+    (!superAdminStatusResolved || !userDocLoaded || !membershipsLoaded || ((isSuperAdmin || Boolean(effectiveOrgId)) && !orgsLoaded))
   );
 
   // =========================================================================
@@ -1362,36 +1437,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [firebaseUser, isSuperAdmin, resolvedRole, effectiveOrgId, membersSnapshotScope, rawOrganizations, rawMembers]);
 
-  // The platform recipient list must equal the CURRENT super admins (built-in + super_admins
-  // collection). It is created when missing and also corrected once per session when it
-  // still contains removed admins, so a revoked admin stops receiving every org's
-  // notifications. Idempotent: writes only when the stored list differs.
+  // The platform recipient list must equal the CURRENT super admins as the rules define
+  // them: the built-in owner, email-keyed records (their id) and UID-keyed records (their
+  // email field). Legacy "name_domain_com" ids grant nothing and are excluded. It follows
+  // the live super_admins list, so removing an admin also removes them as a recipient.
+  // Idempotent: writes only when the stored list differs (exact comparison, like the rules).
   const platformRecipientsBackfillRef = useRef(false);
   useEffect(() => {
-    if (!isSuperAdmin || !platformRecipients.loaded || platformRecipientsBackfillRef.current) return;
-    const db = getDb();
-    if (!db) return;
+    if (!isSuperAdmin || !platformRecipients.loaded || !superAdminRecordsLoaded || platformRecipientsBackfillRef.current) return;
+    const emails = Array.from(new Set([
+      ...DEFAULT_SUPER_ADMINS,
+      ...superAdminRecords.map(r => (r.docId.includes('@') ? normalizeEmail(r.docId) : isRealUid(r.docId) ? r.email : '')),
+    ])).filter(e => e.includes('@')).sort();
+    const stored = platformRecipients.emails;
+    if (Array.isArray(stored) && stored.length === emails.length && [...stored].sort().every((e, i) => e === emails[i])) return;
     platformRecipientsBackfillRef.current = true;
-    (async () => {
-      const snap = await getDocs(collection(db, 'super_admins'));
-      const emails = Array.from(new Set(
-        [...DEFAULT_SUPER_ADMINS, ...snap.docs.map(d => String(d.data().email || d.id))].map(normalizeEmail)
-      )).filter(e => e.includes('@')).sort();
-      const sameList = (stored: unknown) =>
-        Array.isArray(stored) &&
-        stored.length === emails.length &&
-        [...stored].map(e => normalizeEmail(String(e))).sort().every((e, i) => e === emails[i]);
-      await getStore().runTransaction(async tx => {
-        const current = await tx.get<{ emails?: string[] }>('system_settings', 'notification_recipients');
-        if (current && sameList(current.emails)) return;
+    getStore()
+      .runTransaction(async tx => {
         tx.set('system_settings', 'notification_recipients', { emails, updatedAt: new Date().toISOString() });
+      })
+      .catch(err => console.warn('[notifications] platform recipients not updated:', err?.message || err))
+      .finally(() => {
+        platformRecipientsBackfillRef.current = false;
       });
-    })().catch(err => {
-      platformRecipientsBackfillRef.current = false;
-      console.warn('[notifications] platform recipients not initialized:', err?.message || err);
-    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSuperAdmin, platformRecipients]);
+  }, [isSuperAdmin, platformRecipients, superAdminRecords, superAdminRecordsLoaded]);
 
   /** True when `entity` is the record created by this very idempotency key (i.e. a retry of a success). */
   const isSameOperation = (entity: { id: string } | undefined, prefix: string, key?: string) =>
@@ -1498,10 +1568,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const removeSuperAdminEmail = async (email: string) => {
     const cleanEmail = normalizeEmail(email);
     if (!cleanEmail) return;
+    if (DEFAULT_SUPER_ADMINS.includes(cleanEmail)) {
+      throw new DomainError('forbidden', 'لا يمكن إزالة مالك المنصة (المشرف العام الأساسي).');
+    }
     await mutate('superAdmin', `remove:${cleanEmail}`, async () => {
-      await deleteFirestoreDoc('super_admins', cleanEmail);
-      const legacyId = cleanEmail.replace(/[^a-zA-Z0-9]/g, '_');
-      if (legacyId !== cleanEmail) await deleteFirestoreDoc('super_admins', legacyId).catch(() => {});
+      const db = getDb()!;
+      // Every record that can grant this person super admin: the email-keyed doc, the
+      // legacy underscore id, and any UID-keyed doc (found by its email field, or shown
+      // in the list by its id when it has no email). Ids are used exactly as stored.
+      const ids = new Set<string>([cleanEmail, cleanEmail.replace(/[^a-zA-Z0-9]/g, '_')]);
+      superAdminRecords
+        .filter(r => r.email === cleanEmail || r.docId.toLowerCase() === cleanEmail)
+        .forEach(r => ids.add(r.docId));
+      const byEmail = await getDocs(query(collection(db, 'super_admins'), where('email', '==', cleanEmail))).catch(() => null);
+      byEmail?.docs.forEach(d => ids.add(d.id));
+      for (const id of ids) await deleteFirestoreDoc('super_admins', id);
       await updateDoc(doc(getDb()!, 'system_settings', 'notification_recipients'), { emails: arrayRemove(cleanEmail), updatedAt: new Date().toISOString() })
         .catch(err => console.warn('[superAdmin] notification recipients not updated:', err?.message || err));
     });
@@ -2140,7 +2221,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (await tx.get('system_settings', 'email_notifications')) return; // never overwrite shared settings
           tx.set('system_settings', 'email_notifications', { ...DEFAULT_EMAIL_SETTINGS, ...shareable, directApiKey: '', migratedAt: new Date().toISOString() });
         });
-        writePref(LEGACY_EMAIL_SETTINGS_KEY, null);
+        // The legacy key is kept (never deleted automatically); it is no longer read once migrated.
       } catch (err) {
         console.warn('[Email settings migration skipped]', err);
       }
@@ -2274,11 +2355,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   /** Pick up a just-verified email without signing out, then resubscribe every listener. */
-  const recheckSuperAdminVerification = async (): Promise<boolean> => {
-    const verified = await refreshCurrentUserToken().catch(() => false);
-    setEmailVerified(verified);
-    setFirebaseSyncCounter(prev => prev + 1);
-    return verified;
+  const recheckSuperAdminVerification = async (): Promise<{ verified: boolean; error?: string }> => {
+    try {
+      const verified = await refreshCurrentUserToken();
+      setEmailVerified(verified);
+      setTokenChecked(true);
+      setFirebaseSyncCounter(prev => prev + 1);
+      return { verified };
+    } catch (err: any) {
+      // A network/auth failure is not the same as "not verified yet" — say so.
+      return { verified: false, error: err?.message || 'تعذر الاتصال بخدمة تسجيل الدخول. أعد المحاولة.' };
+    }
   };
 
   const handleLogoutUser = async () => {
@@ -2336,9 +2423,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           await setDoc(doc(db, 'members', userMemberRecord.id), sanitizeForFirestore({ userName: profile.name, ...profile, updatedAt: now }), { merge: true })
             .catch(err => console.warn('[UpdateProfile] membership copy not updated:', err?.message || err));
         }
-        if (isSuperAdmin && userEmail) {
-          await setDoc(doc(db, 'super_admins', userEmail), sanitizeForFirestore({ ...profile, updatedAt: now }), { merge: true }).catch(() => {});
-        }
+        // Note: the profile is NOT copied into super_admins/{email} any more — any document
+        // there grants super admin, so a routine profile save must never create one.
       });
       return { success: true };
     } catch (err: any) {

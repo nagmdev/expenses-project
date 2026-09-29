@@ -25,3 +25,7 @@ dist-ssr
 database.sqlite
 database.sqlite-journal
 
+# Firebase emulator logs
+firestore-debug.log
+firebase-debug.log
+ui-debug.log

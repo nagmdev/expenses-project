@@ -112,7 +112,7 @@ export const UsersManagement: React.FC = () => {
 
       // 3. Role Filter
       if (selectedRoleFilter !== 'all') {
-        const isSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim()) || mem.role === 'super_admin';
+        const isSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim());
         if (selectedRoleFilter === 'super_admin' && !isSuperAdmin) return false;
         if (selectedRoleFilter !== 'super_admin' && (isSuperAdmin || mem.role !== selectedRoleFilter)) return false;
       }
@@ -180,8 +180,10 @@ export const UsersManagement: React.FC = () => {
   const handleStartEdit = (member: OrganizationMember) => {
     setEditingMember(member);
     setEditMemberName(member.userName || '');
-    const isSuper = superAdminEmails.some(e => e.toLowerCase().trim() === member.userEmail?.toLowerCase().trim()) || member.role === 'super_admin';
-    setEditMemberRole(isSuper ? 'super_admin' : member.role);
+    // Only a real grant counts; a stale member role of 'super_admin' is shown as employee so
+    // saving the form can never silently re-grant platform-wide access.
+    const isSuper = superAdminEmails.some(e => e.toLowerCase().trim() === member.userEmail?.toLowerCase().trim());
+    setEditMemberRole(isSuper ? 'super_admin' : member.role === 'super_admin' ? 'employee' : member.role);
     setEditMemberDept(member.department || 'الإدارة العامة');
     setEditMemberTitle(member.jobTitle || '');
     setEditMemberPhone(member.phone || '');
@@ -468,7 +470,7 @@ export const UsersManagement: React.FC = () => {
               ) : (
                 filteredMembers.map((mem) => {
                   const org = displayOrgs.find(o => o.id === mem.orgId);
-                  const isThisSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim()) || mem.role === 'super_admin';
+                  const isThisSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim());
                   const isResetting = resettingPasswordEmail === mem.userEmail;
 
                   return (

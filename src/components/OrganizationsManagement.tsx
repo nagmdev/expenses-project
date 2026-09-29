@@ -528,8 +528,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setEditMemberName(mem.userName);
     setEditMemberPhone(mem.phone || '');
     setEditMemberOrgId(mem.orgId || displayOrgs[0]?.id || '');
-    const isMemberSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim()) || mem.role === 'super_admin';
-    setEditMemberRole(isMemberSuperAdmin ? 'super_admin' : mem.role);
+    // Only a real grant (super_admins record / built-in owner) counts. A stale member role of
+    // 'super_admin' grants nothing and must not be re-granted just by saving this form.
+    const isMemberSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim());
+    setEditMemberRole(isMemberSuperAdmin ? 'super_admin' : mem.role === 'super_admin' ? 'employee' : mem.role);
     setEditMemberDept(mem.department || 'العمليات والتشغيل');
     setEditMemberJob(mem.jobTitle || 'موظف');
     setEditMemberActive(mem.active !== false);
@@ -543,7 +545,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       try {
         const finalOrgId = editMemberOrgId || editingMember.orgId || displayOrgs[0]?.id || '';
         const email = editingMember.userEmail?.toLowerCase().trim();
-        const wasSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === email) || editingMember.role === 'super_admin';
+        const wasSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === email);
 
         if (editMemberRole === 'super_admin') {
           if (email) {
@@ -1121,7 +1123,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     return targetMembers.filter(m => {
       if (selectedOrgFilter !== 'all' && m.orgId !== selectedOrgFilter) return false;
       if (selectedRoleFilter !== 'all') {
-        const isMemSuper = superAdminEmails.some(e => e.toLowerCase().trim() === m.userEmail?.toLowerCase().trim()) || m.role === 'super_admin';
+        const isMemSuper = superAdminEmails.some(e => e.toLowerCase().trim() === m.userEmail?.toLowerCase().trim());
         if (selectedRoleFilter === 'super_admin') {
           if (!isMemSuper) return false;
         } else {
@@ -1744,7 +1746,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   {filteredMembers.map((mem) => {
                     const orgObj = displayOrgs.find(o => o.id === mem.orgId);
                     const isResetting = resettingPasswordEmail === mem.userEmail;
-                    const isThisSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim()) || mem.role === 'super_admin';
+                    const isThisSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim());
 
                     return (
                       <tr key={mem.id} className="hover:bg-slate-50/60 transition">

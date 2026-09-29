@@ -351,8 +351,9 @@ export async function sendVerificationEmailToCurrentUser(): Promise<void> {
 export async function refreshCurrentUserToken(): Promise<boolean> {
   if (!auth.currentUser) return false;
   await auth.currentUser.reload();
-  await auth.currentUser.getIdToken(true);
-  return Boolean(auth.currentUser.emailVerified);
+  const token = await auth.currentUser.getIdTokenResult(true);
+  // The claim in the fresh token is what the security rules evaluate.
+  return token.claims.email_verified === true;
 }
 
 export type { FirebaseUser };

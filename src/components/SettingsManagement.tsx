@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { openLegacyRecovery } from './LegacyDataRecovery';
 import { 
   Bell, 
   Mail, 
@@ -209,6 +210,14 @@ export const SettingsManagement: React.FC = () => {
 
         {/* Global Connection Status Pill */}
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={openLegacyRecovery}
+            className="px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-bold transition cursor-pointer"
+            title="استرجاع سجلات النسخة القديمة المحفوظة على المتصفح أو من ملف نسخة احتياطية"
+          >
+            استرجاع بيانات محلية / نسخة احتياطية
+          </button>
           {isFirebaseConnected ? (
             <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-bold">
               <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>

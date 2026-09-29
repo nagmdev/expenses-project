@@ -137,6 +137,12 @@ service cloud.firestore {
       return resource == null;
     }
 
+    // Company staff may edit their company's documents but never move one into another
+    // company (that would inject data into, or steal it from, a tenant they don't run).
+    function orgUnchanged() {
+      return request.resource.data.get('orgId', null) == resource.data.get('orgId', null);
+    }
+
     // Default deny for unhandled collections
     match /{document=**} {
       allow read, write: if false;
@@ -209,7 +215,10 @@ service cloud.firestore {
         (request.auth.token.email != null && resource.data.userEmail == request.auth.token.email) ||
         isOrgMember(resource.data.orgId)
       );
-      allow create: if isSuperAdmin() || (isOrgAdmin(request.resource.data.orgId) && request.resource.data.role != 'super_admin');
+      // The id is always <userId>_<orgId> (the rules look memberships up by that id).
+      allow create: if isSuperAdmin() || (isOrgAdmin(request.resource.data.orgId) &&
+        request.resource.data.role != 'super_admin' &&
+        memberId == request.resource.data.userId + '_' + request.resource.data.orgId);
       allow update: if isSuperAdmin() || (
         isOrgAdmin(resource.data.orgId) &&
         request.resource.data.role != 'super_admin' &&
@@ -231,7 +240,7 @@ service cloud.firestore {
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
       allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId);
+      allow update: if isSuperAdmin() || ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && orgUnchanged());
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
 
@@ -242,7 +251,7 @@ service cloud.firestore {
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
       allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId);
+      allow update: if isSuperAdmin() || ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && orgUnchanged());
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
 
@@ -254,7 +263,8 @@ service cloud.firestore {
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
       // (create previously evaluated resource.data on a missing doc → only super admins could create)
       allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
-      allow update, delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+      allow update: if isSuperAdmin() || (isOrgAdmin(resource.data.orgId) && orgUnchanged());
+      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
 
     // =========================================================================
@@ -276,14 +286,16 @@ service cloud.firestore {
       allow list: if isAuthenticated() && canReadRequest();
 
       // Create: strictly pending, authenticated member of the organization
-      allow create: if isAuthenticated() &&
+      // The platform owner may also create a request in any state: restoring records the
+      // old app version kept only in a browser (src/domain/legacyRecovery.ts).
+      allow create: if isSuperAdmin() || (isAuthenticated() &&
         isOrgMember(request.resource.data.orgId) &&
         request.resource.data.status == 'pending' &&
-        (request.resource.data.requesterId == request.auth.uid || isSuperAdmin() || isOrgAdmin(request.resource.data.orgId));
+        (request.resource.data.requesterId == request.auth.uid || isOrgAdmin(request.resource.data.orgId)));
 
       // Update: strictly guarded transitions. 'disbursed' is terminal (money has moved).
       allow update: if isAuthenticated() && (
-        isSuperAdmin() ||
+        isSuperAdmin() || (orgUnchanged() && (
         // Org Admin & Finance: approve / reject / clarify / edit — never touch a disbursed request
         ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) &&
           resource.data.status != 'disbursed' &&
@@ -308,7 +320,7 @@ service cloud.firestore {
           request.resource.data.status == resource.data.status &&
           request.resource.data.requesterId == resource.data.requesterId
         )
-      );
+      )));
 
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
@@ -322,8 +334,11 @@ service cloud.firestore {
       }
       allow get: if isAuthenticated() && (isMissing() || canReadVisa());
       allow list: if isAuthenticated() && canReadVisa();
-      allow create: if isAuthenticated() && isOrgMember(request.resource.data.orgId) && request.resource.data.status == 'pending';
-      allow update: if isSuperAdmin() || isFinance(resource.data.orgId);
+      // Super admin: any state (restoring visa requests that the old version never saved).
+      allow create: if isSuperAdmin() ||
+        (isAuthenticated() && isOrgMember(request.resource.data.orgId) && request.resource.data.status == 'pending' &&
+          (request.resource.data.requesterId == request.auth.uid || isOrgAdmin(request.resource.data.orgId)));
+      allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged());
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
 
@@ -334,7 +349,7 @@ service cloud.firestore {
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isFinance(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId));
       allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || isFinance(resource.data.orgId);
+      allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged());
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
 
@@ -358,7 +373,7 @@ service cloud.firestore {
       allow get: if isAuthenticated() && (isMissing() || canReadCustody());
       allow list: if isAuthenticated() && canReadCustody();
       allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || isFinance(resource.data.orgId) || (
+      allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged()) || (
         resource.data.employeeId == request.auth.uid &&
         request.resource.data.employeeId == resource.data.employeeId &&
         request.resource.data.totalAmount == resource.data.totalAmount &&
@@ -374,7 +389,7 @@ service cloud.firestore {
         resource.data.employeeId == request.auth.uid
       );
       allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || isFinance(resource.data.orgId) || (
+      allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged()) || (
         resource.data.employeeId == request.auth.uid &&
         request.resource.data.employeeId == resource.data.employeeId &&
         request.resource.data.totalAmount == resource.data.totalAmount &&
@@ -389,12 +404,19 @@ service cloud.firestore {
       }
       allow get: if isAuthenticated() && (isMissing() || canReadSettlement());
       allow list: if isAuthenticated() && canReadSettlement();
+      // An employee may only file an invoice against THEIR OWN custody, in its company.
       allow create: if isAuthenticated() && (
         isSuperAdmin() ||
         isFinance(request.resource.data.orgId) ||
-        request.resource.data.employeeId == request.auth.uid
+        (request.resource.data.employeeId == request.auth.uid &&
+          isOrgMember(request.resource.data.orgId) &&
+          request.resource.data.custodyId is string &&
+          exists(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)) &&
+          get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.employeeId == request.auth.uid &&
+          get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.orgId == request.resource.data.orgId)
       );
-      allow update, delete: if isSuperAdmin() || isFinance(resource.data.orgId);
+      allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged());
+      allow delete: if isSuperAdmin() || isFinance(resource.data.orgId);
     }
 
     // =========================================================================
@@ -404,7 +426,8 @@ service cloud.firestore {
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgAdmin(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgAdmin(resource.data.orgId));
       // An entry can only be written in the caller's own name (no forged actors).
-      allow create: if isAuthenticated() && request.resource.data.actorId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.actorId == request.auth.uid &&
+        (request.resource.data.get('orgId', '') == '' || isOrgMember(request.resource.data.orgId));
       allow update, delete: if isSuperAdmin();
     }
 
@@ -574,6 +597,18 @@ service cloud.firestore {
         request.resource.data.metadata.eventId.matches('[^/]+') &&
         exists(outboxPath(request.resource.data.metadata.eventId)) &&
         isDeliveryOf(request.resource.data, get(outboxPath(request.resource.data.metadata.eventId)).data);
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // 15b. LEGACY RESTORE MARKERS (src/domain/legacyRecovery.ts)
+    //      One permanent marker per record restored from a browser's old local data,
+    //      so a restored record that is later deleted on purpose never comes back.
+    // =========================================================================
+    match /legacyRestores/{markerId} {
+      allow get: if isAuthenticated();
+      allow create: if isAuthenticated() && request.resource.data.restoredBy == request.auth.uid &&
+        (isSuperAdmin() || (request.resource.data.get('orgId', '') != '' && isOrgMember(request.resource.data.orgId)));
       allow update, delete: if false;
     }
 
