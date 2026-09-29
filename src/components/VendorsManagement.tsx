@@ -42,9 +42,6 @@ export const VendorsManagement: React.FC = () => {
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
-  // The current firestore.rules reject provider creation by data entry: the add button is
-  // disabled for that role instead of ending in a guaranteed permission error.
-  const canCreateProviders = currentRole !== 'data_entry';
   const orgList = isSuperAdmin ? allOrganizations : organizations;
   const targetProviders = isSuperAdmin ? allProviders : providers;
   const targetServices = isSuperAdmin ? allServices : services;
@@ -135,7 +132,6 @@ export const VendorsManagement: React.FC = () => {
   };
 
   const handleOpenAdd = () => {
-    if (!canCreateProviders) return;
     setEditingProvider(null);
     setName('');
     setContactPerson('');
@@ -297,18 +293,11 @@ export const VendorsManagement: React.FC = () => {
           <button
             type="button"
             onClick={handleOpenAdd}
-            disabled={!canCreateProviders}
-            title={canCreateProviders ? undefined : 'إضافة مقدمي الخدمة متاحة لمدير الشركة فقط حالياً (قواعد قاعدة البيانات لا تسمح بها لمدخل البيانات).'}
-            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto"
           >
             <Plus className="h-4 w-4" />
             <span>إضافة مقدم خدمة جديد</span>
           </button>
-          {!canCreateProviders && (
-            <span className="text-[11px] text-slate-500 font-semibold self-start sm:self-auto">
-              الإضافة متاحة لمدير الشركة فقط
-            </span>
-          )}
         </div>
       </div>
 
@@ -469,16 +458,14 @@ export const VendorsManagement: React.FC = () => {
             <Building className="h-10 w-10 text-slate-300 mx-auto mb-2" />
             <h3 className="font-bold text-slate-800 text-sm">لا يوجد موردون أو مقدمو خدمات مسجلين</h3>
             <p className="text-xs text-slate-400 mt-1 mb-4">أضف مقدمي الخدمات والشركات المتعامل معها وحساباتهم البنكية لتسهيل أوامر الصرف</p>
-            {canCreateProviders && (
-              <button
-                type="button"
-                onClick={handleOpenAdd}
-                className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
-              >
-                <Plus className="h-4 w-4" />
-                <span>إضافة أول مقدم خدمة الآن</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={handleOpenAdd}
+              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+            >
+              <Plus className="h-4 w-4" />
+              <span>إضافة أول مقدم خدمة الآن</span>
+            </button>
           </div>
         )}
       </div>

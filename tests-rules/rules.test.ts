@@ -288,6 +288,36 @@ describe('real domain operations pass the rules', () => {
     expect(await read('departments', `dept-key-00000050-${ORG}`)).toMatchObject({ orgId: ORG, name: 'المالية' });
     expect(await read('auditLogs', `audit-key-00000050-${ORG}`)).toMatchObject({ orgId: ORG, entityType: 'department', actorId: ADMIN.uid });
   });
+
+  it('data entry adds providers and departments to its own company only (never with a payment total, never elsewhere)', async () => {
+    const DE = { uid: 'uidDataEntry000000000000001', email: 'de@acme.test' };
+    await env.withSecurityRulesDisabled(async ctx => {
+      const f = ctx.firestore();
+      await setDoc(doc(f, 'users', DE.uid), { orgId: ORG, role: 'data_entry', active: true });
+      await setDoc(doc(f, 'members', `${DE.uid}_${ORG}`), { orgId: ORG, userId: DE.uid, userEmail: DE.email, role: 'data_entry', active: true });
+    });
+    const store = createFirestoreStore(db(DE));
+    const dataEntry = actor(DE, 'data_entry');
+
+    const prov = await createEntityInOrgs(store, dataEntry, 'provider', [ORG], vendor('Fawry'), describeVendor, 'key-00000060');
+    expect(prov.changed).toBe(true);
+    expect(await read('providers', `prov-key-00000060-${ORG}`)).toMatchObject({ orgId: ORG, name: 'Fawry', totalPaid: 0 });
+    const dept = await createEntityInOrgs(store, dataEntry, 'department', [ORG],
+      (id, orgId, nowIso) => ({ id, orgId, name: 'المشتريات', createdAt: nowIso }), d => `قسم جديد: "${d.name}"`, 'key-00000061');
+    expect(dept.changed).toBe(true);
+    expect(await read('departments', `dept-key-00000061-${ORG}`)).toMatchObject({ orgId: ORG, name: 'المشتريات' });
+
+    // another company: refused, and atomic (nothing written in its own company either)
+    await assertFails(createEntityInOrgs(store, dataEntry, 'provider', [ORG, OTHER_ORG], vendor('Aman'), describeVendor, 'key-00000062'));
+    expect(await read('providers', `prov-key-00000062-${ORG}`)).toBeUndefined();
+    await assertFails(setDoc(doc(db(DE), 'departments', 'dept-forged'), { orgId: OTHER_ORG, name: 'x' }));
+    // a provider cannot start with money already "paid" to it; editing stays with admin / finance
+    await assertFails(setDoc(doc(db(DE), 'providers', 'prov-forged'), { orgId: ORG, name: 'Forged', totalPaid: 5000 }));
+    await assertFails(updateDoc(doc(db(DE), 'providers', `prov-key-00000060-${ORG}`), { name: 'Renamed' }));
+    // an employee still cannot add either
+    await assertFails(setDoc(doc(db(EMP), 'providers', 'prov-emp'), { orgId: ORG, name: 'Emp', totalPaid: 0 }));
+    await assertFails(setDoc(doc(db(EMP), 'departments', 'dept-emp'), { orgId: ORG, name: 'Emp' }));
+  });
 });
 
 describe('tenant isolation hardening', () => {

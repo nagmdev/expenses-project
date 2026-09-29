@@ -79,6 +79,11 @@ service cloud.firestore {
       return isSuperAdmin() || (isAuthenticated() && hasOrgRole(orgId, ['org_admin']));
     }
 
+    // Data-entry staff maintain their company's directory (providers, departments).
+    function isDataEntry(orgId) {
+      return isAuthenticated() && hasOrgRole(orgId, ['data_entry']);
+    }
+
     function isFinance(orgId) {
       return isSuperAdmin() || (isAuthenticated() && hasOrgRole(orgId, ['finance', 'org_admin']));
     }
@@ -250,7 +255,9 @@ service cloud.firestore {
     match /providers/{providerId} {
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
-      allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
+      // Data entry may add a provider to its own company, always starting with no payments.
+      allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId) ||
+        (isDataEntry(request.resource.data.orgId) && request.resource.data.get('totalPaid', 0) == 0);
       allow update: if isSuperAdmin() || ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && orgUnchanged());
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
@@ -262,7 +269,7 @@ service cloud.firestore {
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
       // (create previously evaluated resource.data on a missing doc → only super admins could create)
-      allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
+      allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId) || isDataEntry(request.resource.data.orgId);
       allow update: if isSuperAdmin() || (isOrgAdmin(resource.data.orgId) && orgUnchanged());
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }

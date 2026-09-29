@@ -156,10 +156,6 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   const isSuperAdmin = currentRole === 'super_admin';
   const canManageOrgs = isSuperAdmin;
-  // The current firestore.rules reject provider/department creation by data entry: the add
-  // buttons are disabled for that role instead of ending in a guaranteed permission error.
-  const canCreateVendorsAndDepts = currentRole !== 'data_entry';
-  const vendorDeptCreateBlockedNote = 'إضافة الموردين والأقسام متاحة لمدير الشركة فقط حالياً (قواعد قاعدة البيانات لا تسمح بها لمدخل البيانات).';
   const displayOrgs = canManageOrgs ? allOrganizations : organizations;
   // Company multi-selects of the add forms: active companies only (an archived one refuses the whole operation).
   const creatableOrgs = useMemo(
@@ -898,7 +894,6 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // HANDLERS: VENDORS
   // =========================================================================
   const handleOpenAddVendor = () => {
-    if (!canCreateVendorsAndDepts) return;
     vendorGuard.rotateKey();
     setEditingVendor(null);
     setVendorName('');
@@ -1113,7 +1108,6 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // HANDLERS: DEPARTMENTS
   // =========================================================================
   const handleOpenAddDept = () => {
-    if (!canCreateVendorsAndDepts) return;
     deptGuard.rotateKey();
     setEditingDept(null);
     setDeptName('');
@@ -1507,9 +1501,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             <button
               type="button"
               onClick={handleOpenAddVendor}
-              disabled={!canCreateVendorsAndDepts}
-              title={canCreateVendorsAndDepts ? undefined : vendorDeptCreateBlockedNote}
-              className="px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5"
             >
               <Plus className="h-4 w-4" />
               <span>تسجيل مورد جديد</span>
@@ -1531,9 +1523,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             <button
               type="button"
               onClick={handleOpenAddDept}
-              disabled={!canCreateVendorsAndDepts}
-              title={canCreateVendorsAndDepts ? undefined : vendorDeptCreateBlockedNote}
-              className="px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5"
             >
               <Plus className="h-4 w-4" />
               <span>إضافة قسم جديد</span>
