@@ -30,7 +30,8 @@ export function defaultAccountsFor(org: Organization): Array<Omit<PaymentAccount
     { ...base, id: bankId, name: bankName, type: 'bank', accountIdentifier: `EG00${code}00000000000000`, bankName: 'البنك التجاري الدولي CIB / البنك الأهلي', description: `الحساب المصرفي البنكي الرئيسي لـ ${org.name}` },
     { ...base, id: `vault-cash-${org.id}`, name: `خزينة نقدية (${org.name})`, type: 'cash', accountIdentifier: `CASH-${code}`, description: `الخزينة النقدية الرئيسية لمقر ${org.name}` },
     { ...base, id: `vault-insta-${org.id}`, name: `إنستاباي (${org.name})`, type: 'instapay', accountIdentifier: `${code.toLowerCase()}@instapay`, parentAccountId: bankId, parentAccountName: bankName, description: `حساب استقبال وتحويلات إنستاباي لـ ${org.name} (مربوط بالبنك)` },
-    { ...base, id: `vault-wallet-${org.id}`, name: `محفظة إلكترونية (${org.name})`, type: 'wallet', accountIdentifier: '01000000000', parentAccountId: bankId, parentAccountName: bankName, description: `محفظة كاش إلكترونية (فودافون/أورانج/اتصالات/وي) لـ ${org.name} (مربوطة بالبنك)` },
+    // An e-wallet is a standalone treasury (never linked to the bank; see linkedParentIdOf in ./treasury).
+    { ...base, id: `vault-wallet-${org.id}`, name: `محفظة إلكترونية (${org.name})`, type: 'wallet', accountIdentifier: '01000000000', description: `محفظة كاش إلكترونية (فودافون/أورانج/اتصالات/وي) لـ ${org.name} (خزينة مستقلة)` },
   ];
 }
 

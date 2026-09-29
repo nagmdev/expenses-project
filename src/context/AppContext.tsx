@@ -78,8 +78,12 @@ import {
   createPaymentAccount,
   deletePaymentAccount as deletePaymentAccountOp,
   issueCustody as issueCustodyOp,
+  linkedParentIdOf,
   replenishCustody as replenishCustodyOp,
+  returnCustodyRemainders as returnCustodyRemaindersOp,
   settleCustodyItem as settleCustodyItemOp,
+  transferBetweenAccounts as transferBetweenAccountsOp,
+  detachLegacyWallet as detachLegacyWalletOp,
   updatePaymentAccount as updatePaymentAccountOp,
 } from '../domain/treasury';
 import {
@@ -137,21 +141,18 @@ export interface DisburseOutcome {
 }
 
 /**
- * Intelligent helper to resolve the underlying linked parent bank account for an InstaPay or Wallet account.
- * Follows Egyptian banking practices: InstaPay and electronic wallets are directly linked to / debited from bank accounts.
+ * The bank account an InstaPay channel is linked to (its movements mirror there), or
+ * the bank a legacy wallet still mirrors to until it is detached. New wallets and every
+ * other type are standalone and resolve to null. Same rule as the domain
+ * (linkedParentIdOf / readAccountWithParent).
  */
 export const resolveParentBankAccount = (
   account: PaymentAccount | null | undefined,
   allAccounts: PaymentAccount[]
 ): PaymentAccount | null => {
-  if (!account || (account.type !== 'instapay' && account.type !== 'wallet')) {
-    return null;
-  }
-  if (account.parentAccountId) {
-    const parent = allAccounts.find(a => a.id === account.parentAccountId);
-    if (parent && parent.id !== account.id) return parent;
-  }
-  return null;
+  const parentId = account ? linkedParentIdOf(account) : null;
+  if (!parentId) return null;
+  return allAccounts.find(a => a.id === parentId) || null;
 };
 
 // Only per-viewer UI preferences live in localStorage. Business data is NEVER
@@ -421,6 +422,29 @@ interface AppContextType {
   deletePaymentAccount: (accountId: string) => Promise<void>;
   togglePaymentAccountStatus: (accountId: string, active: boolean) => Promise<void>;
   recordManualAccountAdjustment: (accountId: string, type: TransactionType, amount: number, description: string, opts?: MutationOptions) => Promise<void>;
+  /**
+   * Moves money between two accounts of the same company (TRF-<year>-<n>); never overdraws the source. Throws on failure.
+   * changed false → this key's transfer already went through; amount / account names are those actually stored.
+   */
+  transferBetweenAccounts: (
+    fromAccountId: string,
+    toAccountId: string,
+    amount: number,
+    description: string,
+    opts?: MutationOptions
+  ) => Promise<{ transferNumber: string; changed: boolean; amount: number; fromAccountName: string; toAccountName: string }>;
+  /**
+   * Turns a pre-standalone wallet (still mirrored on its bank) into a standalone treasury:
+   * books the owner-confirmed signed correction on the bank (0 = none) and removes the link. Throws on failure.
+   */
+  detachLegacyWallet: (
+    walletId: string,
+    bankCorrection: number,
+    expectedWalletTotals: { totalIn: number; totalOut: number },
+    note: string,
+    opts?: MutationOptions
+  ) => Promise<{ changed: boolean }>;
+  /** InstaPay, and a legacy wallet until it is detached; every other account is standalone and returns null. */
   resolveParentBankAccount: (account: PaymentAccount | null | undefined) => PaymentAccount | null;
 
   // Petty Cash & Custodies (العهد النقدية وتصفيتها)
@@ -456,6 +480,18 @@ interface AppContextType {
     notes?: string,
     opts?: MutationOptions
   ) => Promise<{ success: boolean; message?: string }>;
+  /**
+   * Deposits the remaining cash of one or more custodies into a treasury account in ONE
+   * operation and closes them. targetAccountId undefined → each custody's own source
+   * account. Throws on failure; a retry of an operation that already went through
+   * resolves with returnedCount 0.
+   */
+  returnCustodyRemainders: (
+    custodyIds: string[],
+    targetAccountId: string | undefined,
+    notes: string,
+    opts?: MutationOptions
+  ) => Promise<{ returnedCount: number; skippedCount: number; totalReturned: number }>;
 
   // Departments & Structure
   departments: Department[];
@@ -1950,6 +1986,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  const transferBetweenAccounts = async (fromAccountId: string, toAccountId: string, amount: number, description: string, opts?: MutationOptions) => {
+    const from = rawPaymentAccounts.find(a => a.id === fromAccountId);
+    const opKey = opts?.idempotencyKey || newOperationKey();
+    const res = await mutate('transfer', opts?.idempotencyKey || fingerprint(fromAccountId, toAccountId, amount, description), store =>
+      transferBetweenAccountsOp(store, actor, { fromAccountId, toAccountId, amount, description, orgName: orgById(from?.orgId)?.name }, opKey)
+    );
+    // Details come from the STORED ledger pair: a retry with the same key after the form was
+    // edited returns the original transfer, and the UI must describe that one.
+    return {
+      transferNumber: res.value.transferNumber,
+      changed: res.changed,
+      amount: res.value.out.amount,
+      fromAccountName: res.value.out.accountName,
+      toAccountName: res.value.in.accountName,
+    };
+  };
+
+  const detachLegacyWallet = async (
+    walletId: string,
+    bankCorrection: number,
+    expectedWalletTotals: { totalIn: number; totalOut: number },
+    note: string,
+    opts?: MutationOptions
+  ) => {
+    const opKey = opts?.idempotencyKey || newOperationKey();
+    const res = await mutate('detachWallet', opts?.idempotencyKey || fingerprint(walletId, bankCorrection), store =>
+      detachLegacyWalletOp(store, actor, { walletId, bankCorrection, expectedWalletTotals, note }, opKey)
+    );
+    return { changed: res.changed };
+  };
+
   // =========================================================================
   // PETTY CASH & CUSTODIES
   // =========================================================================
@@ -2028,6 +2095,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch (err) {
       return { success: false, message: toUserError(err).message };
     }
+  };
+
+  const returnCustodyRemainders = async (
+    custodyIds: string[],
+    targetAccountId: string | undefined,
+    notes: string,
+    opts?: MutationOptions
+  ): Promise<{ returnedCount: number; skippedCount: number; totalReturned: number }> => {
+    // The audit entries carry one company name: only when every selected custody belongs to the same company.
+    const orgIds = new Set(rawCustodies.filter(c => custodyIds.includes(c.id)).map(c => c.orgId));
+    const orgName = orgIds.size === 1 ? orgById([...orgIds][0])?.name : undefined;
+    const opKey = opts?.idempotencyKey || newOperationKey();
+    const res = await mutate('returnCustody', opts?.idempotencyKey || fingerprint([...custodyIds].sort(), targetAccountId || '', notes), store =>
+      returnCustodyRemaindersOp(store, actor, { custodyIds, targetAccountId, notes, orgName }, opKey)
+    );
+    return { returnedCount: res.value.returned.length, skippedCount: res.value.skipped.length, totalReturned: res.value.totalReturned };
   };
 
   // =========================================================================
@@ -2525,6 +2608,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deletePaymentAccount,
         togglePaymentAccountStatus,
         recordManualAccountAdjustment,
+        transferBetweenAccounts,
+        detachLegacyWallet,
         resolveParentBankAccount: resolveParentAccount,
         custodies: scopedCustodies,
         allCustodies: rawCustodies,
@@ -2533,6 +2618,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         issueCustody,
         settleCustodyItem,
         replenishCustody,
+        returnCustodyRemainders,
         departments: scopedDepartments,
         allDepartments: rawDepartments,
         addDepartment,

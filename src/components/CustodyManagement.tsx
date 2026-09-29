@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
   PettyCashCustody, 
@@ -31,7 +31,9 @@ import {
   UploadCloud,
   Image as ImageIcon,
   ExternalLink,
-  ChevronRight
+  ChevronRight,
+  Undo2,
+  Landmark
 } from 'lucide-react';
 import { 
   handleNumericKeyDown, 
@@ -41,6 +43,12 @@ import {
 import { InvoiceViewerModal } from './InvoiceViewerModal';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
 import { newId } from '../utils/ids';
+import { toMoney } from '../domain/common';
+
+// Same rules as the domain (src/domain/treasury.ts): an empty currency counts as EGP.
+const currencyOf = (c?: string | null) => ((c || '').trim() || 'EGP').toUpperCase();
+const balanceOf = (a: PaymentAccount) => toMoney(a.currentBalance ?? a.balance ?? 0);
+const fmtMoney = (n: number) => toMoney(n).toLocaleString('en-US', { maximumFractionDigits: 2 });
 
 export const CustodyManagement: React.FC = () => {
   const {
@@ -65,6 +73,8 @@ export const CustodyManagement: React.FC = () => {
     issueCustody,
     settleCustodyItem,
     replenishCustody,
+    returnCustodyRemainders,
+    resolveParentBankAccount,
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
@@ -172,6 +182,22 @@ export const CustodyManagement: React.FC = () => {
   const isReplenishing = replenishGuard.pending;
   const [replenishError, setReplenishError] = useState<string | null>(null);
 
+  // Return Custody Remainder (إيداع المتبقي للحساب المسحوب منه) State. Only the id is kept:
+  // the modal always shows the LIVE custody (an invoice settled meanwhile changes the remainder).
+  const [returningCustodyId, setReturningCustodyId] = useState<string | null>(null);
+  const [returnAltAccountId, setReturnAltAccountId] = useState('');
+  const [returnNotes, setReturnNotes] = useState('');
+  const returnGuard = useSubmitGuard();
+  const isReturning = returnGuard.pending;
+  const [returnError, setReturnError] = useState<string | null>(null);
+  const [returnSuccess, setReturnSuccess] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!returnSuccess) return;
+    const t = setTimeout(() => setReturnSuccess(null), 8000);
+    return () => clearTimeout(t);
+  }, [returnSuccess]);
+
   // Filtered Custodies
   const filteredCustodies = useMemo(() => {
     return cleanTargetCustodies.filter(item => {
@@ -228,16 +254,18 @@ export const CustodyManagement: React.FC = () => {
   }, [cleanTargetSettlements, selectedOrgFilter, employeeFilter, searchQuery]);
 
   // KPI Calculations
-  const { totalIssued, totalRemaining, totalSettled, activeCount } = useMemo(() => {
+  const { totalIssued, totalRemaining, totalSettled, totalReturned, activeCount } = useMemo(() => {
     let issued = 0;
     let remaining = 0;
     let settled = 0;
+    let returned = 0;
     let active = 0;
 
     filteredCustodies.forEach(c => {
       issued += Number(c.totalAmount || 0);
       remaining += Number(c.remainingAmount || 0);
       settled += Number(c.settledAmount || 0);
+      returned += Number(c.returnedAmount || 0);
       if (c.status === 'active') {
         active += 1;
       }
@@ -247,6 +275,7 @@ export const CustodyManagement: React.FC = () => {
       totalIssued: issued,
       totalRemaining: remaining,
       totalSettled: settled,
+      totalReturned: returned,
       activeCount: active,
     };
   }, [filteredCustodies]);
@@ -488,6 +517,91 @@ export const CustodyManagement: React.FC = () => {
     });
   };
 
+  // Every account the context exposes (the custody's source may sit outside the active-org scope).
+  const accountPool = useMemo(() => {
+    const byId = new Map<string, PaymentAccount>();
+    [...targetAccounts, ...allPaymentAccounts].forEach(a => {
+      if (a?.id && !byId.has(a.id)) byId.set(a.id, a);
+    });
+    return Array.from(byId.values());
+  }, [targetAccounts, allPaymentAccounts]);
+
+  const returningCustody = useMemo(
+    () => (returningCustodyId ? targetCustodies.find(c => c.id === returningCustodyId) ?? null : null),
+    [returningCustodyId, targetCustodies]
+  );
+
+  // Where the remainder goes: the account the custody was withdrawn from. When that account
+  // is gone, disabled, of another company or currency (the domain would refuse it), the user
+  // picks another active account of the SAME company and currency instead.
+  const returnPlan = useMemo(() => {
+    if (!returningCustody) return null;
+    const custody = returningCustody;
+    const currency = currencyOf(custody.currency);
+    const amount = toMoney(Math.max(0, Number(custody.remainingAmount || 0)));
+    const source = accountPool.find(a => a.id === custody.sourceAccountId) || null;
+    const sourceIssue: string | null = !source
+      ? `الحساب المسحوب منه العهدة "${custody.sourceAccountName || 'غير محدد'}" غير موجود أو تم حذفه.`
+      : source.active === false
+      ? `الحساب المسحوب منه العهدة "${source.name}" معطل حالياً.`
+      : source.orgId && custody.orgId && source.orgId !== custody.orgId
+      ? `الحساب المسحوب منه العهدة "${source.name}" تابع لشركة أخرى.`
+      : currencyOf(source.currency) !== currency
+      ? `عملة الحساب المسحوب منه العهدة "${source.name}" (${currencyOf(source.currency)}) لا تطابق عملة العهدة (${currency}).`
+      : null;
+    const alternatives = sourceIssue
+      ? accountPool.filter(a => a.id !== custody.sourceAccountId && a.orgId === custody.orgId && a.active !== false && currencyOf(a.currency) === currency)
+      : [];
+    const target = sourceIssue ? alternatives.find(a => a.id === returnAltAccountId) || null : source;
+    // An InstaPay target mirrors the deposit to its bank; a wallet is standalone (no parent).
+    const parent = target ? resolveParentBankAccount(target) : null;
+    return { custody, currency, amount, sourceIssue, alternatives, target, parent };
+  }, [returningCustody, accountPool, returnAltAccountId, resolveParentBankAccount]);
+
+  const handleOpenReturnModal = (custody: PettyCashCustody) => {
+    setReturningCustodyId(custody.id);
+    setReturnAltAccountId('');
+    setReturnNotes('');
+    setReturnError(null);
+    returnGuard.rotateKey();
+  };
+
+  // Submit return of the remainder (one custody → its source account, or the chosen replacement)
+  const handleSubmitReturn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!returnPlan) return;
+    setReturnError(null);
+    const { custody, currency, amount, sourceIssue, target } = returnPlan;
+
+    if (amount <= 0) {
+      setReturnError('لا يوجد متبقٍ في هذه العهدة لرده.');
+      return;
+    }
+    if (sourceIssue && !target) {
+      setReturnError(`يرجى اختيار حساب آخر نشط لنفس الشركة والعملة (${currency}) لإيداع المتبقي فيه.`);
+      return;
+    }
+
+    // No target id → the domain deposits into the custody's own source account.
+    const targetAccountId = sourceIssue ? target?.id : undefined;
+    const targetName = target?.name || custody.sourceAccountName || 'الخزينة';
+    await returnGuard.run(async (idempotencyKey) => {
+      try {
+        const res = await returnCustodyRemainders([custody.id], targetAccountId, returnNotes.trim(), { idempotencyKey });
+        returnGuard.rotateKey();
+        setReturningCustodyId(null);
+        setReturnSuccess(
+          res.returnedCount > 0
+            ? `تم إيداع المتبقي من العهدة ${custody.custodyNumber} (${fmtMoney(res.totalReturned)} ${currency}) في "${targetName}" وإغلاق العهدة.`
+            : `تم إيداع المتبقي من العهدة ${custody.custodyNumber} مسبقاً، ولم يتكرر الإيداع.`
+        );
+      } catch (err: any) {
+        console.error(err);
+        setReturnError(err?.message || 'حدث خطأ أثناء إيداع المتبقي من العهدة.');
+      }
+    });
+  };
+
   // Get settlements for an inspected custody
   const inspectedCustodySettlements = useMemo(() => {
     if (!inspectingCustody) return [];
@@ -634,6 +748,23 @@ export const CustodyManagement: React.FC = () => {
         </div>
       </div>
 
+      {returnSuccess && (
+        <div role="status" className="p-3.5 rounded-2xl bg-teal-50 border border-teal-200 text-teal-800 text-xs font-bold flex items-center justify-between gap-3">
+          <span className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+            <span>{returnSuccess}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setReturnSuccess(null)}
+            className="p-1 rounded-lg text-teal-700 hover:bg-teal-100 cursor-pointer shrink-0"
+            aria-label="إغلاق"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* 2. KPI Stat Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Card 1: Total Active Custodies Amount */}
@@ -650,7 +781,14 @@ export const CustodyManagement: React.FC = () => {
             </span>
             <span className="text-xs font-bold text-slate-400">{activeOrg?.currency || 'EGP'}</span>
           </div>
-          <p className="text-[11px] text-slate-400 mt-1">المجموع الكلي لقيمة العُهد المفتوحة</p>
+          <p className="text-[11px] text-slate-400 mt-1">
+            المجموع الكلي لقيمة العُهد المفتوحة
+            {totalReturned > 0 && (
+              <span className="block text-teal-700 font-bold mt-0.5">
+                منها {fmtMoney(totalReturned)} مُردة للخزينة
+              </span>
+            )}
+          </p>
           <div className="absolute -bottom-6 -left-6 w-20 h-20 bg-emerald-500/5 rounded-full pointer-events-none" />
         </div>
 
@@ -761,11 +899,21 @@ export const CustodyManagement: React.FC = () => {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
               {filteredCustodies.map((custody) => {
+                // totalAmount = settled (invoices) + returned (deposited back) + remaining (cash in hand)
+                const remainingAmount = Number(custody.remainingAmount || 0);
+                const returnedAmount = Number(custody.returnedAmount || 0);
                 const percentSettled = Math.min(
-                  100, 
+                  100,
                   Math.round(((custody.settledAmount || 0) / (custody.totalAmount || 1)) * 100)
                 );
-                const isFullySettled = custody.status === 'settled' || custody.remainingAmount <= 0;
+                const percentReturned = Math.min(
+                  100 - percentSettled,
+                  Math.round((returnedAmount / (custody.totalAmount || 1)) * 100)
+                );
+                const percentRemaining = remainingAmount > 0 ? 100 - percentSettled - percentReturned : 0;
+                const isFullySettled = custody.status === 'settled' || remainingAmount <= 0;
+                const isClosedByReturn = remainingAmount <= 0 && returnedAmount > 0;
+                const canReturnRemainder = canIssueCustody && remainingAmount > 0;
 
                 return (
                   <div 
@@ -787,7 +935,12 @@ export const CustodyManagement: React.FC = () => {
                         </div>
 
                         {/* Status Badge */}
-                        {isFullySettled ? (
+                        {isClosedByReturn ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-teal-50 text-teal-700 border border-teal-200 text-center">
+                            <Undo2 className="h-3 w-3 shrink-0" />
+                            أُغلقت — تم رد المتبقي للخزينة
+                          </span>
+                        ) : isFullySettled ? (
                           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
                             <CheckCircle2 className="h-3 w-3" />
                             تمت التصفية بالكامل
@@ -839,13 +992,20 @@ export const CustodyManagement: React.FC = () => {
                           <span className="font-bold text-slate-900">{percentSettled}%</span>
                         </div>
                         <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden flex">
-                          <div 
+                          <div
                             className="bg-blue-600 h-full rounded-full transition-all duration-500"
                             style={{ width: `${percentSettled}%` }}
                           />
-                          <div 
+                          {percentReturned > 0 && (
+                            <div
+                              className="bg-teal-500 h-full rounded-full transition-all duration-500"
+                              style={{ width: `${percentReturned}%` }}
+                              title="مُرد للخزينة"
+                            />
+                          )}
+                          <div
                             className="bg-amber-500 h-full rounded-full transition-all duration-500"
-                            style={{ width: `${100 - percentSettled}%` }}
+                            style={{ width: `${percentRemaining}%` }}
                           />
                         </div>
 
@@ -870,6 +1030,21 @@ export const CustodyManagement: React.FC = () => {
                             </span>
                           </div>
                         </div>
+
+                        {/* Cash returned to a treasury account */}
+                        {returnedAmount > 0 && (
+                          <div className="mt-2 pt-2 border-t border-slate-200/60 flex items-center justify-between gap-2 text-[11px]">
+                            <span className="flex items-center gap-1 font-bold text-teal-700 shrink-0">
+                              <Undo2 className="h-3 w-3" />
+                              مُرد للخزينة: {returnedAmount.toLocaleString()}
+                            </span>
+                            {custody.returnedToAccountName && (
+                              <span className="text-slate-500 truncate" title={custody.returnedToAccountName}>
+                                في: {custody.returnedToAccountName}
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
 
                       {/* Custody Notes */}
@@ -881,45 +1056,61 @@ export const CustodyManagement: React.FC = () => {
                     </div>
 
                     {/* Card Actions */}
-                    <div className="mt-5 pt-4 border-t border-slate-100 flex items-center gap-2">
-                      {/* Settle Action */}
-                      <button
-                        type="button"
-                        onClick={() => handleOpenSettleModal(custody)}
-                        disabled={isFullySettled}
-                        className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                          isFullySettled 
-                            ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                            : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs'
-                        }`}
-                        title="تسجيل فاتورة تصفية ومستند"
-                      >
-                        <Receipt className="h-3.5 w-3.5" />
-                        <span>تصفية عهدة (فاتورة)</span>
-                      </button>
-
-                      {/* Replenish Action */}
-                      {currentRole !== 'employee' && (
+                    <div className="mt-5 pt-4 border-t border-slate-100 space-y-2">
+                      {/* Return the remaining cash to the account the custody was withdrawn from */}
+                      {canReturnRemainder && (
                         <button
                           type="button"
-                          onClick={() => handleOpenReplenishModal(custody)}
-                          className="py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
-                          title="استعاضة العهدة وإعادة تغذية رصيد الموظف"
+                          onClick={() => handleOpenReturnModal(custody)}
+                          className="w-full py-2 px-3 bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                          title="رد النقدية المتبقية طرف الموظف وإيداعها في الحساب الذي صُرفت منه العهدة، ثم إغلاق العهدة"
                         >
-                          <RefreshCw className="h-3.5 w-3.5 text-slate-600" />
-                          <span>استعاضة</span>
+                          <Undo2 className="h-3.5 w-3.5 shrink-0" />
+                          <span>إيداع المتبقي للحساب المسحوب منه</span>
+                          <span className="font-mono text-teal-700">({remainingAmount.toLocaleString()})</span>
                         </button>
                       )}
 
-                      {/* Inspect details */}
-                      <button
-                        type="button"
-                        onClick={() => setInspectingCustody(custody)}
-                        className="p-2 bg-slate-50 hover:bg-slate-100 text-slate-600 rounded-xl transition cursor-pointer border border-slate-200"
-                        title="عرض كشف حساب العهدة والفواتير"
-                      >
-                        <Eye className="h-4 w-4" />
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {/* Settle Action */}
+                        <button
+                          type="button"
+                          onClick={() => handleOpenSettleModal(custody)}
+                          disabled={isFullySettled}
+                          className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                            isFullySettled 
+                              ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                              : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs'
+                          }`}
+                          title="تسجيل فاتورة تصفية ومستند"
+                        >
+                          <Receipt className="h-3.5 w-3.5" />
+                          <span>تصفية عهدة (فاتورة)</span>
+                        </button>
+  
+                        {/* Replenish Action */}
+                        {currentRole !== 'employee' && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenReplenishModal(custody)}
+                            className="py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                            title="استعاضة العهدة وإعادة تغذية رصيد الموظف"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5 text-slate-600" />
+                            <span>استعاضة</span>
+                          </button>
+                        )}
+  
+                        {/* Inspect details */}
+                        <button
+                          type="button"
+                          onClick={() => setInspectingCustody(custody)}
+                          className="p-2 bg-slate-50 hover:bg-slate-100 text-slate-600 rounded-xl transition cursor-pointer border border-slate-200"
+                          title="عرض كشف حساب العهدة والفواتير"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -1575,6 +1766,177 @@ export const CustodyManagement: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
+      {/* MODAL 3b: إيداع المتبقي من العهدة للحساب المسحوب منه المال */}
+      {/* ========================================================================= */}
+      {returnPlan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl max-w-md w-full p-6 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between gap-3 pb-4 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-2xl bg-teal-100 text-teal-700 flex items-center justify-center shrink-0">
+                  <Undo2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">إيداع المتبقي من العهدة للحساب المسحوب منه المال</h3>
+                  <p className="text-xs text-slate-500">رد النقدية المتبقية طرف الموظف إلى الخزينة وإغلاق العهدة</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReturningCustodyId(null)}
+                disabled={isReturning}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-xl hover:bg-slate-100 cursor-pointer shrink-0"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Custody Info */}
+            <div className="mt-4 p-3 bg-slate-50 rounded-2xl border border-slate-200 text-xs flex justify-between gap-3">
+              <div className="min-w-0">
+                <span className="text-slate-400 block text-[10px]">الموظف:</span>
+                <span className="font-bold text-slate-900">{returnPlan.custody.employeeName}</span>
+                <span className="text-[10px] text-slate-500 block font-mono">({returnPlan.custody.custodyNumber})</span>
+              </div>
+              <div className="text-left shrink-0">
+                <span className="text-slate-400 block text-[10px]">المتبقي طرف الموظف (سيتم إيداعه):</span>
+                <span className="font-black text-sm text-amber-700">
+                  {fmtMoney(returnPlan.amount)} {returnPlan.currency}
+                </span>
+              </div>
+            </div>
+
+            {returnPlan.amount <= 0 && !isReturning && (
+              <div className="mt-3 p-3 rounded-xl bg-slate-50 border border-slate-200 text-slate-600 text-xs font-bold flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>لا يوجد متبقٍ في هذه العهدة لرده (ربما تمت تصفيتها أو رد المتبقي منها للتو).</span>
+              </div>
+            )}
+
+            {returnError && (
+              <div className="mt-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-bold flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>{returnError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSubmitReturn} className="mt-4 space-y-3.5">
+
+              {/* Target Treasury Account */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">الإيداع في حساب / خزينة</label>
+                {returnPlan.sourceIssue ? (
+                  <div className="space-y-2">
+                    <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold flex items-start gap-2">
+                      <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>
+                        {returnPlan.sourceIssue} يرجى اختيار حساب آخر نشط لنفس الشركة وبنفس العملة ({returnPlan.currency}) لإيداع المتبقي فيه.
+                      </span>
+                    </div>
+                    <select
+                      value={returnAltAccountId}
+                      onChange={(e) => setReturnAltAccountId(e.target.value)}
+                      required
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                    >
+                      <option value="">-- اختر حساب الإيداع البديل --</option>
+                      {returnPlan.alternatives.map(acc => (
+                        <option key={acc.id} value={acc.id}>
+                          {acc.name} (الرصيد: {fmtMoney(balanceOf(acc))} {currencyOf(acc.currency)})
+                        </option>
+                      ))}
+                    </select>
+                    {returnPlan.alternatives.length === 0 && (
+                      <span className="text-[10px] text-amber-700 font-bold block">
+                        لا يوجد حساب نشط آخر لهذه الشركة بنفس العملة. أنشئ حساباً أو فعّله من صفحة الخزينة أولاً.
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <div className="px-3 py-2.5 rounded-xl bg-teal-50/60 border border-teal-200 text-xs flex items-center gap-2">
+                    <Landmark className="h-4 w-4 text-teal-700 shrink-0" />
+                    <span className="font-bold text-slate-900 truncate">{returnPlan.target?.name || returnPlan.custody.sourceAccountName}</span>
+                    <span className="text-[10px] text-teal-700 font-bold shrink-0">(الحساب المسحوب منه العهدة)</span>
+                  </div>
+                )}
+
+                {/* Balance preview: current → after the deposit (and the InstaPay bank it mirrors to) */}
+                {returnPlan.target && (
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-center text-xs">
+                    <div className="p-2 bg-white rounded-xl border border-slate-200">
+                      <span className="text-[10px] text-slate-400 block">الرصيد الحالي</span>
+                      <span className="font-black text-slate-800">
+                        {fmtMoney(balanceOf(returnPlan.target))} {currencyOf(returnPlan.target.currency)}
+                      </span>
+                    </div>
+                    <div className="p-2 bg-teal-50/60 rounded-xl border border-teal-200">
+                      <span className="text-[10px] text-teal-700 block font-bold">الرصيد بعد الإيداع</span>
+                      <span className="font-black text-teal-800">
+                        {fmtMoney(balanceOf(returnPlan.target) + returnPlan.amount)} {currencyOf(returnPlan.target.currency)}
+                      </span>
+                    </div>
+                  </div>
+                )}
+                {returnPlan.parent && (
+                  <p className="mt-2 p-2.5 rounded-xl bg-blue-50 border border-blue-100 text-[11px] text-blue-800 leading-relaxed">
+                    حساب إنستاباي مرتبط ببنك: سينعكس الإيداع تلقائياً على الحساب البنكي «{returnPlan.parent.name}» ويصبح رصيده{' '}
+                    <strong>{fmtMoney(balanceOf(returnPlan.parent) + returnPlan.amount)}</strong> بدلاً من {fmtMoney(balanceOf(returnPlan.parent))}.
+                  </p>
+                )}
+              </div>
+
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                سيتم تسجيل حركة إيداع (+ IN) في كشف حساب الخزينة، وتُغلق العهدة بمتبقٍ صفر ويُسجَّل المبلغ كمُرد للخزينة.
+              </p>
+
+              {/* Notes */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">ملاحظات (اختياري)</label>
+                <textarea
+                  rows={2}
+                  value={returnNotes}
+                  onChange={(e) => setReturnNotes(e.target.value)}
+                  placeholder="مثال: تسليم نقدية متبقية بعد انتهاء المهمة، رقم إيصال الاستلام..."
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                />
+              </div>
+
+              {/* Submit Buttons */}
+              <div className="pt-3 flex items-center justify-end gap-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setReturningCustodyId(null)}
+                  disabled={isReturning}
+                  className="px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isReturning || returnPlan.amount <= 0 || (!!returnPlan.sourceIssue && returnPlan.alternatives.length === 0)}
+                  className="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl shadow-xs transition flex items-center gap-2 cursor-pointer"
+                >
+                  {isReturning ? (
+                    <>
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      <span>جاري إيداع المتبقي...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="h-4 w-4 shrink-0" />
+                      <span>
+                        تأكيد إيداع المتبقي ({fmtMoney(returnPlan.amount)} {returnPlan.currency}) في {returnPlan.target?.name || 'الحساب المختار'}
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
       {/* MODAL 4: تفاصيل وكشف حساب العهدة المسجلة */}
       {/* ========================================================================= */}
       {inspectingCustody && (
@@ -1607,7 +1969,7 @@ export const CustodyManagement: React.FC = () => {
             </div>
 
             {/* Quick Metrics Grid */}
-            <div className="grid grid-cols-3 gap-3 my-4">
+            <div className={`grid gap-3 my-4 ${Number(inspectingCustody.returnedAmount || 0) > 0 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'}`}>
               <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-100 text-center">
                 <span className="text-[11px] text-slate-400 block font-medium">إجمالي المنصرف</span>
                 <span className="text-sm font-black text-slate-900 mt-1 block">
@@ -1620,6 +1982,14 @@ export const CustodyManagement: React.FC = () => {
                   {Number(inspectingCustody.settledAmount).toLocaleString()} {inspectingCustody.currency}
                 </span>
               </div>
+              {Number(inspectingCustody.returnedAmount || 0) > 0 && (
+                <div className="bg-teal-50/60 p-3.5 rounded-2xl border border-teal-100 text-center">
+                  <span className="text-[11px] text-teal-700 block font-medium">مُرد للخزينة</span>
+                  <span className="text-sm font-black text-teal-800 mt-1 block">
+                    {Number(inspectingCustody.returnedAmount).toLocaleString()} {inspectingCustody.currency}
+                  </span>
+                </div>
+              )}
               <div className="bg-amber-50/60 p-3.5 rounded-2xl border border-amber-100 text-center">
                 <span className="text-[11px] text-amber-700 block font-medium">المتبقي طرف الموظف</span>
                 <span className="text-sm font-black text-amber-900 mt-1 block">
@@ -1627,6 +1997,39 @@ export const CustodyManagement: React.FC = () => {
                 </span>
               </div>
             </div>
+
+            {/* Remainder returned to a treasury account */}
+            {Number(inspectingCustody.returnedAmount || 0) > 0 && (
+              <div className="p-3 rounded-2xl bg-teal-50/60 border border-teal-100 text-xs text-teal-800 flex items-center gap-2">
+                <Undo2 className="h-4 w-4 shrink-0" />
+                <span>
+                  تم رد {Number(inspectingCustody.returnedAmount).toLocaleString()} {inspectingCustody.currency} من هذه العهدة للخزينة
+                  {inspectingCustody.returnedToAccountName ? <> في حساب <strong>«{inspectingCustody.returnedToAccountName}»</strong></> : null}
+                  {inspectingCustody.returnedAt ? ` بتاريخ ${new Date(inspectingCustody.returnedAt).toLocaleDateString('ar-EG')}` : ''}.
+                </span>
+              </div>
+            )}
+
+            {/* Return the remaining cash to the account the custody was withdrawn from */}
+            {canIssueCustody && Number(inspectingCustody.remainingAmount || 0) > 0 && (
+              <div className="mt-3 p-3 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                <span className="text-slate-600">
+                  المتبقي طرف الموظف: <strong className="text-amber-700">{Number(inspectingCustody.remainingAmount).toLocaleString()} {inspectingCustody.currency}</strong> — مصدر الصرف: <strong className="text-slate-800">{inspectingCustody.sourceAccountName || 'غير محدد'}</strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const c = inspectingCustody;
+                    setInspectingCustody(null);
+                    handleOpenReturnModal(c);
+                  }}
+                  className="py-2 px-3 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer shrink-0"
+                >
+                  <Undo2 className="h-3.5 w-3.5" />
+                  <span>إيداع المتبقي للحساب المسحوب منه</span>
+                </button>
+              </div>
+            )}
 
             {/* Invoices List */}
             <div className="mt-5">

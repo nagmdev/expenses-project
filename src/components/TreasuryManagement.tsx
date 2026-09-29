@@ -1,41 +1,74 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
-import { 
-  PaymentAccount, 
-  PaymentAccountType, 
-  SUPPORTED_CURRENCIES, 
-  TransactionType 
+import {
+  PaymentAccount,
+  PaymentAccountType,
+  SUPPORTED_CURRENCIES,
+  TransactionReferenceType,
+  TransactionType
 } from '../types';
-import { 
-  Building2, 
-  Wallet, 
-  Landmark, 
-  DollarSign, 
-  CreditCard, 
-  Plus, 
-  Search, 
-  X, 
-  Edit3, 
-  Trash2, 
-  ArrowDownLeft, 
-  ArrowUpRight, 
-  History, 
+import {
+  Wallet,
+  Landmark,
+  DollarSign,
+  CreditCard,
+  Plus,
+  Search,
+  X,
+  Edit3,
+  Trash2,
+  ArrowDownLeft,
+  ArrowUpRight,
+  ArrowLeftRight,
+  Briefcase,
+  CheckCircle2,
+  History,
+  Info,
   TrendingUp,
   TrendingDown,
   Download,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Unlink
 } from 'lucide-react';
-import { 
-  handleNumericKeyDown, 
-  sanitizeAmount, 
-  sanitizeDigitalWallet, 
-  sanitizeIBAN, 
+import {
+  handleNumericKeyDown,
+  sanitizeAmount,
+  sanitizeDigitalWallet,
+  sanitizeIBAN,
   sanitizeInstaPay
 } from '../utils/validation';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
+import { isLegacyLinkedWallet, linkedParentIdOf, MAX_CUSTODY_RETURN_BATCH } from '../domain/treasury';
+import { toMoney } from '../domain/common';
 
 const errorText = (err: unknown, fallback: string) =>
   err instanceof Error && err.message ? err.message : fallback;
+
+const balanceOf = (acc: PaymentAccount) => toMoney(acc.currentBalance ?? acc.balance ?? 0);
+// Same normalisation as the domain (src/domain/treasury.ts): an empty currency is EGP.
+const currencyOf = (c?: string | null) => ((c || '').trim() || 'EGP').toUpperCase();
+
+// Readable label of a ledger entry's origin (AccountTransaction.referenceType).
+const REFERENCE_TYPE_LABELS: Record<TransactionReferenceType, string> = {
+  request: 'صرف طلب / دفعة',
+  manual_adjustment: 'حركة يدوية',
+  initial: 'رصيد افتتاحي',
+  custody: 'صرف / استعاضة عهدة',
+  custody_return: 'استرداد متبقي عهدة',
+  transfer: 'تحويل بين الحسابات',
+};
+const referenceTypeLabel = (type?: string) =>
+  (type && REFERENCE_TYPE_LABELS[type as TransactionReferenceType]) || '';
+
+const CUSTODY_RETURN_REASON = 'استرداد متبقي عهدة موظف';
+
+const ACCOUNT_TYPE_SHORT: Record<PaymentAccountType, string> = {
+  instapay: 'إنستاباي',
+  wallet: 'محفظة',
+  bank: 'بنك',
+  cash: 'كاش',
+  other: 'أخرى',
+};
 
 export const TreasuryManagement: React.FC = () => {
   const { 
@@ -48,34 +81,54 @@ export const TreasuryManagement: React.FC = () => {
     activeOrgId,
     activeOrg,
     currentRole,
-    currentUser,
     addPaymentAccount,
     updatePaymentAccount,
     deletePaymentAccount,
     recordManualAccountAdjustment,
-    resolveParentBankAccount
+    resolveParentBankAccount,
+    custodies,
+    allCustodies,
+    returnCustodyRemainders,
+    transferBetweenAccounts,
+    detachLegacyWallet
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
+  // Roles the domain lets move money between treasuries / take custody cash back (see src/domain/treasury.ts).
+  const canMoveMoney = isSuperAdmin || currentRole === 'org_admin' || currentRole === 'finance';
   const orgList = isSuperAdmin ? (allOrganizations.length > 0 ? allOrganizations : organizations) : organizations;
   const targetAccounts = isSuperAdmin ? allPaymentAccounts : paymentAccounts;
   const targetTransactions = isSuperAdmin ? allTransactions : transactions;
+  const targetCustodies = isSuperAdmin ? allCustodies : custodies;
 
-  // Strict deduplication guarantee for Ledger Transactions (by ID & reference)
+  // De-duplicate ledger entries by document id ONLY. Ledger ids are deterministic
+  // (derived from the operation key), so a retried operation can never create a second
+  // entry; two entries sharing a reference (a custody issued then replenished, several
+  // custody returns, both legs of a transfer…) are distinct real money movements.
   const cleanTargetTransactions = useMemo(() => {
     const seenIds = new Set<string>();
-    const seenRefs = new Set<string>();
     return targetTransactions.filter(tx => {
       if (seenIds.has(tx.id)) return false;
-      const refKey = tx.referenceType && tx.referenceNumber
-        ? `${tx.accountId}:::${tx.type}:::${tx.referenceType}:::${(tx.referenceNumber || '').trim().toUpperCase()}`
-        : '';
-      if (refKey && seenRefs.has(refKey)) return false;
       seenIds.add(tx.id);
-      if (refKey) seenRefs.add(refKey);
       return true;
     });
   }, [targetTransactions]);
+
+  // Linked parent bank of an account: an InstaPay channel's bank, or the bank a legacy
+  // wallet still mirrors to until it is detached. New wallets are standalone treasuries.
+  const linkedParentOf = useCallback((acc: PaymentAccount | null | undefined): PaymentAccount | null => {
+    if (!acc) return null;
+    const parentId = linkedParentIdOf(acc);
+    if (!parentId) return null;
+    return targetAccounts.find(a => a.id === parentId) || resolveParentBankAccount(acc);
+  }, [targetAccounts, resolveParentBankAccount]);
+
+  // Where an account's money actually sits (mirrors the domain's same-funds check):
+  // the bank behind a linked InstaPay channel, otherwise the account itself.
+  const fundsHolderIdOf = useCallback((acc: PaymentAccount) => linkedParentOf(acc)?.id || acc.id, [linkedParentOf]);
+
+  // Success feedback for money movements (transfer / custody return)
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Filters & State
   const [selectedOrgFilter, setSelectedOrgFilter] = useState<string>(
@@ -103,11 +156,37 @@ export const TreasuryManagement: React.FC = () => {
   const [adjustmentType, setAdjustmentType] = useState<TransactionType>('in');
   const [adjustmentAmount, setAdjustmentAmount] = useState('');
   const [adjustmentReason, setAdjustmentReason] = useState('');
+  const [adjustmentError, setAdjustmentError] = useState('');
+  // Deposit window: a plain amount, or taking back what employees still hold of their custodies
+  const [depositMode, setDepositMode] = useState<'amount' | 'custody'>('amount');
+  const [selectedCustodyIds, setSelectedCustodyIds] = useState<string[]>([]);
+  const [custodyReturnNotes, setCustodyReturnNotes] = useState('');
+
+  // Transfer Modal (account -> account)
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [transferFromId, setTransferFromId] = useState('');
+  const [transferToId, setTransferToId] = useState('');
+  const [transferAmount, setTransferAmount] = useState('');
+  const [transferDescription, setTransferDescription] = useState('');
+  const [transferError, setTransferError] = useState('');
+
+  // Detach Modal (legacy wallet still mirrored on its bank -> standalone treasury)
+  const [detachWalletId, setDetachWalletId] = useState('');
+  const [detachMode, setDetachMode] = useState<'suggested' | 'custom' | 'none'>('suggested');
+  const [detachDirection, setDetachDirection] = useState<TransactionType>('in');
+  const [detachAmount, setDetachAmount] = useState('');
+  const [detachNote, setDetachNote] = useState('');
+  const [detachError, setDetachError] = useState('');
+  const detachGuard = useSubmitGuard();
+
   // Synchronous submit locks + idempotency keys (double click / Enter+click / retry-safe)
   const accountGuard = useSubmitGuard();
   const adjustmentGuard = useSubmitGuard();
+  const custodyReturnGuard = useSubmitGuard();
+  const transferGuard = useSubmitGuard();
   const isSavingAccount = accountGuard.pending;
-  const isAdjusting = adjustmentGuard.pending;
+  const isAdjusting = adjustmentGuard.pending || custodyReturnGuard.pending;
+  const isTransferring = transferGuard.pending;
 
   // Account Detail Inspection
   const [inspectingAccount, setInspectingAccount] = useState<PaymentAccount | null>(null);
@@ -150,19 +229,13 @@ export const TreasuryManagement: React.FC = () => {
     let totalIn = 0;
     let totalOut = 0;
 
-    // Helper to determine if an account is a child channel (InstaPay or Wallet) linked to a parent Bank account.
-    // In Egyptian financial systems, InstaPay/linked wallets are mirror digital payment channels directly
-    // accessing the funds of a primary bank account. Dual deduction keeps both in sync, but for macro-level
-    // liquidity totals (الرصيد الكلي، إجمالي الوارد، إجمالي المنصرف), child channels must not be double-counted.
-    const isLinkedChildAccount = (acc: PaymentAccount) => {
-      if (acc.type !== 'instapay' && acc.type !== 'wallet') return false;
-      const parent = acc.parentAccountId
-        ? targetAccounts.find(a => a.id === acc.parentAccountId)
-        : resolveParentBankAccount(acc);
-      return Boolean(parent && parent.id !== acc.id);
-    };
+    // An InstaPay channel linked to a bank account is a mirror of that bank's funds (dual
+    // deduction keeps both in sync), so for macro-level liquidity totals (الرصيد الكلي، إجمالي
+    // الوارد، إجمالي المنصرف) it must not be counted twice. E-wallets are standalone treasuries
+    // with their own money, so they always count as primary balances.
+    const isLinkedChildAccount = (acc: PaymentAccount) => Boolean(linkedParentOf(acc));
 
-    // Filter to primary independent financial accounts (Banks, Cash Safes, standalone unlinked wallets)
+    // Filter to primary independent financial accounts (Banks, Cash Safes, wallets, unlinked InstaPay)
     let accountsToSum = filteredAccounts.filter(acc => !isLinkedChildAccount(acc));
 
     // Fallback: If user filtered/searched specifically for a child account (e.g. typed "إنستاباي"),
@@ -189,7 +262,7 @@ export const TreasuryManagement: React.FC = () => {
       totalCount, 
       linkedCount 
     };
-  }, [filteredAccounts, targetAccounts, resolveParentBankAccount]);
+  }, [filteredAccounts, linkedParentOf]);
 
   // Export Filtered Ledger Transactions to Excel / CSV with UTF-8 BOM
   const exportLedgerToExcel = () => {
@@ -198,6 +271,7 @@ export const TreasuryManagement: React.FC = () => {
       'الحساب',
       'الشركة',
       'نوع الحركة (وارد / منصرف)',
+      'نوع العملية',
       'المبلغ',
       'العملة',
       'الرصيد قبل',
@@ -225,6 +299,7 @@ export const TreasuryManagement: React.FC = () => {
         tx.accountName || '',
         orgName,
         typeText,
+        referenceTypeLabel(tx.referenceType),
         tx.amount,
         txCurrency,
         tx.balanceBefore,
@@ -291,7 +366,10 @@ export const TreasuryManagement: React.FC = () => {
     const initialNum = parseFloat(accInitialBalance) || 0;
     const finalOrgId = accOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || orgList[0]?.id || '';
     
-    const parentBank = (accType === 'instapay' || accType === 'wallet') && accParentAccountId
+    // Only an InstaPay channel is linked to a bank; a wallet (or any other type) sends no
+    // link at all (the domain keeps a legacy wallet's link until it is detached).
+    const isInstaPay = accType === 'instapay';
+    const parentBank = isInstaPay && accParentAccountId
       ? targetAccounts.find(a => a.id === accParentAccountId)
       : undefined;
 
@@ -303,8 +381,10 @@ export const TreasuryManagement: React.FC = () => {
             type: accType,
             accountIdentifier: accIdentifier.trim(),
             bankName: accBankName.trim() || undefined,
-            parentAccountId: parentBank ? parentBank.id : undefined,
-            parentAccountName: parentBank ? parentBank.name : undefined,
+            // '' (not undefined, which is stripped before writing) so "بدون ربط" really unlinks an InstaPay
+            ...(isInstaPay
+              ? { parentAccountId: parentBank ? parentBank.id : '', parentAccountName: parentBank ? parentBank.name : '' }
+              : {}),
             currency: accCurrency,
             description: accDescription.trim() || undefined,
           });
@@ -337,23 +417,127 @@ export const TreasuryManagement: React.FC = () => {
   };
 
   // Handlers for Adjustment (IN / OUT)
-  const handleOpenAdjustment = (acc: PaymentAccount, type: TransactionType) => {
+  const handleOpenAdjustment = (acc: PaymentAccount, type: TransactionType, mode: 'amount' | 'custody' = 'amount') => {
     setAdjustmentTargetAccount(acc);
     setAdjustmentType(type);
     setAdjustmentAmount('');
     setAdjustmentReason('');
+    setAdjustmentError('');
+    setDepositMode(type === 'in' ? mode : 'amount');
+    setSelectedCustodyIds([]);
+    setCustodyReturnNotes('');
     adjustmentGuard.rotateKey();
+    custodyReturnGuard.rotateKey();
+    setNotice(null);
     setIsAdjustmentModalOpen(true);
+  };
+
+  // Live copy of the modal's account (balances move while the modal is open)
+  const adjustmentAccount = adjustmentTargetAccount
+    ? targetAccounts.find(a => a.id === adjustmentTargetAccount.id) || adjustmentTargetAccount
+    : null;
+  const isCustodyReturnMode = adjustmentType === 'in' && depositMode === 'custody';
+
+  // Custodies whose remaining cash can go back into the deposit window's account:
+  // same company and currency as that account, something still left with the employee.
+  const returnableCustodies = useMemo(() => {
+    if (!adjustmentAccount) return [];
+    const accCurrency = currencyOf(adjustmentAccount.currency);
+    const seen = new Set<string>();
+    return targetCustodies
+      .filter(c => {
+        if (seen.has(c.id)) return false;
+        seen.add(c.id);
+        return c.orgId === adjustmentAccount.orgId
+          && currencyOf(c.currency) === accCurrency
+          && toMoney(c.remainingAmount) > 0;
+      })
+      .sort((a, b) =>
+        (a.employeeName || '').localeCompare(b.employeeName || '', 'ar') ||
+        (a.custodyNumber || '').localeCompare(b.custodyNumber || '')
+      );
+  }, [targetCustodies, adjustmentAccount]);
+
+  // Only rows still listed count (a custody returned meanwhile by someone else drops out).
+  const selectedReturnCustodies = useMemo(() => {
+    const picked = new Set(selectedCustodyIds);
+    return returnableCustodies.filter(c => picked.has(c.id));
+  }, [returnableCustodies, selectedCustodyIds]);
+  const selectedReturnTotal = toMoney(selectedReturnCustodies.reduce((sum, c) => sum + toMoney(c.remainingAmount), 0));
+  const allReturnableSelected =
+    returnableCustodies.length > 0 &&
+    selectedReturnCustodies.length === Math.min(returnableCustodies.length, MAX_CUSTODY_RETURN_BATCH);
+
+  const switchDepositMode = (mode: 'amount' | 'custody') => {
+    setDepositMode(mode);
+    setAdjustmentError('');
+  };
+
+  const toggleReturnCustody = (custodyId: string) => {
+    setAdjustmentError('');
+    if (selectedCustodyIds.includes(custodyId)) {
+      setSelectedCustodyIds(prev => prev.filter(id => id !== custodyId));
+      return;
+    }
+    if (selectedReturnCustodies.length >= MAX_CUSTODY_RETURN_BATCH) {
+      setAdjustmentError(`يمكن استرداد ${MAX_CUSTODY_RETURN_BATCH} عهدة كحد أقصى في العملية الواحدة.`);
+      return;
+    }
+    setSelectedCustodyIds(prev => (prev.includes(custodyId) ? prev : [...prev, custodyId]));
+  };
+
+  const toggleSelectAllReturnCustodies = () => {
+    setAdjustmentError('');
+    setSelectedCustodyIds(
+      allReturnableSelected ? [] : returnableCustodies.slice(0, MAX_CUSTODY_RETURN_BATCH).map(c => c.id)
+    );
+  };
+
+  const handleReturnCustodies = async () => {
+    if (!adjustmentAccount) return;
+    const ids = selectedReturnCustodies.map(c => c.id);
+    if (ids.length === 0) {
+      setAdjustmentError('يرجى تحديد عهدة واحدة على الأقل لاسترداد المتبقي منها.');
+      return;
+    }
+    if (ids.length > MAX_CUSTODY_RETURN_BATCH) {
+      setAdjustmentError(`يمكن استرداد ${MAX_CUSTODY_RETURN_BATCH} عهدة كحد أقصى في العملية الواحدة.`);
+      return;
+    }
+    const account = adjustmentAccount;
+
+    await custodyReturnGuard.run(async (idempotencyKey) => {
+      try {
+        setAdjustmentError('');
+        const res = await returnCustodyRemainders(ids, account.id, custodyReturnNotes.trim(), { idempotencyKey });
+        custodyReturnGuard.rotateKey();
+        setIsAdjustmentModalOpen(false);
+        setNotice(
+          res.returnedCount > 0
+            ? `تم استرداد المتبقي من ${res.returnedCount} عهدة بإجمالي ${res.totalReturned.toLocaleString()} ${currencyOf(account.currency)} وإيداعه في "${account.name}".` +
+              (res.skippedCount > 0 ? ` (تم تخطي ${res.skippedCount} عهدة لم يعد بها متبقٍ أو سبق ردها.)` : '')
+            : 'تم تنفيذ عملية الاسترداد هذه مسبقاً ولم تتكرر.'
+        );
+      } catch (err) {
+        console.error(err);
+        setAdjustmentError(errorText(err, 'حدث خطأ أثناء استرداد متبقي العهد.'));
+      }
+    });
   };
 
   const handleSaveAdjustment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!adjustmentTargetAccount) return;
+    if (isCustodyReturnMode) {
+      await handleReturnCustodies();
+      return;
+    }
     const amountNum = parseFloat(adjustmentAmount);
     if (!amountNum || amountNum <= 0) return;
 
     await adjustmentGuard.run(async (idempotencyKey) => {
       try {
+        setAdjustmentError('');
         await recordManualAccountAdjustment(
           adjustmentTargetAccount.id,
           adjustmentType,
@@ -365,7 +549,169 @@ export const TreasuryManagement: React.FC = () => {
         setIsAdjustmentModalOpen(false);
       } catch (err) {
         console.error(err);
-        alert(errorText(err, 'حدث خطأ أثناء حفظ الحركة المالية.'));
+        setAdjustmentError(errorText(err, 'حدث خطأ أثناء حفظ الحركة المالية.'));
+      }
+    });
+  };
+
+  // Handlers for Transfer (account -> account)
+  const transferableAccounts = useMemo(
+    () => targetAccounts.filter(a => a.active !== false && (selectedOrgFilter === 'all' || a.orgId === selectedOrgFilter)),
+    [targetAccounts, selectedOrgFilter]
+  );
+  const transferFrom = transferFromId ? targetAccounts.find(a => a.id === transferFromId) || null : null;
+
+  // Valid destinations mirror the domain's refusals: another active account of the same
+  // company and currency that does not hold the same funds (a bank and its own InstaPay
+  // channel, or two InstaPay channels of one bank, are one balance).
+  const transferDestinations = useMemo(() => {
+    if (!transferFrom) return [];
+    const fromCurrency = currencyOf(transferFrom.currency);
+    const fromHolder = fundsHolderIdOf(transferFrom);
+    return targetAccounts.filter(a =>
+      a.id !== transferFrom.id &&
+      a.active !== false &&
+      a.orgId === transferFrom.orgId &&
+      currencyOf(a.currency) === fromCurrency &&
+      fundsHolderIdOf(a) !== fromHolder
+    );
+  }, [targetAccounts, transferFrom, fundsHolderIdOf]);
+  const transferTo = transferToId ? transferDestinations.find(a => a.id === transferToId) || null : null;
+
+  // No overdraft on transfers: the source — and the bank behind an InstaPay source — must cover it.
+  const transferFromParent = linkedParentOf(transferFrom);
+  const transferToParent = linkedParentOf(transferTo);
+  const transferFromBalance = transferFrom ? balanceOf(transferFrom) : 0;
+  const transferAvailable = transferFromParent
+    ? Math.min(transferFromBalance, balanceOf(transferFromParent))
+    : transferFromBalance;
+  const transferAmountNum = toMoney(parseFloat(transferAmount) || 0);
+  const transferExceedsBalance = transferAmountNum > 0 && transferAmountNum > transferAvailable;
+  const canSubmitTransfer = Boolean(transferFrom && transferTo && transferAmountNum > 0 && !transferExceedsBalance);
+
+  const handleOpenTransfer = (from?: PaymentAccount) => {
+    const source = from && from.active !== false ? from : transferableAccounts.find(a => balanceOf(a) > 0) || transferableAccounts[0];
+    setTransferFromId(source?.id || '');
+    setTransferToId('');
+    setTransferAmount('');
+    setTransferDescription('');
+    setTransferError('');
+    transferGuard.rotateKey();
+    setNotice(null);
+    setIsTransferModalOpen(true);
+  };
+
+  const transferOptionLabel = (acc: PaymentAccount) => {
+    // Across companies ("all" view of the platform owner) the company code tells same-named accounts apart
+    const org = isSuperAdmin && selectedOrgFilter === 'all' ? orgList.find(o => o.id === acc.orgId) : undefined;
+    return `${acc.name} (${ACCOUNT_TYPE_SHORT[acc.type] || acc.type})${org ? ` [${org.code}]` : ''} — الرصيد: ${balanceOf(acc).toLocaleString()} ${currencyOf(acc.currency)}`;
+  };
+
+  const handleChangeTransferFrom = (fromId: string) => {
+    setTransferFromId(fromId);
+    setTransferToId('');
+    setTransferAmount('');
+    setTransferError('');
+  };
+
+  const handleSaveTransfer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!transferFrom || !transferTo) {
+      setTransferError('يرجى اختيار الحساب المحوَّل منه والحساب المحوَّل إليه.');
+      return;
+    }
+    if (transferAmountNum <= 0) {
+      setTransferError('يرجى إدخال مبلغ تحويل صحيح أكبر من الصفر.');
+      return;
+    }
+    if (transferExceedsBalance) {
+      setTransferError(`المبلغ أكبر من الرصيد المتاح للتحويل (${transferAvailable.toLocaleString()} ${currencyOf(transferFrom.currency)}).`);
+      return;
+    }
+    const from = transferFrom;
+    const to = transferTo;
+
+    await transferGuard.run(async (idempotencyKey) => {
+      try {
+        setTransferError('');
+        const res = await transferBetweenAccounts(from.id, to.id, transferAmountNum, transferDescription.trim(), { idempotencyKey });
+        transferGuard.rotateKey();
+        setIsTransferModalOpen(false);
+        // Describe the transfer the server actually stored: a retry with the same key after the
+        // form was edited returns the original transfer (money never moves twice).
+        const summary = `${res.amount.toLocaleString()} ${currencyOf(from.currency)} من "${res.fromAccountName || from.name}" إلى "${res.toAccountName || to.name}"`;
+        const number = res.transferNumber ? ` برقم ${res.transferNumber}` : '';
+        setNotice(
+          res.changed
+            ? `تم تحويل ${summary} بنجاح${number}.`
+            : `تم تنفيذ هذا التحويل مسبقاً${number} (${summary}) ولم يتكرر.`
+        );
+      } catch (err) {
+        console.error(err);
+        setTransferError(errorText(err, 'حدث خطأ أثناء تنفيذ التحويل.'));
+      }
+    });
+  };
+
+  // Handlers for detaching a legacy linked wallet (فصل المحفظة عن البنك)
+  const canDetachWallets = isSuperAdmin || currentRole === 'org_admin';
+  const legacyLinkedWallets = useMemo(() => filteredAccounts.filter(a => isLegacyLinkedWallet(a)), [filteredAccounts]);
+  const detachWallet = detachWalletId ? targetAccounts.find(a => a.id === detachWalletId) || null : null;
+  const detachBank = linkedParentOf(detachWallet);
+  const detachTotals = {
+    totalIn: toMoney(Number(detachWallet?.totalIn || 0)),
+    totalOut: toMoney(Number(detachWallet?.totalOut || 0)),
+  };
+  // While linked, every amount into the wallet was also added to the bank and every amount out
+  // was also taken from it (the opening balance never was); reversing that is totalOut - totalIn.
+  const detachSuggested = toMoney(detachTotals.totalOut - detachTotals.totalIn);
+  const detachCustomNum = toMoney(parseFloat(detachAmount) || 0);
+  const detachCorrection =
+    detachMode === 'suggested' ? detachSuggested
+    : detachMode === 'custom' ? (detachDirection === 'in' ? detachCustomNum : -detachCustomNum)
+    : 0;
+
+  const handleOpenDetach = (wallet: PaymentAccount) => {
+    setDetachWalletId(wallet.id);
+    setDetachMode('suggested');
+    setDetachDirection('in');
+    setDetachAmount('');
+    setDetachNote('');
+    setDetachError('');
+    detachGuard.rotateKey();
+    setNotice(null);
+  };
+
+  const handleSaveDetach = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!detachWallet) return;
+    if (detachMode === 'custom' && detachCustomNum <= 0) {
+      setDetachError('يرجى إدخال مبلغ التصحيح، أو اختيار الفصل بدون تعديل رصيد البنك.');
+      return;
+    }
+    if (detachCorrection !== 0 && !detachBank) {
+      setDetachError('الحساب البنكي المرتبط غير موجود؛ اختر الفصل بدون تعديل رصيد البنك.');
+      return;
+    }
+    const wallet = detachWallet;
+    const bankName = detachBank?.name || wallet.parentAccountName || 'الحساب البنكي';
+    const correction = detachCorrection;
+    await detachGuard.run(async (idempotencyKey) => {
+      try {
+        setDetachError('');
+        const res = await detachLegacyWallet(wallet.id, correction, detachTotals, detachNote.trim(), { idempotencyKey });
+        detachGuard.rotateKey();
+        setDetachWalletId('');
+        setNotice(
+          !res.changed
+            ? `المحفظة "${wallet.name}" مفصولة بالفعل عن البنك.`
+            : correction === 0
+            ? `تم فصل المحفظة "${wallet.name}" عن "${bankName}" بدون تعديل رصيد البنك؛ أصبحت خزينة مستقلة.`
+            : `تم فصل المحفظة "${wallet.name}" عن "${bankName}" وتصحيح رصيد البنك بمبلغ ${correction > 0 ? '+' : '-'}${Math.abs(correction).toLocaleString()} ${currencyOf(wallet.currency)}؛ أصبحت خزينة مستقلة.`
+        );
+      } catch (err) {
+        console.error(err);
+        setDetachError(errorText(err, 'حدث خطأ أثناء فصل المحفظة عن البنك.'));
       }
     });
   };
@@ -437,6 +783,18 @@ export const TreasuryManagement: React.FC = () => {
             <span>⚡ إيداع وتغذية رصيد خزينة / بنك (+ IN)</span>
           </button>
 
+          {canMoveMoney && (
+            <button
+              type="button"
+              onClick={() => handleOpenTransfer()}
+              className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs shadow-md transition cursor-pointer"
+              title="تحويل مبلغ من خزينة / حساب إلى خزينة / حساب آخر"
+            >
+              <ArrowLeftRight className="h-4 w-4" />
+              <span>🔁 تحويل بين الحسابات (Transfer)</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={exportLedgerToExcel}
@@ -460,6 +818,51 @@ export const TreasuryManagement: React.FC = () => {
         </div>
       </div>
 
+      {/* Success notice (transfer / custody return) */}
+      {notice && (
+        <div className="flex items-start justify-between gap-3 bg-emerald-50 border border-emerald-200 text-emerald-900 p-3.5 rounded-2xl text-xs font-bold shadow-2xs">
+          <div className="flex items-start gap-2">
+            <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+            <span className="leading-relaxed">{notice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            className="text-emerald-500 hover:text-emerald-800 p-1 hover:bg-emerald-100 rounded-lg transition cursor-pointer shrink-0"
+            title="إخفاء"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Legacy wallets still mirrored on a bank: ask the admin to detach them once */}
+      {canDetachWallets && legacyLinkedWallets.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-900 p-3.5 rounded-2xl text-xs shadow-2xs space-y-2">
+          <div className="flex items-start gap-2">
+            <Info className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+            <span className="leading-relaxed">
+              <span className="font-black">المحفظة الإلكترونية أصبحت خزينة مستقلة لا تنعكس حركاتها على البنك.</span>{' '}
+              {legacyLinkedWallets.length === 1 ? 'توجد محفظة' : `توجد ${legacyLinkedWallets.length} محافظ`} من الإعداد القديم ما زالت مربوطة بحساب بنكي.
+              افصلها مرة واحدة لتصبح مستقلة، مع تصحيح أثر حركاتها السابقة على رصيد البنك.
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {legacyLinkedWallets.map(w => (
+              <button
+                key={w.id}
+                type="button"
+                onClick={() => handleOpenDetach(w)}
+                className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-amber-100 border border-amber-300 text-amber-900 rounded-lg text-[11px] font-bold transition cursor-pointer"
+              >
+                <Unlink className="h-3 w-3" />
+                <span>فصل: {w.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Financial Overview Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {/* Total Available Balance */}
@@ -477,7 +880,7 @@ export const TreasuryManagement: React.FC = () => {
               {stats.linkedCount > 0 && (
                 <span 
                   className="inline-flex items-center gap-1 bg-emerald-800/60 backdrop-blur-xs px-2 py-0.5 rounded-full text-[10px] text-emerald-200 border border-emerald-400/30"
-                  title="تم استبعاد القنوات التابعة (إنستاباي/محافظ تابعة لحساب بنكي) تلقائياً لمنع ازدواجية احتساب الرصيد"
+                  title="تم استبعاد قنوات الإنستاباي المربوطة بحساب بنكي تلقائياً لمنع ازدواجية احتساب الرصيد (المحافظ الإلكترونية خزائن مستقلة وتُحتسب برصيدها)"
                 >
                   بدون تكرار مزدوج ✓
                 </span>
@@ -611,6 +1014,7 @@ export const TreasuryManagement: React.FC = () => {
               {filteredAccounts.map(acc => {
                 const curBal = Number(acc.currentBalance ?? acc.balance ?? 0);
                 const accOrg = orgList.find(o => o.id === acc.orgId);
+                const cardParent = linkedParentOf(acc);
 
                 return (
                   <div 
@@ -684,20 +1088,54 @@ export const TreasuryManagement: React.FC = () => {
                             <span className="font-bold text-emerald-800">{accOrg.name} ({accOrg.code})</span>
                           </div>
                         )}
-                        {(acc.type === 'instapay' || acc.type === 'wallet') && (
+                        {acc.type === 'instapay' && cardParent && (
                           <div className="flex items-center justify-between text-[10.5px] pt-1.5 border-t border-blue-100 bg-blue-50/70 -mx-3 px-3 py-1.5 rounded-b-xl">
                             <span className="text-blue-700 flex items-center gap-1 font-bold">
                               <Landmark className="h-3 w-3 text-blue-600 shrink-0" />
                               خصم/إيداع مزدوج بـ:
                             </span>
                             <div className="text-left">
-                              <span className="font-black text-blue-950 truncate max-w-[140px] block" title={acc.parentAccountName || resolveParentBankAccount(acc)?.name || 'الحساب البنكي الرئيسي'}>
-                                {acc.parentAccountName || resolveParentBankAccount(acc)?.name || 'الحساب البنكي الرئيسي'}
+                              <span className="font-black text-blue-950 truncate max-w-[140px] block" title={cardParent.name || acc.parentAccountName}>
+                                {cardParent.name || acc.parentAccountName}
                               </span>
                               <span className="text-[9.5px] text-blue-600/80 block">
                                 (قناة تابعة - لا تكرر بالرصيد الكلي)
                               </span>
                             </div>
+                          </div>
+                        )}
+                        {acc.type === 'instapay' && !cardParent && (
+                          <div className="flex items-center gap-1 text-[10.5px] pt-1.5 border-t border-amber-100 bg-amber-50/70 -mx-3 px-3 py-1.5 rounded-b-xl text-amber-800 font-bold">
+                            <Info className="h-3 w-3 text-amber-600 shrink-0" />
+                            <span>غير مربوط بحساب بنكي — يُعامل كرصيد مستقل</span>
+                          </div>
+                        )}
+                        {acc.type === 'wallet' && cardParent && (
+                          <div className="text-[10.5px] pt-1.5 border-t border-amber-200 bg-amber-50/80 -mx-3 px-3 py-1.5 rounded-b-xl text-amber-900 space-y-1.5">
+                            <div className="flex items-start gap-1.5">
+                              <Landmark className="h-3 w-3 text-amber-600 shrink-0 mt-0.5" />
+                              <span className="leading-relaxed">
+                                <span className="font-black">ما زالت مربوطة بـ ({cardParent.name})</span> من الإعداد القديم؛ حركاتها تنعكس على البنك حتى تُفصل.
+                              </span>
+                            </div>
+                            {canDetachWallets && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenDetach(acc)}
+                                className="w-full flex items-center justify-center gap-1.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-bold transition cursor-pointer"
+                              >
+                                <Unlink className="h-3 w-3" />
+                                <span>فصل المحفظة عن البنك (خزينة مستقلة)</span>
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {acc.type === 'wallet' && !cardParent && (
+                          <div className="flex items-start gap-1.5 text-[10.5px] pt-1.5 border-t border-purple-100 bg-purple-50/70 -mx-3 px-3 py-1.5 rounded-b-xl text-purple-800">
+                            <CreditCard className="h-3 w-3 text-purple-600 shrink-0 mt-0.5" />
+                            <span className="leading-relaxed">
+                              <span className="font-black">خزينة مستقلة</span> غير مرتبطة بأي حساب بنكي؛ حركاتها لا تنعكس على البنك، وتستقبل تحويلات من بنك أو محفظة أو إنستاباي.
+                            </span>
                           </div>
                         )}
                       </div>
@@ -738,6 +1176,20 @@ export const TreasuryManagement: React.FC = () => {
                           <span>سحب (- OUT)</span>
                         </button>
                       </div>
+
+                      {/* Transfer from this account */}
+                      {canMoveMoney && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenTransfer(acc)}
+                          disabled={acc.active === false}
+                          className="w-full flex items-center justify-center gap-1.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold border border-indigo-200/80 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                          title={acc.active === false ? 'الحساب معطل ولا يمكن التحويل منه' : 'تحويل مبلغ من هذا الحساب إلى حساب آخر'}
+                        >
+                          <ArrowLeftRight className="h-3.5 w-3.5" />
+                          <span>تحويل</span>
+                        </button>
+                      )}
 
                       {/* View Ledger */}
                       <button
@@ -817,6 +1269,7 @@ export const TreasuryManagement: React.FC = () => {
                 <tbody className="divide-y divide-slate-100">
                   {filteredTransactions.map(tx => {
                     const isTxIn = tx.type === 'in';
+                    const refLabel = referenceTypeLabel(tx.referenceType);
 
                     return (
                       <tr key={tx.id} className="hover:bg-slate-50/70 transition">
@@ -833,6 +1286,17 @@ export const TreasuryManagement: React.FC = () => {
                             {isTxIn ? <ArrowDownLeft className="h-3 w-3" /> : <ArrowUpRight className="h-3 w-3" />}
                             {isTxIn ? 'وارد / إيداع (+ IN)' : 'منصرف / سحب (- OUT)'}
                           </span>
+                          {refLabel && (
+                            <span className={`block mt-1 text-[10px] font-bold ${
+                              tx.referenceType === 'transfer'
+                                ? 'text-indigo-700'
+                                : tx.referenceType === 'custody_return'
+                                ? 'text-amber-700'
+                                : 'text-slate-400'
+                            }`}>
+                              {refLabel}
+                            </span>
+                          )}
                         </td>
                         <td className={`p-3.5 font-black whitespace-nowrap ${isTxIn ? 'text-emerald-700' : 'text-rose-700'}`}>
                           {isTxIn ? '+' : '-'}{tx.amount.toLocaleString()}
@@ -994,8 +1458,26 @@ export const TreasuryManagement: React.FC = () => {
                 </div>
               )}
 
-              {/* Linked Parent Bank Account for InstaPay / Digital Wallet (Dual Deduction) */}
-              {(accType === 'instapay' || accType === 'wallet') && (
+              {/* E-wallet: a standalone treasury, never linked to a bank account */}
+              {accType === 'wallet' && editingAccount && isLegacyLinkedWallet(editingAccount) && (
+                <div className="bg-amber-50/80 border border-amber-200/90 rounded-2xl p-3.5 flex items-start gap-2">
+                  <Landmark className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-amber-900 leading-relaxed">
+                    <span className="font-black">هذه المحفظة ما زالت مربوطة بحساب بنكي من الإعداد القديم</span> وحركاتها تنعكس عليه. الحفظ هنا لا يغيّر الربط؛ استخدم زر «فصل المحفظة عن البنك» في بطاقتها لتصبح خزينة مستقلة مع تصحيح رصيد البنك.
+                  </p>
+                </div>
+              )}
+              {accType === 'wallet' && !(editingAccount && isLegacyLinkedWallet(editingAccount)) && (
+                <div className="bg-purple-50/80 border border-purple-200/90 rounded-2xl p-3.5 flex items-start gap-2">
+                  <CreditCard className="h-4 w-4 text-purple-600 shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-purple-900 leading-relaxed">
+                    <span className="font-black">المحفظة الإلكترونية خزينة مستقلة بذاتها</span> وغير مرتبطة بأي حساب بنكي: أي إيداع أو سحب عليها لا ينعكس على الحساب البنكي. يمكن تغذيتها بالتحويل إليها من بنك أو محفظة أخرى أو إنستاباي عبر زر (تحويل).
+                  </p>
+                </div>
+              )}
+
+              {/* Linked Parent Bank Account for InstaPay only (Dual Deduction) */}
+              {accType === 'instapay' && (
                 <div className="bg-blue-50/80 border border-blue-200/90 rounded-2xl p-3.5 space-y-2">
                   <div className="flex items-center gap-2">
                     <Landmark className="h-4 w-4 text-blue-600 shrink-0" />
@@ -1004,7 +1486,7 @@ export const TreasuryManagement: React.FC = () => {
                     </label>
                   </div>
                   <p className="text-[11px] text-blue-800 leading-relaxed">
-                    💡 حساب الإنستاباي والمحافظ الإلكترونية تكون مغذاة أو مربوطة بحساب بنكي رئيسي. عند اختيار الحساب البنكي، سيتم تلقائياً خصم أو إيداع نفس المبلغ في البنك مع كل حركة صرف أو توريد.
+                    💡 حساب الإنستاباي قناة دفع على حساب بنكي رئيسي. عند اختيار الحساب البنكي، سيتم تلقائياً خصم أو إيداع نفس المبلغ في البنك مع كل حركة صرف أو توريد.
                   </p>
                   <select
                     value={accParentAccountId}
@@ -1088,27 +1570,33 @@ export const TreasuryManagement: React.FC = () => {
       )}
 
       {/* =========================================================================
-          MODAL 2: MANUAL ADJUSTMENT (IN / OUT)
+          MODAL 2: MANUAL ADJUSTMENT (IN / OUT) + CUSTODY RECOVERY
           ========================================================================= */}
-      {isAdjustmentModalOpen && adjustmentTargetAccount && (
+      {isAdjustmentModalOpen && adjustmentAccount && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto overscroll-contain">
-          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150 my-auto flex flex-col max-h-[90vh] overflow-hidden">
+          <div className={`bg-white rounded-3xl w-full shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150 my-auto flex flex-col max-h-[90vh] overflow-hidden ${
+            isCustodyReturnMode ? 'max-w-lg' : 'max-w-md'
+          }`}>
             <div className="flex items-center justify-between p-5 pb-3.5 border-b border-slate-100 shrink-0 bg-white rounded-t-3xl">
               <div className="flex items-center gap-2">
                 <div className={`h-8 w-8 rounded-lg flex items-center justify-center font-bold ${
                   adjustmentType === 'in' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
                 }`}>
-                  {adjustmentType === 'in' ? <ArrowDownLeft className="h-4 w-4" /> : <ArrowUpRight className="h-4 w-4" />}
+                  {isCustodyReturnMode
+                    ? <Briefcase className="h-4 w-4" />
+                    : adjustmentType === 'in' ? <ArrowDownLeft className="h-4 w-4" /> : <ArrowUpRight className="h-4 w-4" />}
                 </div>
                 <div>
                   <h3 className="font-bold text-slate-900 text-sm">
-                    {adjustmentType === 'in' ? 'إيداع وتغذية رصيد (+ IN)' : 'سحب وتسوية رصيد (- OUT)'}
+                    {isCustodyReturnMode
+                      ? 'استرداد العهد وإيداعها بالخزينة (+ IN)'
+                      : adjustmentType === 'in' ? 'إيداع وتغذية رصيد (+ IN)' : 'سحب وتسوية رصيد (- OUT)'}
                   </h3>
-                  <span className="text-[11px] text-slate-400 block">{adjustmentTargetAccount.name}</span>
+                  <span className="text-[11px] text-slate-400 block">{adjustmentAccount.name}</span>
                 </div>
               </div>
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={() => setIsAdjustmentModalOpen(false)}
                 className="text-slate-400 hover:text-slate-600 p-1.5 hover:bg-slate-100 rounded-xl transition cursor-pointer"
               >
@@ -1118,18 +1606,51 @@ export const TreasuryManagement: React.FC = () => {
 
             <form onSubmit={handleSaveAdjustment} className="flex flex-col flex-1 overflow-hidden min-h-0">
               <div className="p-5 overflow-y-auto flex-1 space-y-3.5 text-xs overscroll-contain">
+                {/* Deposit kind: a plain amount, or the cash employees still hold of their custodies */}
+                {adjustmentType === 'in' && (
+                  <div className="grid grid-cols-2 gap-1 bg-slate-100 p-1 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => switchDepositMode('amount')}
+                      className={`flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                        !isCustodyReturnMode ? 'bg-white text-emerald-800 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <ArrowDownLeft className="h-3.5 w-3.5" />
+                      <span>إيداع مبلغ</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => switchDepositMode('custody')}
+                      className={`flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                        isCustodyReturnMode ? 'bg-white text-emerald-800 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <Briefcase className="h-3.5 w-3.5" />
+                      <span>استرداد العهد</span>
+                    </button>
+                  </div>
+                )}
+
                 {/* Account Selector */}
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">الحساب أو الخزينة المستهدفة بالعملية *</label>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    {isCustodyReturnMode ? 'الحساب أو الخزينة التي سيُودع فيها المتبقي من العهد *' : 'الحساب أو الخزينة المستهدفة بالعملية *'}
+                  </label>
                   <select
-                    value={adjustmentTargetAccount.id}
+                    value={adjustmentAccount.id}
                     onChange={(e) => {
                       const found = targetAccounts.find(a => a.id === e.target.value);
-                      if (found) setAdjustmentTargetAccount(found);
+                      if (found) {
+                        setAdjustmentTargetAccount(found);
+                        // The custody list depends on the account's company & currency
+                        setSelectedCustodyIds([]);
+                        setAdjustmentError('');
+                      }
                     }}
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 text-xs"
                   >
-                    {targetAccounts.filter(a => a.active !== false).map(acc => (
+                    {targetAccounts.filter(a => a.active !== false || a.id === adjustmentAccount.id).map(acc => (
                       <option key={acc.id} value={acc.id}>
                         {acc.name} ({acc.bankName || acc.type}) - الرصيد: {Number(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency}
                       </option>
@@ -1141,112 +1662,236 @@ export const TreasuryManagement: React.FC = () => {
                 <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
                   <span className="text-slate-500 font-medium">الرصيد الحالي للحساب:</span>
                   <span className="font-bold text-slate-900 font-mono text-sm">
-                    {Number(adjustmentTargetAccount.currentBalance ?? adjustmentTargetAccount.balance ?? 0).toLocaleString()} {adjustmentTargetAccount.currency}
+                    {balanceOf(adjustmentAccount).toLocaleString()} {adjustmentAccount.currency}
                   </span>
                 </div>
 
-                {/* Amount */}
-                <div className="space-y-1.5">
-                  <label className="block font-bold text-slate-700">
-                    المبلغ المراد {adjustmentType === 'in' ? 'إيداعه' : 'سحبه'} ({adjustmentTargetAccount.currency}) *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    inputMode="decimal"
-                    value={adjustmentAmount}
-                    onKeyDown={handleNumericKeyDown}
-                    onChange={(e) => setAdjustmentAmount(sanitizeAmount(e.target.value))}
-                    placeholder="0.00"
-                    className={`w-full p-2.5 bg-slate-50 border rounded-xl font-bold font-mono text-base ${
-                      adjustmentType === 'in' ? 'focus:border-emerald-500 text-emerald-800' : 'focus:border-rose-500 text-rose-800'
-                    }`}
-                  />
-                  {/* Quick Amount Chips */}
-                  <div className="flex items-center gap-1.5 flex-wrap pt-1">
-                    <span className="text-[11px] text-slate-500 font-semibold">مبالغ سريعة:</span>
-                    {[500, 1000, 5000, 10000, 50000].map(amt => (
-                      <button
-                        key={amt}
-                        type="button"
-                        onClick={() => {
-                          const current = parseFloat(adjustmentAmount) || 0;
-                          setAdjustmentAmount(String(current + amt));
-                        }}
-                        className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 rounded-lg text-[11px] font-bold transition cursor-pointer"
-                      >
-                        +{amt.toLocaleString()}
-                      </button>
-                    ))}
-                    {adjustmentAmount && (
-                      <button
-                        type="button"
-                        onClick={() => setAdjustmentAmount('')}
-                        className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[10px] font-medium transition cursor-pointer"
-                      >
-                        مسح
-                      </button>
-                    )}
-                  </div>
-                </div>
+                {isCustodyReturnMode ? (
+                  <>
+                    {/* Custodies with cash still held by employees */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="block font-bold text-slate-700">
+                          الموظفون الذين لديهم متبقٍ من العهد ({returnableCustodies.length})
+                        </label>
+                        {returnableCustodies.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={toggleSelectAllReturnCustodies}
+                            className="text-[11px] font-bold text-emerald-700 hover:text-emerald-900 hover:underline cursor-pointer"
+                          >
+                            {allReturnableSelected ? 'إلغاء تحديد الكل' : 'تحديد الكل'}
+                          </button>
+                        )}
+                      </div>
 
-                {/* Reason / Notes */}
-                <div className="space-y-1.5">
-                  <label className="block font-bold text-slate-700">بيان وسبب الحركة *</label>
-                  <textarea
-                    required
-                    rows={2}
-                    value={adjustmentReason}
-                    onChange={(e) => setAdjustmentReason(e.target.value)}
-                    placeholder={
-                      adjustmentType === 'in'
-                        ? 'مثال: توريد نقدي، استلام مبيعات يومية، إيداع بنكي...'
-                        : 'مثال: تسليم عهدة كاش، سحب نثريات غير مجدولة، مصاريف بنكية...'
-                    }
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
-                  />
-                  {/* Quick Reason Chips */}
-                  {adjustmentType === 'in' ? (
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-[11px] text-slate-500 font-semibold">أسباب شائعة:</span>
-                      {[
-                        'تغذية رصيد عهدة تشغيل',
-                        'إيداع مبيعات نقدية',
-                        'تحويل من حساب بنكي',
-                        'تمويل رأس مال تشغيلي',
-                        'استرداد متبقي عهدة موظف'
-                      ].map(reason => (
-                        <button
-                          key={reason}
-                          type="button"
-                          onClick={() => setAdjustmentReason(reason)}
-                          className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium transition cursor-pointer"
-                        >
-                          {reason}
-                        </button>
-                      ))}
+                      {returnableCustodies.length === 0 ? (
+                        <div className="p-6 text-center text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200 leading-relaxed">
+                          <Briefcase className="h-6 w-6 mx-auto mb-2 text-slate-300" />
+                          لا توجد عهد بها متبقٍ لدى الموظفين في شركة هذا الحساب وبنفس عملته ({currencyOf(adjustmentAccount.currency)}).
+                        </div>
+                      ) : (
+                        <div className="max-h-64 overflow-y-auto overscroll-contain border border-slate-200 rounded-xl divide-y divide-slate-100">
+                          {returnableCustodies.map(c => {
+                            const checked = selectedCustodyIds.includes(c.id);
+                            return (
+                              <label
+                                key={c.id}
+                                className={`flex items-center gap-3 p-2.5 cursor-pointer transition ${
+                                  checked ? 'bg-emerald-50/80' : 'hover:bg-slate-50'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleReturnCustody(c.id)}
+                                  className="h-4 w-4 accent-emerald-600 cursor-pointer shrink-0"
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="font-bold text-slate-900 truncate">{c.employeeName}</span>
+                                    <span className="font-mono text-[10px] text-slate-500 shrink-0">({c.custodyNumber})</span>
+                                  </div>
+                                  <span className="text-[10.5px] text-slate-400 block truncate">
+                                    مسحوبة من: {c.sourceAccountName || 'غير محدد'}
+                                    {c.sourceAccountId === adjustmentAccount.id ? ' (نفس الحساب)' : ''}
+                                  </span>
+                                </div>
+                                <span className="font-black text-emerald-700 font-mono whitespace-nowrap">
+                                  {toMoney(c.remainingAmount).toLocaleString()}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {returnableCustodies.length > MAX_CUSTODY_RETURN_BATCH && (
+                        <p className="text-[11px] text-amber-700 font-semibold">
+                          يمكن استرداد {MAX_CUSTODY_RETURN_BATCH} عهدة كحد أقصى في العملية الواحدة؛ نفّذ الباقي في عملية أخرى.
+                        </p>
+                      )}
                     </div>
-                  ) : (
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-[11px] text-slate-500 font-semibold">أسباب شائعة:</span>
-                      {[
-                        'صرف عهدة نقدية لمندوب',
-                        'مصروفات نقدية طارئة',
-                        'تحويل إلى حساب فرعي',
-                        'رسوم ومصاريف بنكية'
-                      ].map(reason => (
-                        <button
-                          key={reason}
-                          type="button"
-                          onClick={() => setAdjustmentReason(reason)}
-                          className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium transition cursor-pointer"
-                        >
-                          {reason}
-                        </button>
-                      ))}
+
+                    {/* Live total + balance preview */}
+                    {selectedReturnCustodies.length > 0 && (
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-emerald-800 font-semibold">العهد المحددة:</span>
+                          <span className="font-bold text-emerald-950">{selectedReturnCustodies.length}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-emerald-800 font-semibold">إجمالي المبلغ المسترد:</span>
+                          <span className="font-black text-emerald-950 font-mono text-sm">
+                            +{selectedReturnTotal.toLocaleString()} {currencyOf(adjustmentAccount.currency)}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between pt-1.5 border-t border-emerald-200/70">
+                          <span className="text-emerald-800 font-semibold">رصيد الحساب بعد الاسترداد:</span>
+                          <span className="font-bold text-emerald-950 font-mono">
+                            {toMoney(balanceOf(adjustmentAccount) + selectedReturnTotal).toLocaleString()} {currencyOf(adjustmentAccount.currency)}
+                          </span>
+                        </div>
+                        {linkedParentOf(adjustmentAccount) && (
+                          <p className="text-[10.5px] text-blue-700 font-semibold">
+                            سيُضاف نفس الإجمالي تلقائياً إلى الحساب البنكي المرتبط ({linkedParentOf(adjustmentAccount)?.name}).
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Optional notes */}
+                    <div className="space-y-1.5">
+                      <label className="block font-bold text-slate-700">ملاحظات (اختياري)</label>
+                      <textarea
+                        rows={2}
+                        value={custodyReturnNotes}
+                        onChange={(e) => setCustodyReturnNotes(e.target.value)}
+                        placeholder="مثال: تسوية نهاية الشهر، استلام النقدية من المندوبين..."
+                        className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                      />
+                      <p className="text-[10.5px] text-slate-400 leading-relaxed">
+                        يُودَع متبقي كل عهدة محددة في هذا الحساب، وتُغلق العهدة (المتبقي = صفر) مع قيد مستقل لكل عهدة في دفتر الحركات.
+                      </p>
                     </div>
-                  )}
-                </div>
+                  </>
+                ) : (
+                  <>
+                    {/* Amount */}
+                    <div className="space-y-1.5">
+                      <label className="block font-bold text-slate-700">
+                        المبلغ المراد {adjustmentType === 'in' ? 'إيداعه' : 'سحبه'} ({adjustmentAccount.currency}) *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        inputMode="decimal"
+                        value={adjustmentAmount}
+                        onKeyDown={handleNumericKeyDown}
+                        onChange={(e) => setAdjustmentAmount(sanitizeAmount(e.target.value))}
+                        placeholder="0.00"
+                        className={`w-full p-2.5 bg-slate-50 border rounded-xl font-bold font-mono text-base ${
+                          adjustmentType === 'in' ? 'focus:border-emerald-500 text-emerald-800' : 'focus:border-rose-500 text-rose-800'
+                        }`}
+                      />
+                      {/* Quick Amount Chips */}
+                      <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                        <span className="text-[11px] text-slate-500 font-semibold">مبالغ سريعة:</span>
+                        {[500, 1000, 5000, 10000, 50000].map(amt => (
+                          <button
+                            key={amt}
+                            type="button"
+                            onClick={() => {
+                              const current = parseFloat(adjustmentAmount) || 0;
+                              setAdjustmentAmount(String(current + amt));
+                            }}
+                            className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 rounded-lg text-[11px] font-bold transition cursor-pointer"
+                          >
+                            +{amt.toLocaleString()}
+                          </button>
+                        ))}
+                        {adjustmentAmount && (
+                          <button
+                            type="button"
+                            onClick={() => setAdjustmentAmount('')}
+                            className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[10px] font-medium transition cursor-pointer"
+                          >
+                            مسح
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Reason / Notes */}
+                    <div className="space-y-1.5">
+                      <label className="block font-bold text-slate-700">بيان وسبب الحركة *</label>
+                      <textarea
+                        required
+                        rows={2}
+                        value={adjustmentReason}
+                        onChange={(e) => setAdjustmentReason(e.target.value)}
+                        placeholder={
+                          adjustmentType === 'in'
+                            ? 'مثال: توريد نقدي، استلام مبيعات يومية، إيداع بنكي...'
+                            : 'مثال: تسليم عهدة كاش، سحب نثريات غير مجدولة، مصاريف بنكية...'
+                        }
+                        className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                      />
+                      {/* Quick Reason Chips */}
+                      {adjustmentType === 'in' ? (
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[11px] text-slate-500 font-semibold">أسباب شائعة:</span>
+                          {[
+                            'تغذية رصيد عهدة تشغيل',
+                            'إيداع مبيعات نقدية',
+                            'تحويل من حساب بنكي',
+                            'تمويل رأس مال تشغيلي',
+                            CUSTODY_RETURN_REASON
+                          ].map(reason => (
+                            <button
+                              key={reason}
+                              type="button"
+                              // Taking custody cash back is a real custody operation (closes the custodies), not a free-text deposit
+                              onClick={() => (reason === CUSTODY_RETURN_REASON ? switchDepositMode('custody') : setAdjustmentReason(reason))}
+                              className={`px-2 py-0.5 rounded-lg text-[11px] font-medium transition cursor-pointer ${
+                                reason === CUSTODY_RETURN_REASON
+                                  ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200/80 inline-flex items-center gap-1'
+                                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                              }`}
+                            >
+                              {reason === CUSTODY_RETURN_REASON && <Briefcase className="h-3 w-3" />}
+                              {reason}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[11px] text-slate-500 font-semibold">أسباب شائعة:</span>
+                          {[
+                            'صرف عهدة نقدية لمندوب',
+                            'مصروفات نقدية طارئة',
+                            'تحويل إلى حساب فرعي',
+                            'رسوم ومصاريف بنكية'
+                          ].map(reason => (
+                            <button
+                              key={reason}
+                              type="button"
+                              onClick={() => setAdjustmentReason(reason)}
+                              className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium transition cursor-pointer"
+                            >
+                              {reason}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {adjustmentError && (
+                  <div className="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-xl font-bold leading-relaxed">
+                    {adjustmentError}
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center justify-end gap-2.5 p-4 sm:px-6 border-t border-slate-100 shrink-0 bg-slate-50/90 rounded-b-3xl">
@@ -1257,16 +1902,389 @@ export const TreasuryManagement: React.FC = () => {
                 >
                   إلغاء
                 </button>
+                {isCustodyReturnMode ? (
+                  <button
+                    type="submit"
+                    disabled={isAdjusting || selectedReturnCustodies.length === 0}
+                    className="px-5 py-2.5 text-white rounded-xl font-bold shadow-md transition cursor-pointer active:scale-98 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isAdjusting
+                      ? 'جاري الاسترداد...'
+                      : `تأكيد استرداد (${selectedReturnCustodies.length}) عهد بإجمالي ${selectedReturnTotal.toLocaleString()} ${currencyOf(adjustmentAccount.currency)}`}
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={isAdjusting || !adjustmentAmount}
+                    className={`px-5 py-2.5 text-white rounded-xl font-bold shadow-md transition cursor-pointer active:scale-98 ${
+                      adjustmentType === 'in'
+                        ? 'bg-emerald-600 hover:bg-emerald-700'
+                        : 'bg-rose-600 hover:bg-rose-700'
+                    }`}
+                  >
+                    {isAdjusting ? 'جاري الحفظ...' : (adjustmentType === 'in' ? 'تأكيد الإيداع (+)' : 'تأكيد السحب (-)')}
+                  </button>
+                )}
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL 3: TRANSFER BETWEEN ACCOUNTS (ترانسفير)
+          ========================================================================= */}
+      {isTransferModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto overscroll-contain">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150 my-auto flex flex-col max-h-[90vh] overflow-hidden">
+            <div className="flex items-center justify-between p-5 pb-3.5 border-b border-slate-100 shrink-0 bg-white rounded-t-3xl">
+              <div className="flex items-center gap-2">
+                <div className="h-8 w-8 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold">
+                  <ArrowLeftRight className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm">تحويل بين الحسابات والخزائن (Transfer)</h3>
+                  <span className="text-[11px] text-slate-400 block">نقل رصيد من خزينة / حساب إلى آخر داخل نفس الشركة</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsTransferModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 p-1.5 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveTransfer} className="flex flex-col flex-1 overflow-hidden min-h-0">
+              <div className="p-5 overflow-y-auto flex-1 space-y-3.5 text-xs overscroll-contain">
+                {transferableAccounts.length < 2 && (
+                  <div className="bg-amber-50 border border-amber-200 text-amber-800 p-3 rounded-xl font-semibold leading-relaxed">
+                    يلزم وجود حسابين نشطين على الأقل في نفس الشركة لإجراء تحويل بينهما.
+                  </div>
+                )}
+
+                {/* From */}
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">من حساب / خزينة (المحوَّل منه) *</label>
+                  <select
+                    value={transferFromId}
+                    onChange={(e) => handleChangeTransferFrom(e.target.value)}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 text-xs"
+                  >
+                    <option value="" disabled>-- اختر الحساب المحوَّل منه --</option>
+                    {transferableAccounts.map(acc => (
+                      <option key={acc.id} value={acc.id}>{transferOptionLabel(acc)}</option>
+                    ))}
+                  </select>
+                  {transferFrom && (
+                    <div className="mt-1.5 bg-slate-50 p-2.5 rounded-xl border border-slate-100 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500 font-medium">الرصيد المتاح للتحويل:</span>
+                        <span className={`font-bold font-mono text-sm ${transferAvailable > 0 ? 'text-slate-900' : 'text-rose-700'}`}>
+                          {transferAvailable.toLocaleString()} {currencyOf(transferFrom.currency)}
+                        </span>
+                      </div>
+                      {transferFromParent && (
+                        <p className="text-[10.5px] text-blue-700 font-semibold leading-relaxed">
+                          {transferFrom.type === 'wallet' ? 'محفظة ما زالت مربوطة بالحساب البنكي' : 'قناة إنستاباي على الحساب البنكي'} ({transferFromParent.name}) — رصيد البنك: {balanceOf(transferFromParent).toLocaleString()}؛ يُخصم المبلغ من الاثنين معاً.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* To */}
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">إلى حساب / خزينة (المحوَّل إليه) *</label>
+                  <select
+                    value={transferToId}
+                    onChange={(e) => {
+                      setTransferToId(e.target.value);
+                      setTransferError('');
+                    }}
+                    disabled={!transferFrom || transferDestinations.length === 0}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 text-xs disabled:opacity-60"
+                  >
+                    <option value="">-- اختر الحساب المحوَّل إليه --</option>
+                    {transferDestinations.map(acc => (
+                      <option key={acc.id} value={acc.id}>{transferOptionLabel(acc)}</option>
+                    ))}
+                  </select>
+                  {transferFrom && transferDestinations.length === 0 ? (
+                    <p className="text-[10.5px] text-amber-700 font-semibold mt-1 leading-relaxed">
+                      لا يوجد حساب آخر نشط في نفس الشركة وبنفس العملة ({currencyOf(transferFrom.currency)}) يمكن التحويل إليه.
+                    </p>
+                  ) : (
+                    <p className="text-[10.5px] text-slate-400 mt-1 leading-relaxed">
+                      تظهر حسابات نفس الشركة والعملة فقط، ولا يظهر الحساب البنكي مع قناة الإنستاباي (أو المحفظة غير المفصولة) المربوطة به (هما نفس الرصيد).
+                    </p>
+                  )}
+                </div>
+
+                {/* Amount */}
+                <div className="space-y-1.5">
+                  <label className="block font-bold text-slate-700">
+                    مبلغ التحويل{transferFrom ? ` (${currencyOf(transferFrom.currency)})` : ''} *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    inputMode="decimal"
+                    value={transferAmount}
+                    onKeyDown={(e) => handleNumericKeyDown(e, true)}
+                    onChange={(e) => {
+                      setTransferAmount(sanitizeAmount(e.target.value));
+                      setTransferError('');
+                    }}
+                    placeholder="0.00"
+                    className={`w-full p-2.5 bg-slate-50 border rounded-xl font-bold font-mono text-base text-indigo-900 ${
+                      transferExceedsBalance ? 'border-rose-400 focus:border-rose-500' : 'border-slate-200 focus:border-indigo-500'
+                    }`}
+                  />
+                  <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                    <button
+                      type="button"
+                      disabled={!transferFrom || transferAvailable <= 0}
+                      onClick={() => {
+                        setTransferAmount(String(toMoney(transferAvailable)));
+                        setTransferError('');
+                      }}
+                      className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200/80 rounded-lg text-[11px] font-bold transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      كامل الرصيد
+                    </button>
+                    {transferAmount && (
+                      <button
+                        type="button"
+                        onClick={() => setTransferAmount('')}
+                        className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[10px] font-medium transition cursor-pointer"
+                      >
+                        مسح
+                      </button>
+                    )}
+                  </div>
+                  {transferExceedsBalance && transferFrom && (
+                    <p className="text-[11px] text-rose-700 font-bold">
+                      المبلغ أكبر من الرصيد المتاح للتحويل ({transferAvailable.toLocaleString()} {currencyOf(transferFrom.currency)}).
+                    </p>
+                  )}
+                </div>
+
+                {/* Description */}
+                <div className="space-y-1.5">
+                  <label className="block font-bold text-slate-700">البيان (اختياري)</label>
+                  <input
+                    type="text"
+                    value={transferDescription}
+                    onChange={(e) => setTransferDescription(e.target.value)}
+                    placeholder="مثال: تغذية المحفظة من البنك، تجميع السيولة في الخزينة الرئيسية..."
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                  />
+                </div>
+
+                {/* Preview of both balances after the transfer */}
+                {transferFrom && transferTo && transferAmountNum > 0 && !transferExceedsBalance && (
+                  <div className="bg-indigo-50/70 border border-indigo-200 rounded-xl p-3 space-y-2">
+                    <span className="block font-bold text-indigo-900">معاينة الأرصدة بعد التحويل:</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-600 truncate">{transferFrom.name}</span>
+                      <span className="font-mono font-bold whitespace-nowrap">
+                        <span className="text-slate-400">{transferFromBalance.toLocaleString()}</span>
+                        <span className="text-slate-400 mx-1">←</span>
+                        <span className="text-rose-700">{toMoney(transferFromBalance - transferAmountNum).toLocaleString()}</span>
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-600 truncate">{transferTo.name}</span>
+                      <span className="font-mono font-bold whitespace-nowrap">
+                        <span className="text-slate-400">{balanceOf(transferTo).toLocaleString()}</span>
+                        <span className="text-slate-400 mx-1">←</span>
+                        <span className="text-emerald-700">{toMoney(balanceOf(transferTo) + transferAmountNum).toLocaleString()}</span>
+                      </span>
+                    </div>
+                    {(transferFromParent || transferToParent) && (
+                      <div className="pt-1.5 border-t border-indigo-200/70 space-y-0.5 text-[10.5px] text-blue-700 font-semibold">
+                        {transferFromParent && <p>سيُخصم نفس المبلغ تلقائياً من الحساب البنكي المرتبط ({transferFromParent.name}).</p>}
+                        {transferToParent && <p>سيُضاف نفس المبلغ تلقائياً إلى الحساب البنكي المرتبط ({transferToParent.name}).</p>}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {transferError && (
+                  <div className="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-xl font-bold leading-relaxed">
+                    {transferError}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 p-4 sm:px-6 border-t border-slate-100 shrink-0 bg-slate-50/90 rounded-b-3xl">
+                <button
+                  type="button"
+                  onClick={() => setIsTransferModalOpen(false)}
+                  className="px-4 py-2 text-slate-600 hover:bg-slate-200/60 rounded-xl font-bold transition cursor-pointer"
+                >
+                  إلغاء
+                </button>
                 <button
                   type="submit"
-                  disabled={isAdjusting || !adjustmentAmount}
-                  className={`px-5 py-2.5 text-white rounded-xl font-bold shadow-md transition cursor-pointer active:scale-98 ${
-                    adjustmentType === 'in' 
-                      ? 'bg-emerald-600 hover:bg-emerald-700' 
-                      : 'bg-rose-600 hover:bg-rose-700'
-                  }`}
+                  disabled={isTransferring || !canSubmitTransfer}
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold shadow-md transition cursor-pointer active:scale-98 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {isAdjusting ? 'جاري الحفظ...' : (adjustmentType === 'in' ? 'تأكيد الإيداع (+)' : 'تأكيد السحب (-)')}
+                  {isTransferring ? 'جاري التحويل...' : 'تأكيد التحويل'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL 4: DETACH A LEGACY WALLET FROM ITS BANK (فصل المحفظة عن البنك)
+          ========================================================================= */}
+      {detachWallet && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto overscroll-contain">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150 my-auto flex flex-col max-h-[90vh] overflow-hidden">
+            <div className="flex items-center justify-between p-5 pb-3.5 border-b border-slate-100 shrink-0 bg-white rounded-t-3xl">
+              <div className="flex items-center gap-2">
+                <div className="h-8 w-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center font-bold">
+                  <Unlink className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm">فصل المحفظة عن البنك</h3>
+                  <span className="text-[11px] text-slate-400 block">{detachWallet.name} — تصبح خزينة مستقلة لا تنعكس حركاتها على البنك</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDetachWalletId('')}
+                className="text-slate-400 hover:text-slate-600 p-1.5 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveDetach} className="flex flex-col flex-1 overflow-hidden min-h-0">
+              <div className="p-5 overflow-y-auto flex-1 space-y-3.5 text-xs overscroll-contain">
+                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">رصيد المحفظة (لا يتغير):</span>
+                    <span className="font-mono font-bold text-slate-900">{balanceOf(detachWallet).toLocaleString()} {currencyOf(detachWallet.currency)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">الحساب البنكي المربوط:</span>
+                    <span className="font-bold text-slate-900">{detachBank ? `${detachBank.name} — ${balanceOf(detachBank).toLocaleString()} ${currencyOf(detachBank.currency)}` : 'غير موجود'}</span>
+                  </div>
+                  <div className="flex items-center justify-between pt-1.5 border-t border-slate-200/70">
+                    <span className="text-slate-500">دخل المحفظة أثناء الربط:</span>
+                    <span className="font-mono font-bold text-emerald-700">+{detachTotals.totalIn.toLocaleString()}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">خرج من المحفظة أثناء الربط:</span>
+                    <span className="font-mono font-bold text-rose-700">-{detachTotals.totalOut.toLocaleString()}</span>
+                  </div>
+                </div>
+
+                <p className="text-slate-600 leading-relaxed">
+                  طوال فترة الربط كان كل مبلغ يدخل المحفظة يُضاف للبنك أيضاً، وكل مبلغ يخرج منها يُخصم من البنك أيضاً.
+                  لإلغاء هذا الأثر يُقترح{' '}
+                  {detachSuggested === 0
+                    ? <span className="font-bold">عدم تعديل رصيد البنك (الأثر الصافي صفر)</span>
+                    : <span className="font-bold">{detachSuggested > 0 ? 'إضافة' : 'خصم'} {Math.abs(detachSuggested).toLocaleString()} {currencyOf(detachWallet.currency)} {detachSuggested > 0 ? 'إلى' : 'من'} رصيد البنك</span>}.
+                  إن كنت صححت رصيد البنك يدوياً من قبل، اختر الفصل بدون تعديل.
+                </p>
+
+                <div className="space-y-1.5">
+                  {([
+                    ['suggested', detachSuggested === 0 ? 'الفصل (لا يلزم تعديل رصيد البنك)' : `تطبيق التصحيح المقترح (${detachSuggested > 0 ? '+' : '-'}${Math.abs(detachSuggested).toLocaleString()})`],
+                    ['custom', 'تحديد مبلغ تصحيح آخر'],
+                    ['none', 'الفصل فقط بدون تعديل رصيد البنك'],
+                  ] as const).map(([mode, label]) => (
+                    <label key={mode} className={`flex items-center gap-2 p-2.5 rounded-xl border cursor-pointer transition ${detachMode === mode ? 'border-amber-400 bg-amber-50' : 'border-slate-200 hover:bg-slate-50'}`}>
+                      <input
+                        type="radio"
+                        name="detach-mode"
+                        checked={detachMode === mode}
+                        onChange={() => {
+                          setDetachMode(mode);
+                          setDetachError('');
+                        }}
+                        className="accent-amber-600"
+                      />
+                      <span className="font-bold text-slate-800">{label}</span>
+                    </label>
+                  ))}
+                </div>
+
+                {detachMode === 'custom' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <select
+                      value={detachDirection}
+                      onChange={(e) => setDetachDirection(e.target.value as TransactionType)}
+                      className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-900 text-xs"
+                    >
+                      <option value="in">إضافة إلى البنك (+)</option>
+                      <option value="out">خصم من البنك (-)</option>
+                    </select>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={detachAmount}
+                      onKeyDown={(e) => handleNumericKeyDown(e, true)}
+                      onChange={(e) => {
+                        setDetachAmount(sanitizeAmount(e.target.value));
+                        setDetachError('');
+                      }}
+                      placeholder="0.00"
+                      className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold font-mono text-sm"
+                    />
+                  </div>
+                )}
+
+                <div className="space-y-1.5">
+                  <label className="block font-bold text-slate-700">ملاحظة (اختياري)</label>
+                  <input
+                    type="text"
+                    value={detachNote}
+                    onChange={(e) => setDetachNote(e.target.value)}
+                    placeholder="مثال: مطابقة مع كشف حساب البنك"
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+                  />
+                </div>
+
+                {detachBank && detachCorrection !== 0 && (
+                  <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 flex items-center justify-between gap-2">
+                    <span className="font-bold text-amber-900 truncate">رصيد {detachBank.name} بعد التصحيح:</span>
+                    <span className="font-mono font-bold whitespace-nowrap">
+                      <span className="text-slate-400">{balanceOf(detachBank).toLocaleString()}</span>
+                      <span className="text-slate-400 mx-1">←</span>
+                      <span className={detachCorrection > 0 ? 'text-emerald-700' : 'text-rose-700'}>{toMoney(balanceOf(detachBank) + detachCorrection).toLocaleString()}</span>
+                    </span>
+                  </div>
+                )}
+
+                {detachError && (
+                  <div className="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-xl font-bold leading-relaxed">
+                    {detachError}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 p-4 sm:px-6 border-t border-slate-100 shrink-0 bg-slate-50/90 rounded-b-3xl">
+                <button
+                  type="button"
+                  onClick={() => setDetachWalletId('')}
+                  className="px-4 py-2 text-slate-600 hover:bg-slate-200/60 rounded-xl font-bold transition cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={detachGuard.pending}
+                  className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold shadow-md transition cursor-pointer active:scale-98 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {detachGuard.pending ? 'جاري الفصل...' : 'تأكيد فصل المحفظة'}
                 </button>
               </div>
             </form>

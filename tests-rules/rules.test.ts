@@ -12,10 +12,10 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { collection, doc, getDocs, setDoc, updateDoc, type Firestore } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, setDoc, updateDoc, type Firestore } from 'firebase/firestore';
 import { createFirestoreStore } from '../src/domain/firestoreStore';
 import { createExpenseRequest, transitionExpenseRequest } from '../src/domain/requests';
-import { createPaymentAccount, settleCustodyItem } from '../src/domain/treasury';
+import { createPaymentAccount, detachLegacyWallet, returnCustodyRemainders, settleCustodyItem, transferBetweenAccounts } from '../src/domain/treasury';
 import { restoreRecord, readLegacySnapshot } from '../src/domain/legacyRecovery';
 import { DEFAULT_EMAIL_SETTINGS } from '../src/services/emailTemplates';
 import type { Actor } from '../src/domain/common';
@@ -28,6 +28,7 @@ const OWNER = { uid: 'uidOwner000000000000000001', email: 'mahmoud@tieapps.com' 
 const REMOVED = { uid: 'uidRemoved0000000000000001', email: 'awadhsaudi2030@gmail.com' };
 const ADMIN = { uid: 'uidAdmin000000000000000001', email: 'admin@acme.test' };
 const EMP = { uid: 'uidEmployee0000000000000001', email: 'emp@acme.test' };
+const FIN = { uid: 'uidFinance00000000000000001', email: 'fin@acme.test' };
 
 const db = (u: { uid: string; email: string }, verified = true): Firestore =>
   env.authenticatedContext(u.uid, { email: u.email, email_verified: verified }).firestore() as unknown as Firestore;
@@ -53,6 +54,8 @@ beforeEach(async () => {
     await setDoc(doc(f, 'organizations', OTHER_ORG), { id: OTHER_ORG, name: 'Other', code: 'OTH', currency: 'EGP', notificationRecipients: [] });
     await setDoc(doc(f, 'users', ADMIN.uid), { orgId: ORG, role: 'org_admin', active: true });
     await setDoc(doc(f, 'members', `${ADMIN.uid}_${ORG}`), { orgId: ORG, userId: ADMIN.uid, userEmail: ADMIN.email, role: 'org_admin', active: true });
+    await setDoc(doc(f, 'users', FIN.uid), { orgId: ORG, role: 'finance', active: true });
+    await setDoc(doc(f, 'members', `${FIN.uid}_${ORG}`), { orgId: ORG, userId: FIN.uid, userEmail: FIN.email, role: 'finance', active: true });
     await setDoc(doc(f, 'users', EMP.uid), { orgId: ORG, role: 'employee', active: true });
     await setDoc(doc(f, 'members', `${EMP.uid}_${ORG}`), { orgId: ORG, userId: EMP.uid, userEmail: EMP.email, role: 'employee', active: true });
     await setDoc(doc(f, 'services', 'srv-1'), { orgId: ORG, name: 'Cloud', code: 'CLD', spentAmount: 0 });
@@ -116,6 +119,103 @@ describe('real domain operations pass the rules', () => {
     // a forged settlement for someone else's custody / another company is refused
     await assertFails(setDoc(doc(db(EMP), 'custodySettlements', 'stl-forged'), { custodyId: 'cus-other', orgId: ORG, employeeId: EMP.uid, amount: 1 }));
     await assertFails(setDoc(doc(db(EMP), 'custodySettlements', 'stl-forged2'), { custodyId: 'cus-1', orgId: OTHER_ORG, employeeId: EMP.uid, amount: 1 }));
+  });
+
+  // Treasury accounts + the custodies' source account (seeded without rules).
+  const seedTreasury = () =>
+    env.withSecurityRulesDisabled(async ctx => {
+      const f = ctx.firestore();
+      const account = (id: string, balance: number, extra: Record<string, unknown> = {}) =>
+        setDoc(doc(f, 'paymentAccounts', id), {
+          orgId: ORG, name: id, type: 'cash', accountIdentifier: id, currency: 'EGP', active: true,
+          balance, currentBalance: balance, initialBalance: balance, totalIn: 0, totalOut: 0, ...extra,
+        });
+      await account('acc-cash', 1000);
+      await account('acc-bank', 5000, { type: 'bank' });
+      await account('acc-insta', 5000, { type: 'instapay', parentAccountId: 'acc-bank' });
+      await account('acc-wallet', 0, { type: 'wallet' }); // standalone
+      // pre-standalone wallet: still linked (mirrors) until detached; spent 400 net through it
+      await account('acc-wallet-old', 600, { type: 'wallet', parentAccountId: 'acc-bank', parentAccountName: 'acc-bank', initialBalance: 1000, totalOut: 400 });
+      await setDoc(doc(f, 'custodies', 'cus-1'), { sourceAccountId: 'acc-cash', sourceAccountName: 'acc-cash' }, { merge: true });
+      await setDoc(doc(f, 'custodies', 'cus-other'), { sourceAccountId: 'acc-cash', sourceAccountName: 'acc-cash' }, { merge: true });
+    });
+  const read = async (collectionName: string, id: string) => {
+    let data: Record<string, any> | undefined;
+    await env.withSecurityRulesDisabled(async ctx => {
+      data = (await getDoc(doc(ctx.firestore(), collectionName, id))).data();
+    });
+    return data!;
+  };
+
+  it('finance returns several custody remainders to their source account in one transaction (and a retry is a no-op)', async () => {
+    await seedTreasury();
+    const store = createFirestoreStore(db(FIN));
+    const res = await returnCustodyRemainders(store, actor(FIN, 'finance'), { custodyIds: ['cus-1', 'cus-other'] }, 'key-00000010');
+    expect(res.changed).toBe(true);
+    expect(res.value.totalReturned).toBe(1500);
+    expect((await read('paymentAccounts', 'acc-cash')).currentBalance).toBe(2500);
+    expect(await read('custodies', 'cus-1')).toMatchObject({ remainingAmount: 0, returnedAmount: 1000, status: 'settled', returnedToAccountId: 'acc-cash' });
+    const again = await returnCustodyRemainders(store, actor(FIN, 'finance'), { custodyIds: ['cus-1', 'cus-other'] }, 'key-00000010');
+    expect(again.changed).toBe(false);
+    expect((await read('paymentAccounts', 'acc-cash')).currentBalance).toBe(2500);
+  });
+
+  it('finance returns custodies into a chosen InstaPay account (the linked bank is mirrored)', async () => {
+    await seedTreasury();
+    const res = await returnCustodyRemainders(createFirestoreStore(db(FIN)), actor(FIN, 'finance'),
+      { custodyIds: ['cus-1', 'cus-other'], targetAccountId: 'acc-insta', notes: 'استرداد العهد' }, 'key-00000011');
+    expect(res.value.returned.map(r => r.accountId)).toEqual(['acc-insta', 'acc-insta']);
+    expect((await read('paymentAccounts', 'acc-insta')).currentBalance).toBe(6500);
+    expect((await read('paymentAccounts', 'acc-bank')).currentBalance).toBe(6500);
+    expect((await read('paymentAccounts', 'acc-cash')).currentBalance).toBe(1000);
+  });
+
+  it('finance transfers between accounts (TRF counter created then advanced; InstaPay mirrors; the wallet stands alone)', async () => {
+    await seedTreasury();
+    const store = createFirestoreStore(db(FIN));
+    const first = await transferBetweenAccounts(store, actor(FIN, 'finance'), { fromAccountId: 'acc-bank', toAccountId: 'acc-cash', amount: 1000 }, 'key-00000012');
+    expect(first.value.transferNumber).toMatch(/^TRF-\d{4}-000001$/);
+    const second = await transferBetweenAccounts(store, actor(FIN, 'finance'), { fromAccountId: 'acc-insta', toAccountId: 'acc-wallet', amount: 300, description: 'شحن المحفظة' }, 'key-00000013');
+    expect(second.value.transferNumber).toMatch(/^TRF-\d{4}-000002$/);
+    const retry = await transferBetweenAccounts(store, actor(FIN, 'finance'), { fromAccountId: 'acc-insta', toAccountId: 'acc-wallet', amount: 300 }, 'key-00000013');
+    expect(retry.changed).toBe(false);
+    expect((await read('paymentAccounts', 'acc-bank')).currentBalance).toBe(5000 - 1000 - 300);
+    expect((await read('paymentAccounts', 'acc-cash')).currentBalance).toBe(2000);
+    expect((await read('paymentAccounts', 'acc-insta')).currentBalance).toBe(4700);
+    expect((await read('paymentAccounts', 'acc-wallet')).currentBalance).toBe(300);
+  });
+
+  it('org admin detaches a legacy wallet from its bank (bank correction + link removed + audit pass the rules); finance may not', async () => {
+    await seedTreasury();
+    const input = { walletId: 'acc-wallet-old', bankCorrection: 400, expectedWalletTotals: { totalIn: 0, totalOut: 400 } };
+    await expect(detachLegacyWallet(createFirestoreStore(db(FIN)), actor(FIN, 'finance'), input, 'key-00000018')).rejects.toMatchObject({ code: 'forbidden' });
+    await assertFails(detachLegacyWallet(createFirestoreStore(db(EMP)), actor(EMP, 'org_admin'), input, 'key-00000019'));
+
+    const res = await detachLegacyWallet(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), input, 'key-00000020');
+    expect(res.changed).toBe(true);
+    expect((await read('paymentAccounts', 'acc-bank')).currentBalance).toBe(5400);
+    expect(await read('paymentAccounts', 'acc-wallet-old')).toMatchObject({ parentAccountId: '', currentBalance: 600 });
+    expect(await read('accountTransactions', 'tx-key-00000020')).toMatchObject({ accountId: 'acc-bank', type: 'in', amount: 400, referenceId: 'acc-wallet-old' });
+
+    // from now on the wallet is its own fund: it can send to the bank it was linked to
+    await transferBetweenAccounts(createFirestoreStore(db(FIN)), actor(FIN, 'finance'), { fromAccountId: 'acc-wallet-old', toAccountId: 'acc-bank', amount: 100 }, 'key-00000021');
+    expect((await read('paymentAccounts', 'acc-bank')).currentBalance).toBe(5500);
+    expect((await read('paymentAccounts', 'acc-wallet-old')).currentBalance).toBe(500);
+  });
+
+  it('an employee can neither return custody money nor transfer: the domain refuses, and a forged role is stopped by the rules', async () => {
+    await seedTreasury();
+    const store = createFirestoreStore(db(EMP));
+    await expect(returnCustodyRemainders(store, actor(EMP, 'employee'), { custodyIds: ['cus-1'] }, 'key-00000014')).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(transferBetweenAccounts(store, actor(EMP, 'employee'), { fromAccountId: 'acc-bank', toAccountId: 'acc-cash', amount: 1 }, 'key-00000015'))
+      .rejects.toMatchObject({ code: 'forbidden' });
+    // a modified client that claims the finance role
+    await assertFails(returnCustodyRemainders(store, actor(EMP, 'finance'), { custodyIds: ['cus-1'] }, 'key-00000016'));
+    await assertFails(transferBetweenAccounts(store, actor(EMP, 'finance'), { fromAccountId: 'acc-bank', toAccountId: 'acc-cash', amount: 1 }, 'key-00000017'));
+    await assertFails(updateDoc(doc(db(EMP), 'paymentAccounts', 'acc-cash'), { currentBalance: 999_999 }));
+    await assertFails(setDoc(doc(db(EMP), 'accountTransactions', 'tx-forged'), { orgId: ORG, accountId: 'acc-cash', type: 'in', amount: 1 }));
+    expect((await read('paymentAccounts', 'acc-cash')).currentBalance).toBe(1000);
+    expect((await read('custodies', 'cus-1')).remainingAmount).toBe(1000);
   });
 });
 

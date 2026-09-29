@@ -372,6 +372,9 @@ export interface PaymentAccount {
   type: PaymentAccountType;
   accountIdentifier: string; // IBAN, IPA (name@instapay), Mobile #, or Account #
   bankName?: string;
+  // InstaPay only: the bank account it is a channel of (every movement mirrors there).
+  // Wallets are standalone treasuries; legacy wallets may still carry these fields,
+  // but they are ignored (src/domain/treasury.ts → readAccountWithParent).
   parentAccountId?: string; // معرف الحساب البنكي الرئيسي التابع له (للخصم المزدوج التلقائي)
   parentAccountName?: string; // اسم الحساب البنكي الرئيسي
   balance?: number; // legacy alias
@@ -387,7 +390,13 @@ export interface PaymentAccount {
 }
 
 export type TransactionType = 'in' | 'out';
-export type TransactionReferenceType = 'request' | 'manual_adjustment' | 'initial' | 'custody';
+export type TransactionReferenceType =
+  | 'request'
+  | 'manual_adjustment'
+  | 'initial'
+  | 'custody'
+  | 'custody_return' // رد متبقي عهدة إلى الخزينة
+  | 'transfer'; // تحويل بين خزينتين / حسابين (زوج قيود صادر + وارد)
 
 export interface AccountTransaction {
   id: string;
@@ -425,6 +434,12 @@ export interface PettyCashCustody {
   status: CustodyStatus;
   issuedAt: string;
   settledAt?: string;
+  // Cash returned by the employee and deposited back into a treasury account
+  // (returnCustodyRemainders): totalAmount = settledAmount + returnedAmount + remainingAmount.
+  returnedAmount?: number;
+  returnedAt?: string;
+  returnedToAccountId?: string;
+  returnedToAccountName?: string;
   notes?: string;
   createdAt: string;
   updatedAt?: string;
