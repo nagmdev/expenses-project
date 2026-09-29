@@ -54,12 +54,15 @@ export const VisaManagement: React.FC = () => {
     addVisaPayment, 
     deleteVisaRequest,
     providers,
+    allProviders,
     paymentAccounts,
+    allPaymentAccounts,
     currentUser,
     currentRole,
     effectiveOrgId,
     organizations
   } = useApp();
+  const isSuperAdmin = currentRole === 'super_admin';
 
   // Modal states
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -93,6 +96,7 @@ export const VisaManagement: React.FC = () => {
   const [visaAttachmentUrl, setVisaAttachmentUrl] = useState<string>('');
   const [visaAttachmentName, setVisaAttachmentName] = useState<string>('');
   const [visaAttachmentSize, setVisaAttachmentSize] = useState<number>(0);
+  const [formOrgId, setFormOrgId] = useState('');
   const [serviceProviderId, setServiceProviderId] = useState('');
   const [notes, setNotes] = useState('');
   const [previewVisaDoc, setPreviewVisaDoc] = useState<InvoiceViewerAttachment | null>(null);
@@ -118,15 +122,26 @@ export const VisaManagement: React.FC = () => {
   const isProcessingPayment = paymentGuard.pending;
   const visaActions = useKeyedSubmitGuard();
 
-  // Active Visa Provider Options (filtered by current org)
+  // Providers of the company the new request belongs to. Filtering by effectiveOrgId
+  // emptied this list in "all companies" mode (no provider has orgId 'all').
   const availableProviders = useMemo(() => {
-    return providers.filter(p => !effectiveOrgId || p.orgId === effectiveOrgId || !p.orgId);
-  }, [providers, effectiveOrgId]);
+    if (!formOrgId) return [];
+    const source = isSuperAdmin ? allProviders : providers;
+    return source.filter(p => p.orgId === formOrgId || !p.orgId);
+  }, [isSuperAdmin, allProviders, providers, formOrgId]);
 
-  // Available Treasury Accounts
+  // Accounts of the open visa's own company (the domain refuses cross-company payments).
   const availableAccounts = useMemo(() => {
-    return paymentAccounts.filter(a => !effectiveOrgId || a.orgId === effectiveOrgId);
-  }, [paymentAccounts, effectiveOrgId]);
+    const visaOrgId = selectedVisa?.orgId;
+    const source = isSuperAdmin ? allPaymentAccounts : paymentAccounts;
+    return source.filter(a => !visaOrgId || a.orgId === visaOrgId);
+  }, [isSuperAdmin, allPaymentAccounts, paymentAccounts, selectedVisa?.orgId]);
+
+  // An account picked for one visa must not carry over to another (possibly another company's) visa.
+  const openVisa = (visa: VisaRequest) => {
+    if (visa.id !== selectedVisa?.id) setPaymentAccountId('');
+    setSelectedVisa(visa);
+  };
 
   // Strict deduplication guarantee for Visa Requests (by ID & Request Number)
   const cleanVisaRequests = useMemo(() => {
@@ -305,7 +320,10 @@ export const VisaManagement: React.FC = () => {
       errors.visaAttachment = 'صورة مستند التأشيرة أو الجواز مطلوبة (إجباري)';
     }
 
-    // 7. Service Provider (مورد التأشيرات المختص - إجباري)
+    // 7. Company + Service Provider (مورد التأشيرات المختص - إجباري)
+    if (!formOrgId) {
+      errors.orgId = 'يرجى اختيار الشركة التابع لها الطلب (إجباري)';
+    }
     if (!serviceProviderId) {
       errors.serviceProviderId = 'يرجى اختيار مورد التأشيرات المختص (إجباري)';
     }
@@ -330,10 +348,9 @@ export const VisaManagement: React.FC = () => {
     await createGuard.run(async (idempotencyKey) => {
     try {
       const selectedProviderObj = availableProviders.find(p => p.id === serviceProviderId);
-      const targetOrgId = effectiveOrgId === 'all' ? (organizations[0]?.id || 'org-main') : (effectiveOrgId || 'org-main');
 
       await createVisaRequest({
-        orgId: targetOrgId,
+        orgId: formOrgId,
         requestDate: new Date().toISOString(),
         travelerName: travelerName.trim(),
         passportNumber: passportNumber.trim().toUpperCase(),
@@ -490,7 +507,13 @@ export const VisaManagement: React.FC = () => {
 
         <button
           type="button"
-          onClick={() => { resetCreateForm(); createGuard.rotateKey(); setIsCreateModalOpen(true); }}
+          onClick={() => {
+            resetCreateForm();
+            // A specific active company is used as-is; in "all companies" mode the super admin picks one.
+            setFormOrgId(effectiveOrgId && effectiveOrgId !== 'all' ? effectiveOrgId : (organizations.length === 1 ? organizations[0].id : ''));
+            createGuard.rotateKey();
+            setIsCreateModalOpen(true);
+          }}
           className="bg-[#0d9488] hover:bg-[#0f766e] text-white px-5 py-2.5 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-xs transition cursor-pointer active:scale-98"
         >
           <Plus className="h-4 w-4 stroke-[2.5]" />
@@ -643,7 +666,7 @@ export const VisaManagement: React.FC = () => {
                     <tr 
                       key={req.id} 
                       className="hover:bg-slate-50/70 transition cursor-pointer"
-                      onClick={() => setSelectedVisa(req)}
+                      onClick={() => openVisa(req)}
                     >
                       <td className="py-3 px-4 font-mono font-bold text-slate-800">
                         {req.requestNumber}
@@ -707,7 +730,7 @@ export const VisaManagement: React.FC = () => {
                       <td className="py-3 px-4 text-center" onClick={(e) => e.stopPropagation()}>
                         <button
                           type="button"
-                          onClick={() => setSelectedVisa(req)}
+                          onClick={() => openVisa(req)}
                           className="px-2.5 py-1 text-xs font-bold text-teal-700 hover:text-teal-800 bg-teal-50 hover:bg-teal-100 rounded-lg transition cursor-pointer"
                         >
                           عرض ومعالجة
@@ -993,31 +1016,75 @@ export const VisaManagement: React.FC = () => {
                   )}
                 </div>
 
+                {/* Company (super admin) — decides which providers are offered */}
+                {isSuperAdmin && (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      الشركة التابع لها الطلب <span className="text-rose-500 font-extrabold">* (إجباري)</span>
+                    </label>
+                    <select
+                      value={formOrgId}
+                      onChange={(e) => {
+                        setFormOrgId(e.target.value);
+                        setServiceProviderId('');
+                        if (formErrors.orgId) setFormErrors(prev => ({ ...prev, orgId: '' }));
+                      }}
+                      className={`w-full px-3 py-2 bg-white border rounded-xl text-xs font-bold cursor-pointer focus:outline-none focus:ring-2 focus:ring-teal-500/20 ${
+                        formErrors.orgId ? 'border-rose-400 bg-rose-50/20' : 'border-slate-200 focus:border-teal-500'
+                      }`}
+                    >
+                      <option value="">-- اختر الشركة --</option>
+                      {organizations.map(o => (
+                        <option key={o.id} value={o.id}>{o.name}</option>
+                      ))}
+                    </select>
+                    {formErrors.orgId && (
+                      <span className="text-[10px] text-rose-600 font-bold mt-1 block">{formErrors.orgId}</span>
+                    )}
+                  </div>
+                )}
+
                 {/* Service Provider Selection */}
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
                     شركة / مورد التأشيرات المختص <span className="text-rose-500 font-extrabold">* (إجباري)</span>
                   </label>
                   <select
-                    disabled={!visaAttachmentUrl}
+                    disabled={!visaAttachmentUrl || !formOrgId}
                     value={serviceProviderId}
                     onChange={(e) => {
                       setServiceProviderId(e.target.value);
                       if (formErrors.serviceProviderId) setFormErrors(prev => ({ ...prev, serviceProviderId: '' }));
                     }}
                     className={`w-full px-3 py-2 bg-white border rounded-xl text-xs font-bold focus:outline-none focus:ring-2 focus:ring-teal-500/20 ${
-                      !visaAttachmentUrl ? 'opacity-60 bg-slate-100 cursor-not-allowed' : 'cursor-pointer'
+                      !visaAttachmentUrl || !formOrgId ? 'opacity-60 bg-slate-100 cursor-not-allowed' : 'cursor-pointer'
                     } ${
                       formErrors.serviceProviderId ? 'border-rose-400 bg-rose-50/20' : 'border-slate-200 focus:border-teal-500'
                     }`}
                   >
-                    <option value="">{visaAttachmentUrl ? '-- اختر مورد التأشيرات --' : '🔒 يرجى رفع مرفق التأشيرة أولاً لتفعيل اختيار المورد'}</option>
+                    <option value="">
+                      {!visaAttachmentUrl
+                        ? '🔒 يرجى رفع مرفق التأشيرة أولاً لتفعيل اختيار المورد'
+                        : !formOrgId
+                        ? '-- اختر الشركة أولاً --'
+                        : availableProviders.length === 0
+                        ? '-- لا يوجد موردون مسجلون لهذه الشركة --'
+                        : '-- اختر مورد التأشيرات --'}
+                    </option>
                     {availableProviders.map(prov => (
                       <option key={prov.id} value={prov.id}>
                         {prov.name} ({prov.serviceCategoryNames?.length ? prov.serviceCategoryNames.join(', ') : 'مورد معتمد'})
                       </option>
                     ))}
                   </select>
+                  {formOrgId && availableProviders.length === 0 && (
+                    <span className="text-[10px] text-amber-700 font-bold mt-1 block">
+                      لا يوجد أي مورد مسجل لهذه الشركة بعد. أضف مورد التأشيرات من صفحة «الموردين» ثم ارجع لإكمال الطلب.
+                    </span>
+                  )}
+                  {!isSuperAdmin && formErrors.orgId && (
+                    <span className="text-[10px] text-rose-600 font-bold mt-1 block">{formErrors.orgId}</span>
+                  )}
                   {formErrors.serviceProviderId && (
                     <span className="text-[10px] text-rose-600 font-bold mt-1 block">{formErrors.serviceProviderId}</span>
                   )}

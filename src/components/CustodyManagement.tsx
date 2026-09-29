@@ -68,6 +68,9 @@ export const CustodyManagement: React.FC = () => {
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
+  // Only these roles can read treasury accounts and create custodies (firestore.rules isFinance);
+  // for anyone else an empty account list means "refused", not "none exist".
+  const canIssueCustody = isSuperAdmin || currentRole === 'org_admin' || currentRole === 'finance';
   const orgList = isSuperAdmin ? (allOrganizations.length > 0 ? allOrganizations : organizations) : organizations;
   const targetCustodies = isSuperAdmin ? allCustodies : custodies;
   const targetSettlements = isSuperAdmin ? allCustodySettlements : custodySettlements;
@@ -1032,6 +1035,12 @@ export const CustodyManagement: React.FC = () => {
               </button>
             </div>
 
+            {!canIssueCustody && (
+              <div className="mt-4 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>صرف العهد متاح للمسؤول المالي أو مدير الشركة فقط، وحسابك لا يملك صلاحية الاطلاع على الخزائن.</span>
+              </div>
+            )}
             {issueError && (
               <div className="mt-4 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-bold flex items-center gap-2">
                 <AlertCircle className="h-4 w-4 shrink-0" />
@@ -1087,19 +1096,26 @@ export const CustodyManagement: React.FC = () => {
                 </div>
 
                 {issueEmployeeMode === 'select' ? (
-                  <select
-                    value={issueEmployeeId}
-                    onChange={(e) => setIssueEmployeeId(e.target.value)}
-                    required
-                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                  >
-                    <option value="">-- اختر الموظف من القائمة --</option>
-                    {availableMembers.map(m => (
-                      <option key={m.id} value={m.userId || m.id}>
-                        {m.userName} ({m.department || 'موظف'} - {m.jobTitle || 'عضو'})
-                      </option>
-                    ))}
-                  </select>
+                  <>
+                    <select
+                      value={issueEmployeeId}
+                      onChange={(e) => setIssueEmployeeId(e.target.value)}
+                      required
+                      className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="">-- اختر الموظف من القائمة --</option>
+                      {availableMembers.map(m => (
+                        <option key={m.id} value={m.userId || m.id}>
+                          {m.userName} ({m.department || 'موظف'} - {m.jobTitle || 'عضو'})
+                        </option>
+                      ))}
+                    </select>
+                    {canIssueCustody && issueOrgId && availableMembers.length === 0 && (
+                      <span className="text-[10px] text-amber-700 font-bold mt-1 block">
+                        لا يوجد موظفون نشطون مسجلون في هذه الشركة. استخدم «كتابة اسم يدوي» أو أضف الموظف من صفحة المستخدمين.
+                      </span>
+                    )}
+                  </>
                 ) : (
                   <div className="space-y-2">
                     <input
@@ -1160,6 +1176,11 @@ export const CustodyManagement: React.FC = () => {
                     );
                   })}
                 </select>
+                {canIssueCustody && issueOrgId && availableAccountsForIssue.length === 0 && (
+                  <span className="text-[10px] text-amber-700 font-bold mt-1 block">
+                    لا توجد خزينة أو حساب دفع نشط لهذه الشركة. أنشئ حساباً من صفحة الخزينة أولاً.
+                  </span>
+                )}
               </div>
 
               {/* Purpose / Notes */}
