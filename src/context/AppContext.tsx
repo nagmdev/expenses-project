@@ -94,13 +94,21 @@ import {
   updateVisaRequest as updateVisaRequestOp,
 } from '../domain/visa';
 import {
+  PLATFORM_OWNER_EMAILS,
+  SUPER_ADMIN_OWNER_ONLY_MESSAGE,
   createEntity,
+  createEntityInOrgs,
   createMember,
+  createMemberInOrgs,
   createOrganization,
   deleteEntity,
   ensureOrgNotificationRecipients,
+  entityIdInOrg,
   isRealUid,
+  normalizeOrgIds,
   pickMembershipToLink,
+  reusableProvisionedAccount,
+  type MultiOrgSkip,
   removeMember as removeMemberOp,
   removeOrganization,
   updateEntity,
@@ -133,6 +141,17 @@ export interface MutationOptions {
 export interface DisburseOptions extends MutationOptions {
   batchId?: string;
 }
+
+/**
+ * Result of one add-to-several-companies operation (company multi-select).
+ * `skipped` lists the companies where the email / name was already taken, with the
+ * name of the record that holds it; those companies were left untouched.
+ */
+export interface MultiOrgAddResult {
+  addedOrgIds: string[];
+  skipped: MultiOrgSkip[];
+}
+export type { MultiOrgSkip };
 
 export interface DisburseOutcome {
   changed: boolean;
@@ -214,11 +233,12 @@ const DUMMY_IDS = new Set([
   'req-101', 'req-102', 'req-103'
 ]);
 
-// The ONLY built-in platform owner. Must stay identical to builtInSuperAdmins() in
-// firestore.rules: the UI must never consider someone a super admin that the rules
-// do not (that mismatch makes every list come back empty). Additional super admins
-// can only be granted from the app (super_admins collection), never from env/config.
-const DEFAULT_SUPER_ADMINS = ['mahmoud@tieapps.com'];
+// The ONLY platform owner and the ONLY super admin (PLATFORM_OWNER_EMAILS in
+// domain/directory). Must stay identical to builtInSuperAdmins() in firestore.rules:
+// the UI must never consider someone a super admin that the rules do not (that
+// mismatch makes every list come back empty). Nobody else can be promoted
+// (addSuperAdminEmail refuses); a leftover legacy grant can only be removed.
+const DEFAULT_SUPER_ADMINS: readonly string[] = PLATFORM_OWNER_EMAILS;
 
 const readPref = (key: string, fallback = '') => {
   try {
@@ -376,7 +396,15 @@ interface AppContextType {
     jobTitle?: string;
     orgId?: string;
     idempotencyKey?: string;
-  }) => Promise<{ success: boolean; message?: string; credentials?: { email: string; password: string } }>;
+  }) => Promise<{
+    success: boolean;
+    message?: string;
+    /** Machine code of a failure; 'email_in_use' = the email already has a login account (no account was created). */
+    code?: string;
+    credentials?: { email: string; password: string };
+    /** The new account's UID (to add it to more companies). */
+    uid?: string;
+  }>;
 
   // Organizations
   addOrganization: (org: Omit<Organization, 'id' | 'createdAt'>, opts?: MutationOptions) => Promise<{ success: boolean; message?: string; org?: Organization }>;
@@ -385,6 +413,8 @@ interface AppContextType {
 
   // Members & User Management
   addMember: (member: Omit<OrganizationMember, 'id' | 'joinedAt'>, opts?: MutationOptions) => Promise<void>;
+  /** Adds one person to every selected company in ONE operation; companies where they already belong are skipped. */
+  addMemberToOrgs: (member: Omit<OrganizationMember, 'id' | 'joinedAt' | 'orgId'>, orgIds: string[], opts?: MutationOptions) => Promise<MultiOrgAddResult>;
   updateMember: (memberId: string, updates: Partial<OrganizationMember>) => Promise<void>;
   toggleMemberStatus: (memberId: string, active: boolean) => Promise<void>;
   removeMember: (memberId: string) => Promise<void>;
@@ -397,6 +427,8 @@ interface AppContextType {
 
   // Providers
   addProvider: (provider: Omit<ServiceProvider, 'id' | 'totalPaid'>, opts?: MutationOptions) => Promise<void>;
+  /** One provider document per selected company (own orgId and totals), in ONE operation; companies where the name exists are skipped. */
+  addProviderToOrgs: (provider: Omit<ServiceProvider, 'id' | 'totalPaid' | 'orgId'>, orgIds: string[], opts?: MutationOptions) => Promise<MultiOrgAddResult>;
   updateProvider: (provider: ServiceProvider) => Promise<void>;
   deleteProvider: (providerId: string) => Promise<void>;
 
@@ -497,6 +529,8 @@ interface AppContextType {
   departments: Department[];
   allDepartments: Department[];
   addDepartment: (dept: Omit<Department, 'id' | 'createdAt'>, opts?: MutationOptions) => Promise<void>;
+  /** One department document per selected company, in ONE operation; companies where the name exists are skipped. */
+  addDepartmentToOrgs: (dept: Omit<Department, 'id' | 'createdAt' | 'orgId'>, orgIds: string[], opts?: MutationOptions) => Promise<MultiOrgAddResult>;
   updateDepartment: (deptId: string, updates: Partial<Department>) => Promise<void>;
   deleteDepartment: (deptId: string) => Promise<void>;
 
@@ -539,7 +573,8 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 // Auth accounts created during a createCompanyUser intent, keyed by idempotency key,
 // so retrying the same intent after a partial failure re-uses the account instead of
-// failing with "email already in use" (kept in memory only; never persisted).
+// failing with "email already in use" (kept in memory only; never persisted). An entry is
+// only re-used for the SAME email: a changed email is a different person.
 const provisionedAccounts = new Map<string, { uid: string; email: string; password: string }>();
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -1576,9 +1611,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // =========================================================================
   // SUPER ADMIN MANAGEMENT
   // =========================================================================
+  // The platform owner (DEFAULT_SUPER_ADMINS) is the ONLY super admin: nobody else can be
+  // promoted from any screen. Blocked here centrally (updateSuperAdminRole and every
+  // "promote" button go through addSuperAdminEmail). Demoting a leftover legacy super
+  // admin (removeSuperAdminEmail) keeps working; the owner can never be demoted.
   const addSuperAdminEmail = async (email: string) => {
     const cleanEmail = normalizeEmail(email);
     if (!cleanEmail) return;
+    if (!DEFAULT_SUPER_ADMINS.includes(cleanEmail)) {
+      throw new DomainError('forbidden', SUPER_ADMIN_OWNER_ONLY_MESSAGE);
+    }
     await mutate('superAdmin', `add:${cleanEmail}`, async () => {
       const db = getDb()!;
       await setDoc(doc(db, 'super_admins', cleanEmail), {
@@ -1632,6 +1674,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
+  /**
+   * A membership role of 'super_admin' grants nothing under firestore.rules (and would only
+   * mislead the screens): no member may be given it, except the platform owner's own record.
+   */
+  const assertNoSuperAdminGrant = (role: Role | undefined, email?: string | null) => {
+    if (role === 'super_admin' && !DEFAULT_SUPER_ADMINS.includes(normalizeEmail(email))) {
+      throw new DomainError('forbidden', SUPER_ADMIN_OWNER_ONLY_MESSAGE);
+    }
+  };
+
   const updateSuperAdminRole = async (email: string, newRole: Role, targetOrgId?: string) => {
     const cleanEmail = normalizeEmail(email);
     if (!cleanEmail) return;
@@ -1672,10 +1724,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     jobTitle?: string;
     orgId?: string;
     idempotencyKey?: string;
-  }): Promise<{ success: boolean; message?: string; credentials?: { email: string; password: string } }> => {
+  }): Promise<{ success: boolean; message?: string; code?: string; credentials?: { email: string; password: string }; uid?: string }> => {
     const targetOrgId = data.orgId || effectiveOrgId;
     if (!targetOrgId || targetOrgId === 'all') {
       return { success: false, message: 'يرجى تحديد المؤسسة أولاً لإضافة الموظف إليها.' };
+    }
+    if (data.role === 'super_admin' && !DEFAULT_SUPER_ADMINS.includes(normalizeEmail(data.email))) {
+      return { success: false, message: SUPER_ADMIN_OWNER_ONLY_MESSAGE };
     }
     const opKey = data.idempotencyKey || newOperationKey();
 
@@ -1688,16 +1743,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return Array.from(arr).map(b => pool[b % pool.length]).join('');
         };
 
-        let account = provisionedAccounts.get(opKey);
+        const email = normalizeEmail(data.email) || `emp_${opKey.slice(0, 8)}@company.local`;
+        // Same intent, same email only: a changed email never re-uses (or shows) another login.
+        let account = reusableProvisionedAccount(provisionedAccounts.get(opKey), email);
         if (!account) {
-          const email = normalizeEmail(data.email) || `emp_${opKey.slice(0, 8)}@company.local`;
           const password = data.password?.trim() || generateSecurePassword();
           try {
             const res = await adminCreateUserAccount(email, password, data.name);
             account = { uid: res.uid, email, password };
             provisionedAccounts.set(opKey, account);
           } catch (authErr: any) {
-            if (authErr?.code === 'auth/email-already-in-use') throw new DomainError('duplicate', 'هذا البريد الإلكتروني مسجل مسبقاً في النظام.');
+            if (authErr?.code === 'auth/email-already-in-use') throw new DomainError('email_in_use', 'هذا البريد الإلكتروني له حساب دخول مسجل مسبقاً في النظام.');
             if (authErr?.code === 'auth/weak-password') throw new DomainError('weak_password', 'كلمة المرور يجب ألا تقل عن 6 خانات.');
             throw new DomainError('auth_failed', authErr?.message || 'تعذر إنشاء حساب المصادقة.');
           }
@@ -1721,11 +1777,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           success: true,
           message: 'تم إنشاء وتفعيل حساب الموظف بنجاح!',
           credentials: { email: account.email, password: account.password },
+          uid: account.uid,
         };
       });
     } catch (err: any) {
       console.error('[Create Company User Error]', err);
-      return { success: false, message: toUserError(err).message };
+      return { success: false, message: toUserError(err).message, code: isDomainError(err) ? err.code : undefined };
     }
   };
 
@@ -1785,20 +1842,87 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // =========================================================================
   // MEMBERS
   // =========================================================================
+  // Re-use the real UID if this person already signed in / belongs to another org
+  // (never for an empty email: that would match an unrelated member without one).
+  const knownUidForEmail = (email: string) =>
+    email ? rawMembers.find(m => normalizeEmail(m.userEmail) === email && isRealUid(m.userId))?.userId : undefined;
+
   const addMember = async (memberData: Omit<OrganizationMember, 'id' | 'joinedAt'>, opts?: MutationOptions) => {
     const email = normalizeEmail(memberData.userEmail);
+    assertNoSuperAdminGrant(memberData.role, email);
     if (email) {
       const existingInOrg = rawMembers.find(m => normalizeEmail(m.userEmail) === email && m.orgId === memberData.orgId);
       if (existingInOrg && !isSameOperation(existingInOrg, 'mem', opts?.idempotencyKey)) {
         throw new Error(`البريد الإلكتروني (${memberData.userEmail}) مسجل بالفعل في هذه المؤسسة باسم "${existingInOrg.userName}"`);
       }
     }
-    // Re-use the real UID if this person already signed in / belongs to another org.
-    const knownUid = rawMembers.find(m => normalizeEmail(m.userEmail) === email && isRealUid(m.userId))?.userId;
+    const knownUid = knownUidForEmail(email);
     const opKey = opts?.idempotencyKey || newOperationKey();
     await mutate('addMember', opts?.idempotencyKey || fingerprint(memberData.orgId, email || memberData.userName), store =>
       createMember(store, actor, { ...memberData, userId: isRealUid(memberData.userId) ? memberData.userId : knownUid || '' }, opKey)
     );
+  };
+
+  /**
+   * Company multi-select: companies the loaded lists already show as taken are skipped
+   * before the write (legacy records may predate the uniqueness keys the domain checks);
+   * the domain skips the rest inside its transaction. Records of this very operation are
+   * not "taken": a retry must resolve to the same success.
+   */
+  const runMultiOrgAdd = async <H,>(params: {
+    targets: string[];
+    reason: MultiOrgSkip['reason'];
+    holderIn: (orgId: string) => H | undefined;
+    isThisOperation: (holder: H, orgId: string) => boolean;
+    holderName: (holder: H) => string;
+    singleTakenMessage: (existingName: string) => string;
+    allTakenMessage: string;
+    run: (orgIds: string[]) => Promise<{ value: { created: Array<{ orgId: string }>; skipped: MultiOrgSkip[] } }>;
+  }): Promise<MultiOrgAddResult> => {
+    const free: string[] = [];
+    const preSkipped: MultiOrgSkip[] = [];
+    for (const orgId of params.targets) {
+      const holder = params.holderIn(orgId);
+      if (holder && !params.isThisOperation(holder, orgId)) preSkipped.push({ orgId, reason: params.reason, existingName: params.holderName(holder) });
+      else free.push(orgId);
+    }
+    if (free.length === 0) {
+      throw new DomainError('duplicate', params.targets.length === 1 ? params.singleTakenMessage(preSkipped[0].existingName || '') : params.allTakenMessage);
+    }
+    try {
+      const res = await params.run(free);
+      return { addedOrgIds: res.value.created.map(e => e.orgId), skipped: [...preSkipped, ...res.value.skipped] };
+    } catch (err) {
+      // Taken in the companies checked here AND in the rest: taken everywhere.
+      if (preSkipped.length > 0 && isDomainError(err) && err.code === 'duplicate') throw new DomainError('duplicate', params.allTakenMessage);
+      throw err;
+    }
+  };
+
+  const addMemberToOrgs = async (
+    memberData: Omit<OrganizationMember, 'id' | 'joinedAt' | 'orgId'>,
+    orgIds: string[],
+    opts?: MutationOptions,
+  ): Promise<MultiOrgAddResult> => {
+    if (memberData.role === 'super_admin') throw new DomainError('forbidden', SUPER_ADMIN_OWNER_ONLY_MESSAGE);
+    const targets = normalizeOrgIds(orgIds);
+    const email = normalizeEmail(memberData.userEmail);
+    const key = opts?.idempotencyKey;
+    const knownUid = knownUidForEmail(email);
+    const opKey = key || newOperationKey();
+    return runMultiOrgAdd<OrganizationMember & { operationKey?: string }>({
+      targets,
+      reason: 'already_member',
+      holderIn: orgId => (email ? rawMembers.find(m => m.orgId === orgId && normalizeEmail(m.userEmail) === email) : undefined),
+      isThisOperation: holder => Boolean(key && holder.operationKey === key),
+      holderName: holder => holder.userName,
+      singleTakenMessage: name => `البريد الإلكتروني (${email}) مسجل بالفعل في هذه المؤسسة باسم "${name}".`,
+      allTakenMessage: `البريد الإلكتروني (${email}) مسجل بالفعل في كل الشركات المختارة.`,
+      run: free =>
+        mutate('addMemberToOrgs', key || fingerprint([...targets].sort(), email || memberData.userName), store =>
+          createMemberInOrgs(store, actor, { ...memberData, userId: isRealUid(memberData.userId) ? memberData.userId : knownUid || '' }, free, opKey)
+        ),
+    });
   };
 
   /**
@@ -1830,6 +1954,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateMember = async (memberId: string, updates: Partial<OrganizationMember>) => {
     const mem = rawMembers.find(m => m.id === memberId) || myMemberships.find(m => m.id === memberId);
+    // Only a NEW grant is refused: saving a leftover record that already says super_admin stays possible.
+    if (updates.role !== mem?.role) assertNoSuperAdminGrant(updates.role, updates.userEmail ?? mem?.userEmail);
     await mutate('updateMember', fingerprint(memberId, updates), async store =>
       updateMemberRecord(store, actor, memberId, updates, await linkedProfileIds(mem), newOperationKey())
     );
@@ -1909,6 +2035,50 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  // Same normalization as the domain's unique name key (and the "unavailable" chips of the forms).
+  const sameName = (a?: string, b?: string) => normalizeKeyValue(a) === normalizeKeyValue(b);
+
+  /** Name-taken checks of the company multi-select for providers / departments (see runMultiOrgAdd). */
+  const namedEntityChecks = <T extends { id: string; orgId: string; name: string }>(kind: 'provider' | 'department', list: T[], name: string, key?: string) => ({
+    reason: 'duplicate' as const,
+    holderIn: (orgId: string) => list.find(e => e.orgId === orgId && sameName(e.name, name)),
+    isThisOperation: (holder: T, orgId: string) => Boolean(key && holder.id === entityIdInOrg(kind, key, orgId)),
+    holderName: (holder: T) => holder.name,
+  });
+
+  const addProviderToOrgs = async (
+    providerData: Omit<ServiceProvider, 'id' | 'totalPaid' | 'orgId'>,
+    orgIds: string[],
+    opts?: MutationOptions,
+  ): Promise<MultiOrgAddResult> => {
+    const targets = normalizeOrgIds(orgIds);
+    const name = (providerData.name || '').trim();
+    if (!name) throw new DomainError('invalid_input', 'يرجى إدخال اسم المورد.');
+    const key = opts?.idempotencyKey;
+    // Each company's copy links only the services that belong to that company.
+    const ids = providerData.serviceCategoryIds || [];
+    const names = providerData.serviceCategoryNames || [];
+    const servicesFor = (orgId: string) => {
+      const linked = ids
+        .map((id, i) => ({ id, service: rawServices.find(s => s.id === id), fallbackName: names[i] }))
+        .filter(({ service }) => Boolean(service && isServiceMatchingOrg(service, orgId)));
+      return { serviceCategoryIds: linked.map(l => l.id), serviceCategoryNames: linked.map(l => l.service?.name || l.fallbackName || '') };
+    };
+    const opKey = key || newOperationKey();
+    return runMultiOrgAdd({
+      targets,
+      ...namedEntityChecks('provider', rawProviders, name, key),
+      singleTakenMessage: existing => `يوجد مورد مسجل بالفعل بنفس الاسم ("${existing}") في هذه الشركة.`,
+      allTakenMessage: `يوجد مورد مسجل بالفعل بنفس الاسم ("${name}") في كل الشركات المختارة.`,
+      run: free =>
+        mutate('addProviderToOrgs', key || fingerprint([...targets].sort(), name.toLowerCase()), store =>
+          createEntityInOrgs<ServiceProvider>(store, actor, 'provider', free,
+            (id, orgId) => ({ ...providerData, ...servicesFor(orgId), id, orgId, name, totalPaid: 0, active: true }),
+            p => `تم إضافة مورد ومقدم خدمة جديد: "${p.name}" (هاتف: ${p.phone || '-'})`, opKey)
+        ),
+    });
+  };
+
   const updateProvider = async (updatedProvider: ServiceProvider) => {
     await mutate('updateProvider', fingerprint(updatedProvider), store =>
       updateEntity<ServiceProvider>(store, actor, 'provider', updatedProvider.id, updatedProvider, (before, after) => {
@@ -1934,6 +2104,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createEntity<Department>(store, actor, 'department', (id, nowIso) => ({ ...deptData, id, createdAt: nowIso }),
         d => `تم إنشاء قسم إداري جديد: "${d.name}"${d.managerName ? ` برئاسة (${d.managerName})` : ''}`, opKey)
     );
+  };
+
+  const addDepartmentToOrgs = async (
+    deptData: Omit<Department, 'id' | 'createdAt' | 'orgId'>,
+    orgIds: string[],
+    opts?: MutationOptions,
+  ): Promise<MultiOrgAddResult> => {
+    const targets = normalizeOrgIds(orgIds);
+    const name = (deptData.name || '').trim();
+    if (!name) throw new DomainError('invalid_input', 'يرجى إدخال اسم القسم.');
+    const key = opts?.idempotencyKey;
+    const opKey = key || newOperationKey();
+    return runMultiOrgAdd({
+      targets,
+      ...namedEntityChecks('department', rawDepartments, name, key),
+      singleTakenMessage: existing => `يوجد قسم بنفس الاسم ("${existing}") في هذه الشركة.`,
+      allTakenMessage: `يوجد قسم بنفس الاسم ("${name}") في كل الشركات المختارة.`,
+      run: free =>
+        mutate('addDepartmentToOrgs', key || fingerprint([...targets].sort(), name.toLowerCase()), store =>
+          createEntityInOrgs<Department>(store, actor, 'department', free,
+            (id, orgId, nowIso) => ({ ...deptData, id, orgId, name, createdAt: nowIso }),
+            d => `تم إنشاء قسم إداري جديد: "${d.name}"${d.managerName ? ` برئاسة (${d.managerName})` : ''}`, opKey)
+        ),
+    });
   };
 
   const updateDepartment = async (deptId: string, updates: Partial<Department>) => {
@@ -2574,6 +2768,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateOrganization,
         deleteOrganization,
         addMember,
+        addMemberToOrgs,
         updateMember,
         toggleMemberStatus,
         removeMember,
@@ -2582,6 +2777,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateService,
         deleteService,
         addProvider,
+        addProviderToOrgs,
         updateProvider,
         deleteProvider,
         createRequest,
@@ -2622,6 +2818,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         departments: scopedDepartments,
         allDepartments: rawDepartments,
         addDepartment,
+        addDepartmentToOrgs,
         updateDepartment,
         deleteDepartment,
         auditLogs: scopedAuditLogs,

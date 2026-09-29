@@ -1,6 +1,9 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import { OrgMultiSelect } from './OrgMultiSelect';
+import { normalizeEmail, normalizeKeyValue } from '../domain/common';
+import { PLATFORM_OWNER_EMAILS, isPlatformOwnerEmail as isPlatformOwner, isRealUid, knownLoginUidOf } from '../domain/directory';
 import {
   Building2, 
   Plus, 
@@ -80,6 +83,16 @@ const paymentMethodLabels: Record<string, string> = {
   cheque: 'شيك مصرفي',
 };
 
+/** The platform owner: the ONLY super admin (same list as AppContext and the rules). Nobody can be promoted. */
+const PLATFORM_OWNER_EMAIL = PLATFORM_OWNER_EMAILS[0];
+
+type MultiOrgSkipReason = 'already_member' | 'duplicate';
+
+const skipReasonLabel = (reason: MultiOrgSkipReason, existingName?: string) =>
+  reason === 'already_member'
+    ? `مسجل بالفعل${existingName ? ` باسم "${existingName}"` : ''}`
+    : `يوجد بنفس الاسم${existingName ? ` ("${existingName}")` : ''}`;
+
 export type AdminSection = 
   | 'companies' 
   | 'users' 
@@ -117,21 +130,21 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     toggleMemberStatus,
     adminResetUserPassword,
     createCompanyUser,
+    addMemberToOrgs,
     addService,
     updateService,
     deleteService,
-    addProvider,
+    addProviderToOrgs,
     updateProvider,
     deleteProvider,
     addPaymentAccount,
     updatePaymentAccount,
     deletePaymentAccount,
     togglePaymentAccountStatus,
-    addDepartment,
+    addDepartmentToOrgs,
     updateDepartment,
     deleteDepartment,
     superAdminEmails,
-    addSuperAdminEmail,
     removeSuperAdminEmail,
     updateSuperAdminRole,
     currentRole,
@@ -143,7 +156,16 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   const isSuperAdmin = currentRole === 'super_admin';
   const canManageOrgs = isSuperAdmin;
+  // The current firestore.rules reject provider/department creation by data entry: the add
+  // buttons are disabled for that role instead of ending in a guaranteed permission error.
+  const canCreateVendorsAndDepts = currentRole !== 'data_entry';
+  const vendorDeptCreateBlockedNote = 'إضافة الموردين والأقسام متاحة لمدير الشركة فقط حالياً (قواعد قاعدة البيانات لا تسمح بها لمدخل البيانات).';
   const displayOrgs = canManageOrgs ? allOrganizations : organizations;
+  // Company multi-selects of the add forms: active companies only (an archived one refuses the whole operation).
+  const creatableOrgs = useMemo(
+    () => displayOrgs.filter(o => !o.archived && o.status !== 'archived'),
+    [displayOrgs],
+  );
 
   // Enterprise Unification: Super Admins manage data across all organizations
   const targetMembers = canManageOrgs ? allMembers : members;
@@ -153,8 +175,30 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const targetDepartments = canManageOrgs ? allDepartments : departments;
   const targetAuditLogs = canManageOrgs ? allAuditLogs : auditLogs;
 
-  // Per-row / confirm-dialog actions (toggle, delete, promote...): one in-flight call per scope.
+  // Per-row / confirm-dialog actions (toggle, delete, demote...): one in-flight call per scope.
   const rowGuard = useKeyedSubmitGuard();
+
+  // Every membership this admin can see (used to detect an email that already has an account).
+  const knownMembers = allMembers && allMembers.length > 0 ? allMembers : members;
+
+  const orgNameOf = (orgId: string) =>
+    (allOrganizations && allOrganizations.length > 0 ? allOrganizations : organizations).find(o => o.id === orgId)?.name || orgId;
+
+  // Result of a multi-company add (shown above the sections, never blocks the rest).
+  const [multiOrgNotice, setMultiOrgNotice] = useState<{ msg: string; isError?: boolean } | null>(null);
+
+  const describeMultiOrgResult = (
+    what: string,
+    addedOrgIds: string[],
+    skipped: Array<{ orgId: string; reason: MultiOrgSkipReason; existingName?: string }>,
+  ) => {
+    const parts: string[] = [];
+    if (addedOrgIds.length > 0) parts.push(`تم ${what} في: ${addedOrgIds.map(orgNameOf).join('، ')}.`);
+    if (skipped.length > 0) {
+      parts.push(`تم التخطي في: ${skipped.map(s => `${orgNameOf(s.orgId)} (${skipReasonLabel(s.reason, s.existingName)})`).join('، ')}.`);
+    }
+    return parts.join(' ');
+  };
 
   // Active View Tab
   const [activeSection, setActiveSection] = useState<AdminSection>(
@@ -190,9 +234,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // 2. USERS STATE & MODALS
   // =========================================================================
   const [isProvisionModalOpen, setIsProvisionModalOpen] = useState(false);
-  const [selectedOrgForMember, setSelectedOrgForMember] = useState(
-    activeOrgId && activeOrgId !== 'all' ? activeOrgId : (displayOrgs[0]?.id || '')
-  );
+  // Companies the new user joins (multi-select). Companies where the email is already a member are unavailable.
+  const [selectedOrgsForMember, setSelectedOrgsForMember] = useState<string[]>([]);
   const [memberName, setMemberName] = useState('');
   const [memberEmail, setMemberEmail] = useState('');
   const [memberPassword, setMemberPassword] = useState('');
@@ -203,13 +246,19 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   
   const provisionGuard = useSubmitGuard();
   const provisionLoading = provisionGuard.pending;
+  // Email of the last submitted attempt under the current key: a changed email rotates the key,
+  // so a login account created by a failed attempt is never re-used for another person.
+  const provisionAttemptEmailRef = useRef('');
   const [provisionError, setProvisionError] = useState<string | null>(null);
   const [createdCredentials, setCreatedCredentials] = useState<{
     name: string;
     email: string;
-    password: string;
+    /** Only when a NEW account was created (an existing account keeps its own password). */
+    password?: string;
     phone: string;
-    orgName: string;
+    orgNames: string[];
+    skippedNotes: string[];
+    warning?: string;
   } | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
 
@@ -271,7 +320,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [vendorBankName, setVendorBankName] = useState('');
   const [vendorIban, setVendorIban] = useState('');
   const [vendorAddress, setVendorAddress] = useState('');
-  const [vendorOrgId, setVendorOrgId] = useState(activeOrgId || displayOrgs[0]?.id || '');
+  // Add: every selected company gets its own vendor record. Edit: the vendor keeps its own company (read-only).
+  const [vendorOrgIds, setVendorOrgIds] = useState<string[]>([]);
   const [vendorServiceIds, setVendorServiceIds] = useState<string[]>([]);
   const vendorGuard = useSubmitGuard();
   const isSavingVendor = vendorGuard.pending;
@@ -304,7 +354,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [deptCode, setDeptCode] = useState('');
   const [deptDescription, setDeptDescription] = useState('');
   const [deptManager, setDeptManager] = useState('');
+  // Edit: the department's single company. Add: every selected company gets its own department record.
   const [deptOrgId, setDeptOrgId] = useState(activeOrgId || displayOrgs[0]?.id || '');
+  const [deptOrgIds, setDeptOrgIds] = useState<string[]>([]);
   const deptGuard = useSubmitGuard();
   const isSavingDept = deptGuard.pending;
   const [deletingDept, setDeletingDept] = useState<Department | null>(null);
@@ -312,47 +364,15 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   // =========================================================================
   // 7. SUPER ADMINS STATE
+  // The platform owner is the ONLY super admin: this screen can list and demote leftover
+  // (legacy) super admins, but never grants the role to anyone.
   // =========================================================================
-  const [newAdminEmail, setNewAdminEmail] = useState('');
-  const [adminSuccessMsg, setAdminSuccessMsg] = useState<string | null>(null);
-  const [adminErrorMsg, setAdminErrorMsg] = useState<string | null>(null);
   const [isSuperAdminModalOpen, setIsSuperAdminModalOpen] = useState(false);
-  const [selectedMemberEmailForSuperAdmin, setSelectedMemberEmailForSuperAdmin] = useState('');
-  const [superAdminMemberSearch, setSuperAdminMemberSearch] = useState('');
   const [editingSuperAdminEmail, setEditingSuperAdminEmail] = useState<string | null>(null);
   const [targetSuperAdminRole, setTargetSuperAdminRole] = useState<Role>('org_admin');
   const [targetSuperAdminOrgId, setTargetSuperAdminOrgId] = useState<string>('');
   const [superAdminActionLoading, setSuperAdminActionLoading] = useState(false);
   const [superAdminActionFeedback, setSuperAdminActionFeedback] = useState<{ msg: string; isError?: boolean } | null>(null);
-
-  // All distinct registered members across companies for Super Admin promotion
-  const candidateMembersForSuperAdmin = useMemo(() => {
-    const list = allMembers && allMembers.length > 0 ? allMembers : members;
-    const seenEmails = new Set<string>();
-    const result: OrganizationMember[] = [];
-    for (const m of list) {
-      const email = m.userEmail?.trim().toLowerCase();
-      if (!email || seenEmails.has(email)) continue;
-      seenEmails.add(email);
-      result.push(m);
-    }
-    return result;
-  }, [allMembers, members]);
-
-  // Filtered members by search query in the super admin modal
-  const filteredCandidateMembers = useMemo(() => {
-    if (!superAdminMemberSearch.trim()) return candidateMembersForSuperAdmin;
-    const q = superAdminMemberSearch.toLowerCase().trim();
-    return candidateMembersForSuperAdmin.filter(m => {
-      const org = (allOrganizations && allOrganizations.length > 0 ? allOrganizations : organizations).find(o => o.id === m.orgId);
-      return (
-        m.userName?.toLowerCase().includes(q) ||
-        m.userEmail?.toLowerCase().includes(q) ||
-        org?.name?.toLowerCase().includes(q) ||
-        m.jobTitle?.toLowerCase().includes(q)
-      );
-    });
-  }, [candidateMembersForSuperAdmin, superAdminMemberSearch, allOrganizations, organizations]);
 
   // =========================================================================
   // 8. AUDIT LOG STATE & FILTERS
@@ -361,12 +381,56 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [auditActionFilter, setAuditActionFilter] = useState<string>('all');
   const [auditEntityFilter, setAuditEntityFilter] = useState<string>('all');
 
-  // Sync selected organization for modal forms
-  React.useEffect(() => {
-    if ((!selectedOrgForMember || selectedOrgForMember === 'all') && displayOrgs.length > 0) {
-      setSelectedOrgForMember(displayOrgs[0].id);
-    }
-  }, [displayOrgs, selectedOrgForMember]);
+  // Default company for a new record: the company filter, else the active company, else the first one (active companies only).
+  const defaultFormOrgId = () => {
+    const isCreatable = (orgId?: string) => Boolean(orgId && orgId !== 'all' && creatableOrgs.some(o => o.id === orgId));
+    if (isCreatable(selectedOrgFilter)) return selectedOrgFilter;
+    if (isCreatable(activeOrgId)) return activeOrgId;
+    return creatableOrgs[0]?.id || '';
+  };
+
+  // ---- Multi-company availability (a company is unavailable when the record already exists there) ----
+  const provisionEmail = normalizeEmail(memberEmail);
+  const existingMembershipsForEmail = useMemo(
+    () => (provisionEmail && isValidEmail(provisionEmail) ? knownMembers.filter(m => normalizeEmail(m.userEmail) === provisionEmail) : []),
+    [knownMembers, provisionEmail],
+  );
+  // A login is known only when one of the email's memberships carries a real UID: that same
+  // account is linked, no new password. Email-invited (pending) memberships have no known login,
+  // so the password path creates one.
+  const provisionKnownUid = knownLoginUidOf(existingMembershipsForEmail);
+  const provisionIsExistingAccount = Boolean(provisionKnownUid);
+  const provisionHasPendingOnly = existingMembershipsForEmail.length > 0 && !provisionIsExistingAccount;
+  const memberUnavailableOrgs = useMemo(() => {
+    const map: Record<string, string> = {};
+    existingMembershipsForEmail.forEach(m => {
+      if (m.orgId) map[m.orgId] = skipReasonLabel('already_member', m.userName);
+    });
+    return map;
+  }, [existingMembershipsForEmail]);
+  const provisionTargetOrgIds = selectedOrgsForMember.filter(id => !memberUnavailableOrgs[id] && creatableOrgs.some(o => o.id === id));
+
+  const vendorUnavailableOrgs = useMemo(() => {
+    const map: Record<string, string> = {};
+    const key = normalizeKeyValue(vendorName);
+    if (!key || editingVendor) return map;
+    targetVendors.forEach(p => {
+      if (p.orgId && normalizeKeyValue(p.name) === key) map[p.orgId] = skipReasonLabel('duplicate', p.name);
+    });
+    return map;
+  }, [targetVendors, vendorName, editingVendor]);
+  const vendorTargetOrgIds = vendorOrgIds.filter(id => !vendorUnavailableOrgs[id] && creatableOrgs.some(o => o.id === id));
+
+  const deptUnavailableOrgs = useMemo(() => {
+    const map: Record<string, string> = {};
+    const key = normalizeKeyValue(deptName);
+    if (!key || editingDept) return map;
+    targetDepartments.forEach(d => {
+      if (d.orgId && normalizeKeyValue(d.name) === key) map[d.orgId] = skipReasonLabel('duplicate', d.name);
+    });
+    return map;
+  }, [targetDepartments, deptName, editingDept]);
+  const deptTargetOrgIds = deptOrgIds.filter(id => !deptUnavailableOrgs[id] && creatableOrgs.some(o => o.id === id));
 
   // =========================================================================
   // HANDLERS: COMPANIES
@@ -459,64 +523,175 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // =========================================================================
   // HANDLERS: USERS
   // =========================================================================
+  const handleOpenProvision = () => {
+    provisionGuard.rotateKey();
+    provisionAttemptEmailRef.current = '';
+    setCreatedCredentials(null);
+    setProvisionError(null);
+    // The role list never offers super admin; a stale value must not survive either.
+    if (memberRole === 'super_admin') setMemberRole('employee');
+    const defaultOrg = defaultFormOrgId();
+    setSelectedOrgsForMember(defaultOrg ? [defaultOrg] : []);
+    setIsProvisionModalOpen(true);
+  };
+
+  const handleProvisionEmailChange = (value: string) => {
+    setMemberEmail(value);
+    // Known person: pre-fill the registered name (the admin can still change it).
+    const email = normalizeEmail(value);
+    if (!memberName.trim() && email && isValidEmail(email)) {
+      const known = knownMembers.find(m => normalizeEmail(m.userEmail) === email);
+      if (known?.userName) setMemberName(known.userName);
+    }
+  };
+
   const handleProvisionSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (provisionLoading) return;
     setProvisionError(null);
 
-    const targetOrgId = selectedOrgForMember || (displayOrgs[0]?.id || '');
-    const cleanEmail = memberEmail.trim().toLowerCase();
+    const cleanEmail = normalizeEmail(memberEmail);
     const cleanPassword = memberPassword.trim();
+    const cleanName = memberName.trim() || existingMembershipsForEmail[0]?.userName || '';
+    const isExistingAccount = provisionIsExistingAccount;
+    const targetOrgIds = provisionTargetOrgIds;
+    // Owner-only super admin: a member is never created with the super admin role.
+    const role: Role = memberRole === 'super_admin' ? 'employee' : memberRole;
 
-    if (!cleanEmail || !cleanPassword) {
-      setProvisionError('يرجى كتابة البريد الإلكتروني وكلمة المرور.');
+    if (!cleanEmail || !isValidEmail(cleanEmail)) {
+      setProvisionError('يرجى كتابة بريد إلكتروني صحيح.');
       return;
     }
-
-    if (cleanPassword.length < 6) {
-      setProvisionError('كلمة المرور يجب ألا تقل عن 6 أحرف أو أرقام.');
+    if (!cleanName) {
+      setProvisionError('يرجى كتابة اسم الموظف.');
       return;
     }
+    if (targetOrgIds.length === 0) {
+      setProvisionError(
+        selectedOrgsForMember.length > 0
+          ? 'هذا البريد مسجل بالفعل في كل الشركات المختارة. اختر شركة أخرى لم يُسجل بها بعد.'
+          : 'يرجى تحديد شركة واحدة على الأقل.'
+      );
+      return;
+    }
+    if (!isExistingAccount) {
+      if (!cleanPassword) {
+        setProvisionError('يرجى كتابة كلمة المرور للحساب الجديد.');
+        return;
+      }
+      if (cleanPassword.length < 6) {
+        setProvisionError('كلمة المرور يجب ألا تقل عن 6 أحرف أو أرقام.');
+        return;
+      }
+    }
+
+    const memberData = {
+      userName: cleanName,
+      userEmail: cleanEmail,
+      phone: memberPhone.trim(),
+      role,
+      department: department.trim() || (role === 'finance' ? 'المالية والحسابات' : 'العمليات والتشغيل'),
+      jobTitle: jobTitle.trim() || 'موظف',
+      active: true,
+    };
+
+    // A different email is a different person: never reuse the key of a failed attempt for
+    // another email (that key may already hold a login account created for the old email).
+    if (provisionAttemptEmailRef.current && provisionAttemptEmailRef.current !== cleanEmail) provisionGuard.rotateKey();
+    provisionAttemptEmailRef.current = cleanEmail;
 
     await provisionGuard.run(async (idempotencyKey) => {
       try {
-        const res = await createCompanyUser({
-          name: memberName.trim(),
-          email: cleanEmail,
-          password: cleanPassword,
-          phone: memberPhone.trim(),
-          role: memberRole,
-          department: department.trim(),
-          jobTitle: jobTitle.trim(),
-          orgId: targetOrgId,
-          idempotencyKey,
-        });
+        const addedOrgIds: string[] = [];
+        const skippedNotes: string[] = [];
+        const warnings: string[] = [];
+        let password: string | undefined;
+        // The email of the login the memberships belong to (from the result, never from the form).
+        let accountEmail = cleanEmail;
+        let remainingOrgIds = targetOrgIds;
+        // An existing person keeps the same login (UID) in every company.
+        let knownUid = provisionKnownUid;
+        let linkKey = idempotencyKey;
 
-        if (res.success && res.credentials) {
-          // The account now exists: this intent is done, never replay it.
-          provisionGuard.rotateKey();
-          if (memberRole === 'super_admin') {
-            try {
-              await addSuperAdminEmail(cleanEmail);
-            } catch (err: any) {
-              alert(err?.message || 'تعذر تنفيذ العملية');
-            }
-          }
-          const orgObj = displayOrgs.find(o => o.id === targetOrgId);
-          setCreatedCredentials({
-            name: memberName.trim(),
-            email: res.credentials.email,
-            password: res.credentials.password,
-            phone: memberPhone.trim(),
-            orgName: orgObj?.name || 'الشركة المحددة',
+        if (!isExistingAccount) {
+          // A new login: create the account together with the first company's membership.
+          const res = await createCompanyUser({
+            name: cleanName,
+            email: cleanEmail,
+            password: cleanPassword,
+            phone: memberData.phone,
+            role,
+            department: department.trim(),
+            jobTitle: jobTitle.trim(),
+            orgId: targetOrgIds[0],
+            idempotencyKey,
           });
-          setMemberName('');
-          setMemberEmail('');
-          setMemberPassword('');
-          setMemberPhone('');
-        } else {
-          setProvisionError(res.message || 'تعذر إضافة المستخدم.');
+          if (res.success && res.credentials) {
+            accountEmail = normalizeEmail(res.credentials.email);
+            password = res.credentials.password;
+            addedOrgIds.push(targetOrgIds[0]);
+            remainingOrgIds = targetOrgIds.slice(1);
+            linkKey = `${idempotencyKey}:more-orgs`;
+            // The other companies' memberships use the new login's UID (returned by createCompanyUser).
+            knownUid = isRealUid(res.uid) ? res.uid! : '';
+            if (password !== cleanPassword) {
+              warnings.push('الحساب أُنشئ في محاولة سابقة بكلمة المرور الظاهرة هنا (وليس بكلمة المرور المعدلة).');
+            }
+            if (accountEmail !== cleanEmail) {
+              // Never add more companies for a login of another email.
+              warnings.push(`الحساب المُنشأ بالبريد ${accountEmail} وليس ${cleanEmail}، لذلك لم تتم إضافته لباقي الشركات.`);
+              remainingOrgIds = [];
+            } else if (remainingOrgIds.length > 0 && !knownUid) {
+              // Without the new login's UID the other memberships would not open for this account
+              // (an unverified email is not enough), so they are not created blindly.
+              warnings.push(`تم إنشاء الحساب في ${orgNameOf(targetOrgIds[0])}. لم تكتمل إضافته لباقي الشركات (${remainingOrgIds.map(orgNameOf).join('، ')}) — افتح النموذج مرة أخرى بنفس البريد وحدد هذه الشركات لإضافته إليها بنفس الحساب.`);
+              remainingOrgIds = [];
+            }
+          } else if (res.code === 'email_in_use') {
+            // The email already has a login that no visible membership links to (e.g. Google
+            // sign-in): add the person to the selected companies by email instead.
+            linkKey = `${idempotencyKey}:link`;
+            warnings.push('هذا البريد له حساب دخول مسجل بالفعل، لذلك لم يُنشأ حساب جديد ولم تُستخدم كلمة المرور المكتوبة. تمت إضافته للشركات المختارة ويدخل بحسابه الحالي (ببريد موثق، مثل الدخول عبر Google).');
+          } else {
+            // Same key on retry (same email): the same intent resolves to the same account/membership.
+            setProvisionError(res.message || 'تعذر إضافة المستخدم.');
+            return;
+          }
         }
+
+        if (remainingOrgIds.length > 0) {
+          try {
+            // One transaction for all the other companies; companies where the person is already a member are skipped.
+            const multi = await addMemberToOrgs(
+              { ...memberData, userEmail: accountEmail, userId: knownUid },
+              remainingOrgIds,
+              { idempotencyKey: linkKey },
+            );
+            addedOrgIds.push(...multi.addedOrgIds);
+            multi.skipped.forEach(s => skippedNotes.push(`${orgNameOf(s.orgId)} (${skipReasonLabel(s.reason, s.existingName)})`));
+          } catch (err: any) {
+            if (!password) throw err; // nothing was created: show the error, keep the key for a retry
+            // The account and its first company exist; only the extra companies failed.
+            warnings.push(`تم إنشاء الحساب في ${orgNameOf(targetOrgIds[0])} فقط. تعذر إضافته لباقي الشركات: ${err?.message || 'خطأ غير متوقع'} — يمكنك إضافته لها لاحقاً من نفس النموذج بنفس البريد.`);
+          }
+        }
+
+        // The intent is done (or nothing more can be created by replaying it).
+        provisionGuard.rotateKey();
+        provisionAttemptEmailRef.current = '';
+        setCreatedCredentials({
+          name: cleanName,
+          email: accountEmail,
+          password,
+          phone: memberData.phone,
+          orgNames: addedOrgIds.map(orgNameOf),
+          skippedNotes,
+          warning: warnings.join(' ') || undefined,
+        });
+        setMemberName('');
+        setMemberEmail('');
+        setMemberPassword('');
+        setMemberPhone('');
       } catch (err: any) {
         setProvisionError(err?.message || 'تعذر إضافة المستخدم.');
       }
@@ -528,10 +703,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setEditMemberName(mem.userName);
     setEditMemberPhone(mem.phone || '');
     setEditMemberOrgId(mem.orgId || displayOrgs[0]?.id || '');
-    // Only a real grant (super_admins record / built-in owner) counts. A stale member role of
-    // 'super_admin' grants nothing and must not be re-granted just by saving this form.
-    const isMemberSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim());
-    setEditMemberRole(isMemberSuperAdmin ? 'super_admin' : mem.role === 'super_admin' ? 'employee' : mem.role);
+    // Super admin is never a company role (only the platform owner is super admin, via the
+    // super_admins list). A stored 'super_admin' member role grants nothing: show a company
+    // role instead so saving this form never writes 'super_admin'.
+    const isMemberSuperAdmin = superAdminEmails.some(e => normalizeEmail(e) === normalizeEmail(mem.userEmail));
+    setEditMemberRole(mem.role === 'super_admin' ? (isMemberSuperAdmin ? 'org_admin' : 'employee') : mem.role);
     setEditMemberDept(mem.department || 'العمليات والتشغيل');
     setEditMemberJob(mem.jobTitle || 'موظف');
     setEditMemberActive(mem.active !== false);
@@ -544,24 +720,15 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     await editMemberGuard.run(async () => {
       try {
         const finalOrgId = editMemberOrgId || editingMember.orgId || displayOrgs[0]?.id || '';
-        const email = editingMember.userEmail?.toLowerCase().trim();
-        const wasSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === email);
-
-        if (editMemberRole === 'super_admin') {
-          if (email) {
-            await addSuperAdminEmail(email);
-          }
-        } else if (wasSuperAdmin) {
-          if (email) {
-            await removeSuperAdminEmail(email);
-          }
-        }
+        // Platform super admin status is managed only in the super admins section (demote only);
+        // editing a membership never grants or removes it.
+        const role: Role = editMemberRole === 'super_admin' ? 'employee' : editMemberRole;
 
         await updateMember(editingMember.id, {
           userName: editMemberName.trim(),
           phone: editMemberPhone.trim(),
           orgId: finalOrgId,
-          role: editMemberRole,
+          role,
           department: editMemberDept.trim(),
           jobTitle: editMemberJob.trim(),
           active: editMemberActive,
@@ -731,6 +898,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // HANDLERS: VENDORS
   // =========================================================================
   const handleOpenAddVendor = () => {
+    if (!canCreateVendorsAndDepts) return;
     vendorGuard.rotateKey();
     setEditingVendor(null);
     setVendorName('');
@@ -742,12 +910,25 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setVendorBankName('البنك التجاري الدولي (CIB)');
     setVendorIban('');
     setVendorAddress('');
-    const defaultOrg = (selectedOrgFilter && selectedOrgFilter !== 'all')
-      ? selectedOrgFilter
-      : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (displayOrgs[0]?.id || ''));
-    setVendorOrgId(defaultOrg);
+    const defaultOrg = defaultFormOrgId();
+    setVendorOrgIds(defaultOrg ? [defaultOrg] : []);
     setVendorServiceIds([]);
     setIsVendorModalOpen(true);
+  };
+
+  // Services offered in the vendor form: those of the vendor's company (edit) or of any selected company (add).
+  const vendorFormOrgIds = editingVendor ? [editingVendor.orgId] : vendorTargetOrgIds;
+  const vendorFormServices = isVendorModalOpen
+    ? targetServices.filter(s => vendorFormOrgIds.some(orgId => Boolean(orgId) && isServiceMatchingOrg(s, orgId)))
+    : [];
+
+  const handleVendorOrgIdsChange = (orgIds: string[]) => {
+    setVendorOrgIds(orgIds);
+    // Keep only the services that still belong to a selected company.
+    setVendorServiceIds(prev => prev.filter(id => {
+      const srv = targetServices.find(s => s.id === id);
+      return Boolean(srv && orgIds.some(orgId => isServiceMatchingOrg(srv, orgId)));
+    }));
   };
 
   const handleStartEditVendor = (prov: ServiceProvider) => {
@@ -761,7 +942,6 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setVendorBankName(prov.bankName || '');
     setVendorIban(prov.iban || '');
     setVendorAddress(prov.address || '');
-    setVendorOrgId(prov.orgId || displayOrgs[0]?.id || '');
     setVendorServiceIds(prov.serviceCategoryIds || []);
     setIsVendorModalOpen(true);
   };
@@ -770,17 +950,20 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     e.preventDefault();
     if (!vendorName.trim()) return;
 
-    const targetOrgId = vendorOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || displayOrgs[0]?.id || '';
-    const availableCompanyServices = targetServices.filter(s => isServiceMatchingOrg(s, targetOrgId));
-    const matchedServiceNames = availableCompanyServices
-      .filter(s => vendorServiceIds.includes(s.id))
-      .map(s => s.name);
-
-    await vendorGuard.run(async (idempotencyKey) => {
-      try {
-        if (editingVendor) {
-          await updateProvider({
-            ...editingVendor,
+    if (!editingVendor) {
+      // Add: one vendor record per selected company, all in one transaction.
+      const orgIds = vendorTargetOrgIds;
+      if (orgIds.length === 0) {
+        alert(vendorOrgIds.length > 0
+          ? 'يوجد مورد بنفس الاسم في كل الشركات المختارة. اختر شركة أخرى أو غيّر اسم المورد.'
+          : 'يرجى تحديد شركة واحدة على الأقل.');
+        return;
+      }
+      const selectedServices = vendorFormServices.filter(s => vendorServiceIds.includes(s.id));
+      await vendorGuard.run(async (idempotencyKey) => {
+        try {
+          // The context keeps, per company, only the services that belong to that company.
+          const res = await addProviderToOrgs({
             name: vendorName.trim(),
             contactPerson: vendorContact.trim(),
             phone: vendorPhone.trim(),
@@ -790,28 +973,40 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             bankName: vendorBankName.trim(),
             iban: vendorIban.trim().toUpperCase(),
             address: vendorAddress.trim(),
-            orgId: targetOrgId,
-            serviceCategoryIds: vendorServiceIds,
-            serviceCategoryNames: matchedServiceNames,
-          });
-        } else {
-          await addProvider({
-            name: vendorName.trim(),
-            contactPerson: vendorContact.trim(),
-            phone: vendorPhone.trim(),
-            email: vendorEmail.trim(),
-            taxNumber: vendorTaxNumber.trim(),
-            crNumber: vendorCrNumber.trim(),
-            bankName: vendorBankName.trim(),
-            iban: vendorIban.trim().toUpperCase(),
-            address: vendorAddress.trim(),
-            orgId: targetOrgId,
-            serviceCategoryIds: vendorServiceIds,
-            serviceCategoryNames: matchedServiceNames,
+            serviceCategoryIds: selectedServices.map(s => s.id),
+            serviceCategoryNames: selectedServices.map(s => s.name),
             rating: 5,
             active: true,
-          }, { idempotencyKey });
+          }, orgIds, { idempotencyKey });
+          vendorGuard.rotateKey();
+          setIsVendorModalOpen(false);
+          setMultiOrgNotice({ msg: describeMultiOrgResult(`تسجيل المورد "${vendorName.trim()}"`, res.addedOrgIds, res.skipped) || 'تم حفظ المورد.' });
+        } catch (err: any) {
+          alert(err?.message || 'تعذر تنفيذ العملية');
         }
+      });
+      return;
+    }
+
+    // Edit: stays single-company. The vendor's company never changes (the domain ignores orgId
+    // on update), so its services are those of its own company only.
+    const ownServices = targetServices.filter(s => isServiceMatchingOrg(s, editingVendor.orgId) && vendorServiceIds.includes(s.id));
+    await vendorGuard.run(async () => {
+      try {
+        await updateProvider({
+          ...editingVendor,
+          name: vendorName.trim(),
+          contactPerson: vendorContact.trim(),
+          phone: vendorPhone.trim(),
+          email: vendorEmail.trim(),
+          taxNumber: vendorTaxNumber.trim(),
+          crNumber: vendorCrNumber.trim(),
+          bankName: vendorBankName.trim(),
+          iban: vendorIban.trim().toUpperCase(),
+          address: vendorAddress.trim(),
+          serviceCategoryIds: ownServices.map(s => s.id),
+          serviceCategoryNames: ownServices.map(s => s.name),
+        });
         vendorGuard.rotateKey();
         setIsVendorModalOpen(false);
       } catch (err: any) {
@@ -918,13 +1113,16 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // HANDLERS: DEPARTMENTS
   // =========================================================================
   const handleOpenAddDept = () => {
+    if (!canCreateVendorsAndDepts) return;
     deptGuard.rotateKey();
     setEditingDept(null);
     setDeptName('');
     setDeptCode(`DEP-${Math.floor(10 + Math.random() * 90)}`);
     setDeptDescription('');
     setDeptManager('');
-    setDeptOrgId(activeOrgId || displayOrgs[0]?.id || '');
+    const defaultOrg = defaultFormOrgId();
+    setDeptOrgId(defaultOrg);
+    setDeptOrgIds(defaultOrg ? [defaultOrg] : []);
     setIsDeptModalOpen(true);
   };
 
@@ -942,25 +1140,43 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     e.preventDefault();
     if (!deptName.trim()) return;
 
-    await deptGuard.run(async (idempotencyKey) => {
-      try {
-        if (editingDept) {
-          await updateDepartment(editingDept.id, {
-            name: deptName.trim(),
-            code: deptCode.trim().toUpperCase() || editingDept.code,
-            description: deptDescription.trim(),
-            managerName: deptManager.trim(),
-            orgId: deptOrgId || editingDept.orgId,
-          });
-        } else {
-          await addDepartment({
+    if (!editingDept) {
+      // Add: one department record per selected company, all in one transaction.
+      const orgIds = deptTargetOrgIds;
+      if (orgIds.length === 0) {
+        alert(deptOrgIds.length > 0
+          ? 'يوجد قسم بنفس الاسم في كل الشركات المختارة. اختر شركة أخرى أو غيّر اسم القسم.'
+          : 'يرجى تحديد شركة واحدة على الأقل.');
+        return;
+      }
+      await deptGuard.run(async (idempotencyKey) => {
+        try {
+          const res = await addDepartmentToOrgs({
             name: deptName.trim(),
             code: deptCode.trim().toUpperCase() || `DEP-${Math.floor(10 + Math.random() * 90)}`,
             description: deptDescription.trim(),
             managerName: deptManager.trim(),
-            orgId: deptOrgId || activeOrgId || displayOrgs[0]?.id || '',
-          }, { idempotencyKey });
+          }, orgIds, { idempotencyKey });
+          deptGuard.rotateKey();
+          setIsDeptModalOpen(false);
+          setMultiOrgNotice({ msg: describeMultiOrgResult(`إضافة القسم "${deptName.trim()}"`, res.addedOrgIds, res.skipped) || 'تم حفظ القسم.' });
+        } catch (err: any) {
+          alert(err?.message || 'تعذر تنفيذ العملية');
         }
+      });
+      return;
+    }
+
+    // Edit: stays single-company.
+    await deptGuard.run(async () => {
+      try {
+        await updateDepartment(editingDept.id, {
+          name: deptName.trim(),
+          code: deptCode.trim().toUpperCase() || editingDept.code,
+          description: deptDescription.trim(),
+          managerName: deptManager.trim(),
+          orgId: deptOrgId || editingDept.orgId,
+        });
         deptGuard.rotateKey();
         setIsDeptModalOpen(false);
       } catch (err: any) {
@@ -984,70 +1200,18 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   // =========================================================================
   // HANDLERS: SUPER ADMINS
+  // Owner-only super admin: nothing here grants the role. Leftover (legacy) super admins can
+  // be demoted; the platform owner can never be demoted.
   // =========================================================================
-  const handleAddAdmin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAdminSuccessMsg(null);
-    setAdminErrorMsg(null);
 
-    const email = newAdminEmail.trim().toLowerCase();
-    if (!email || !isValidEmail(email)) {
-      setAdminErrorMsg('يرجى إدخال بريد إلكتروني صالح.');
-      return;
-    }
-
-    if (superAdminEmails.includes(email)) {
-      setAdminErrorMsg('هذا البريد مسجل بالفعل كمشرف عام.');
-      return;
-    }
-
-    await rowGuard.run(`super-admin:${email}`, async () => {
-      try {
-        await addSuperAdminEmail(email);
-        const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === email);
-        if (memberRecord) {
-          await updateMember(memberRecord.id, { role: 'super_admin' });
-        }
-        setAdminSuccessMsg(`تمت ترقية الحساب (${email}) كمشرف عام للمنصة 👑.`);
-        setNewAdminEmail('');
-        setSelectedMemberEmailForSuperAdmin('');
-      } catch (err: any) {
-        setAdminErrorMsg(err?.message || 'حدث خطأ أثناء حفظ المشرف العام.');
-      }
-    });
-  };
-
-  const handlePromoteSelectedMember = async () => {
-    if (!selectedMemberEmailForSuperAdmin) return;
-    setAdminSuccessMsg(null);
-    setAdminErrorMsg(null);
-
-    const email = selectedMemberEmailForSuperAdmin.trim().toLowerCase();
-    if (superAdminEmails.some(sa => sa.toLowerCase().trim() === email)) {
-      setAdminErrorMsg('هذا الموظف مسجل بالفعل كمشرف عام.');
-      return;
-    }
-
-    await rowGuard.run(`super-admin:${email}`, async () => {
-      try {
-        await addSuperAdminEmail(email);
-        const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === email);
-        if (memberRecord) {
-          await updateMember(memberRecord.id, { role: 'super_admin' });
-        }
-        setAdminSuccessMsg(`تمت ترقية (${email}) إلى سوبر أدمن 👑 بنجاح.`);
-        setNewAdminEmail('');
-        setSelectedMemberEmailForSuperAdmin('');
-      } catch (err: any) {
-        setAdminErrorMsg(err?.message || 'حدث خطأ أثناء ترقية الموظف إلى سوبر أدمن.');
-      }
-    });
-  };
+  /** Member records of this email that still carry the stale 'super_admin' company role. */
+  const staleSuperAdminMemberships = (email: string) =>
+    knownMembers.filter(m => normalizeEmail(m.userEmail) === email && m.role === 'super_admin');
 
   const handleRemoveSuperAdmin = async (email: string) => {
-    const cleanEmail = email.trim().toLowerCase();
-    if (cleanEmail === 'mahmoud@tieapps.com') {
-      alert('لا يمكن إزالة الحساب الرئيسي لمشرف المنصة الأساسي.');
+    const cleanEmail = normalizeEmail(email);
+    if (isPlatformOwner(cleanEmail)) {
+      alert('لا يمكن سحب صلاحيات مالك المنصة (المشرف العام الوحيد).');
       return;
     }
 
@@ -1059,9 +1223,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       try {
         setSuperAdminActionLoading(true);
         await removeSuperAdminEmail(cleanEmail);
-        const memberRecord = (allMembers || members).find(m => m.userEmail?.toLowerCase().trim() === cleanEmail);
-        if (memberRecord) {
-          await updateMember(memberRecord.id, { role: 'employee' });
+        // A stale 'super_admin' company role becomes a plain employee; real company roles are kept.
+        for (const mem of staleSuperAdminMemberships(cleanEmail)) {
+          await updateMember(mem.id, { role: 'employee' });
         }
         setSuperAdminActionFeedback({ msg: `تم سحب صلاحيات السوبر أدمن عن (${cleanEmail}) بنجاح.` });
       } catch (err: any) {
@@ -1073,9 +1237,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   };
 
   const handleOpenEditSuperAdminRole = (email: string) => {
+    if (isPlatformOwner(email)) return; // the owner's role never changes
     setEditingSuperAdminEmail(email);
-    const existingMember = members.find(m => m.userEmail?.toLowerCase().trim() === email.toLowerCase().trim());
-    setTargetSuperAdminRole(existingMember?.role === 'super_admin' ? 'org_admin' : existingMember?.role || 'org_admin');
+    const cleanEmail = normalizeEmail(email);
+    const existingMember = knownMembers.find(m => normalizeEmail(m.userEmail) === cleanEmail);
+    setTargetSuperAdminRole(!existingMember || existingMember.role === 'super_admin' ? 'org_admin' : existingMember.role);
     setTargetSuperAdminOrgId(existingMember?.orgId || displayOrgs[0]?.id || '');
     setSuperAdminActionFeedback(null);
   };
@@ -1084,19 +1250,18 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     e.preventDefault();
     if (!editingSuperAdminEmail) return;
 
-    if (
-      editingSuperAdminEmail === 'mahmoud@tieapps.com' && 
-      targetSuperAdminRole !== 'super_admin'
-    ) {
-      alert('لا يمكن تغيير رتبة المشرف الأساسي للمنصة.');
+    if (isPlatformOwner(editingSuperAdminEmail)) {
+      alert('لا يمكن تغيير رتبة مالك المنصة (المشرف العام الوحيد).');
       return;
     }
+    // This only DEMOTES a leftover super admin to a company role; it never grants super admin.
+    const newRole: Role = targetSuperAdminRole === 'super_admin' ? 'org_admin' : targetSuperAdminRole;
 
-    await rowGuard.run(`super-admin:${editingSuperAdminEmail.trim().toLowerCase()}`, async () => {
+    await rowGuard.run(`super-admin:${normalizeEmail(editingSuperAdminEmail)}`, async () => {
       try {
         setSuperAdminActionLoading(true);
-        await updateSuperAdminRole(editingSuperAdminEmail, targetSuperAdminRole, targetSuperAdminOrgId);
-        setSuperAdminActionFeedback({ msg: `تم تحديث دور الحساب (${editingSuperAdminEmail}) إلى (${targetSuperAdminRole}) بنجاح.` });
+        await updateSuperAdminRole(editingSuperAdminEmail, newRole, targetSuperAdminOrgId);
+        setSuperAdminActionFeedback({ msg: `تم سحب صلاحية السوبر أدمن عن (${editingSuperAdminEmail}) وتعيينه بدور (${newRole}) في ${orgNameOf(targetSuperAdminOrgId)}.` });
         setEditingSuperAdminEmail(null);
       } catch (err: any) {
         setSuperAdminActionFeedback({ msg: err?.message || 'حدث خطأ أثناء تعديل الصلاحية.', isError: true });
@@ -1246,6 +1411,23 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     return targetDepartments.filter(d => d.orgId === selectedOrgFilter).length;
   }, [targetDepartments, selectedOrgFilter]);
 
+  // Replaces every former "promote to super admin" form: the owner is the only super admin.
+  const ownerOnlySuperAdminNote = (
+    <div className="p-3.5 bg-gradient-to-br from-amber-50/70 to-amber-100/40 rounded-2xl border border-amber-200/80 text-xs text-slate-700 space-y-1.5">
+      <p className="font-bold text-slate-800 flex items-center gap-1.5">
+        <Crown className="h-4 w-4 text-amber-600 shrink-0" />
+        <span>
+          المشرف العام الوحيد للمنصة هو المالك (<span className="font-mono">{PLATFORM_OWNER_EMAIL}</span>).
+        </span>
+      </p>
+      <p className="leading-relaxed">
+        لا يمكن ترقية أي حساب آخر إلى مشرف عام. لمنح شخص صلاحيات إدارة شركة، أضفه أو عدّله بدور
+        <strong> "مدير مؤسسة" </strong>
+        في الشركات المطلوبة (يمكن تحديد أكثر من شركة عند الإضافة).
+      </p>
+    </div>
+  );
+
   return (
     <div className="space-y-6 pb-16 animate-in fade-in duration-200">
       
@@ -1302,12 +1484,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           {activeSection === 'users' && (
             <button
               type="button"
-              onClick={() => {
-                provisionGuard.rotateKey();
-                setCreatedCredentials(null);
-                setProvisionError(null);
-                setIsProvisionModalOpen(true);
-              }}
+              onClick={handleOpenProvision}
               className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5"
             >
               <UserPlus className="h-4 w-4" />
@@ -1330,7 +1507,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             <button
               type="button"
               onClick={handleOpenAddVendor}
-              className="px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5"
+              disabled={!canCreateVendorsAndDepts}
+              title={canCreateVendorsAndDepts ? undefined : vendorDeptCreateBlockedNote}
+              className="px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Plus className="h-4 w-4" />
               <span>تسجيل مورد جديد</span>
@@ -1352,7 +1531,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             <button
               type="button"
               onClick={handleOpenAddDept}
-              className="px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5"
+              disabled={!canCreateVendorsAndDepts}
+              title={canCreateVendorsAndDepts ? undefined : vendorDeptCreateBlockedNote}
+              className="px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Plus className="h-4 w-4" />
               <span>إضافة قسم جديد</span>
@@ -1360,6 +1541,21 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           )}
         </div>
       </div>
+
+      {/* Result of the last multi-company add (added / skipped companies) */}
+      {multiOrgNotice && (
+        <div className={`p-3 rounded-2xl text-xs font-semibold flex items-start justify-between gap-2 ${
+          multiOrgNotice.isError ? 'bg-rose-50 border border-rose-200 text-rose-800' : 'bg-emerald-50 border border-emerald-200 text-emerald-900'
+        }`}>
+          <span className="flex items-start gap-2">
+            {multiOrgNotice.isError ? <AlertCircle className="h-4 w-4 shrink-0" /> : <CheckCircle2 className="h-4 w-4 shrink-0" />}
+            <span>{multiOrgNotice.msg}</span>
+          </span>
+          <button type="button" onClick={() => setMultiOrgNotice(null)} className="p-1 text-slate-400 hover:text-slate-600 shrink-0" title="إغلاق">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* =========================================================================
           ADMIN MODULES TAB SWITCHER
@@ -1863,50 +2059,37 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
                         <td className="py-3 px-4">
                           <div className="flex items-center justify-center gap-1.5">
-                            {isSuperAdmin && (
-                              isThisSuperAdmin ? (
-                                <button
-                                  type="button"
-                                  onClick={async () => {
-                                    if (mem.userEmail?.toLowerCase().trim() === 'mahmoud@tieapps.com') {
-                                      alert('لا يمكن سحب صلاحيات مشرف المنصة الأساسي.');
-                                      return;
-                                    }
-                                    if (window.confirm(`هل أنت متأكد من سحب صلاحيات السوبر أدمن عن ${mem.userName} (${mem.userEmail})؟`)) {
-                                      await rowGuard.run(`super-admin:${mem.userEmail?.trim().toLowerCase()}`, async () => {
-                                        try {
-                                          await removeSuperAdminEmail(mem.userEmail);
-                                          await updateMember(mem.id, { role: 'employee' });
-                                        } catch (err: any) {
-                                          alert(err?.message || 'تعذر تنفيذ العملية');
-                                        }
-                                      });
-                                    }
-                                  }}
-                                  className="p-1.5 text-amber-600 bg-amber-50 hover:bg-rose-50 hover:text-rose-600 rounded-lg transition cursor-pointer border border-amber-200"
-                                  title="سحب صلاحيات السوبر أدمن"
+                            {/* Owner-only super admin: no promote button. A leftover super admin can only be demoted; the owner is protected. */}
+                            {isSuperAdmin && isThisSuperAdmin && (
+                              isPlatformOwner(mem.userEmail) ? (
+                                <span
+                                  className="p-1.5 text-amber-600 bg-amber-50 rounded-lg border border-amber-200"
+                                  title="مالك المنصة — المشرف العام الوحيد (محمي)"
                                 >
                                   <Crown className="h-3.5 w-3.5 fill-amber-500" />
-                                </button>
+                                </span>
                               ) : (
                                 <button
                                   type="button"
                                   onClick={async () => {
-                                    if (window.confirm(`هل أنت متأكد من ترقية ${mem.userName} (${mem.userEmail}) إلى سوبر أدمن للمنصة 👑؟`)) {
-                                      await rowGuard.run(`super-admin:${mem.userEmail?.trim().toLowerCase()}`, async () => {
+                                    const email = normalizeEmail(mem.userEmail);
+                                    if (window.confirm(`هل أنت متأكد من سحب صلاحيات السوبر أدمن عن ${mem.userName} (${email})؟`)) {
+                                      await rowGuard.run(`super-admin:${email}`, async () => {
                                         try {
-                                          await addSuperAdminEmail(mem.userEmail);
-                                          await updateMember(mem.id, { role: 'super_admin' });
+                                          await removeSuperAdminEmail(email);
+                                          // Only a stale 'super_admin' company role is reset; a real company role is kept.
+                                          if (mem.role === 'super_admin') await updateMember(mem.id, { role: 'employee' });
                                         } catch (err: any) {
                                           alert(err?.message || 'تعذر تنفيذ العملية');
                                         }
                                       });
                                     }
                                   }}
-                                  className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition cursor-pointer"
-                                  title="ترقية لسوبر أدمن 👑"
+                                  disabled={rowGuard.isPending(`super-admin:${normalizeEmail(mem.userEmail)}`)}
+                                  className="p-1.5 text-amber-600 bg-amber-50 hover:bg-rose-50 hover:text-rose-600 rounded-lg transition cursor-pointer border border-amber-200 disabled:opacity-50"
+                                  title="سحب صلاحيات السوبر أدمن"
                                 >
-                                  <Crown className="h-3.5 w-3.5" />
+                                  <Crown className="h-3.5 w-3.5 fill-amber-500" />
                                 </button>
                               )
                             )}
@@ -2498,90 +2681,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs">
             <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 mb-3">
               <ShieldCheck className="h-4 w-4 text-emerald-600" />
-              <span>إضافة مشرف عام جديد (Super Admin)</span>
+              <span>المشرف العام للمنصة (Super Admin)</span>
             </h3>
-
-            {/* Dropdown selection */}
-            <div className="p-3.5 bg-gradient-to-br from-amber-50/70 to-amber-100/40 rounded-2xl border border-amber-200/80 space-y-2.5 mb-4">
-              <label className="block font-bold text-slate-800 text-xs flex items-center gap-1.5">
-                <Crown className="h-4 w-4 text-amber-600 shrink-0" />
-                <span>اختيار موظف من المسجلين بالمنصة لترقيته لسوبر أدمن:</span>
-              </label>
-
-              <div className="relative max-w-md">
-                <input
-                  type="text"
-                  value={superAdminMemberSearch}
-                  onChange={(e) => setSuperAdminMemberSearch(e.target.value)}
-                  placeholder="بحث سريع بالاسم، الشركة، أو البريد لتصفية القائمة..."
-                  className="w-full pl-8 pr-3 py-1.5 bg-white border border-amber-200/80 rounded-xl text-xs text-slate-700 outline-hidden focus:border-amber-500 placeholder:text-slate-400"
-                />
-                <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2" />
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-2 max-w-xl">
-                <select
-                  value={selectedMemberEmailForSuperAdmin}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setSelectedMemberEmailForSuperAdmin(val);
-                    if (val) {
-                      setNewAdminEmail(val);
-                    }
-                  }}
-                  className="flex-1 p-2.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 outline-hidden focus:border-amber-500 font-semibold"
-                >
-                  <option value="">-- اختر موظفاً للترقية من المسجلين بالمنصة --</option>
-                  {filteredCandidateMembers.map((m) => {
-                    const org = (allOrganizations && allOrganizations.length > 0 ? allOrganizations : organizations).find(o => o.id === m.orgId);
-                    const orgName = org?.name || 'بدون شركة';
-                    const isAlreadySuper = superAdminEmails.some(sa => sa.toLowerCase().trim() === m.userEmail?.toLowerCase().trim());
-                    return (
-                      <option 
-                        key={`${m.id}-${m.userEmail}`} 
-                        value={m.userEmail}
-                        disabled={isAlreadySuper}
-                      >
-                        {m.userName} - {orgName} ({m.userEmail}) {isAlreadySuper ? '👑 (سوبر أدمن حالياً)' : ''}
-                      </option>
-                    );
-                  })}
-                </select>
-
-                <button
-                  type="button"
-                  disabled={!selectedMemberEmailForSuperAdmin || superAdminEmails.some(sa => sa.toLowerCase().trim() === selectedMemberEmailForSuperAdmin.toLowerCase().trim())}
-                  onClick={handlePromoteSelectedMember}
-                  className="px-4 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-bold rounded-xl shadow-xs transition cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 shrink-0"
-                >
-                  <Crown className="h-4 w-4" />
-                  <span>ترقية إلى سوبر أدمن 👑</span>
-                </button>
-              </div>
-            </div>
-
-            <form onSubmit={handleAddAdmin} className="space-y-2 max-w-md">
-              <label className="block font-bold text-slate-700 text-xs">أو إدخال بريد سوبر أدمن يدوياً:</label>
-              <div className="flex gap-2">
-                <input
-                  type="email"
-                  required
-                  value={newAdminEmail}
-                  onChange={(e) => setNewAdminEmail(e.target.value)}
-                  placeholder="ادخل البريد الإلكتروني للمشرف..."
-                  className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 outline-hidden font-mono"
-                />
-                <button
-                  type="submit"
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
-                >
-                  إضافة مشرف
-                </button>
-              </div>
-            </form>
-
-            {adminSuccessMsg && <p className="text-xs text-emerald-700 mt-2 font-semibold">{adminSuccessMsg}</p>}
-            {adminErrorMsg && <p className="text-xs text-rose-700 mt-2 font-semibold">{adminErrorMsg}</p>}
+            {ownerOnlySuperAdminNote}
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs">
@@ -2595,7 +2697,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             )}
             <div className="space-y-2">
               {superAdminEmails.map((email) => {
-                const isRootAdmin = email === 'mahmoud@tieapps.com';
+                const isRootAdmin = isPlatformOwner(email);
                 return (
                   <div key={email} className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 text-xs gap-3">
                     <div className="flex items-center gap-3">
@@ -2605,39 +2707,45 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="font-mono font-bold text-slate-800">{email}</span>
-                          <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">
-                            نشط
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isRootAdmin ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'}`}>
+                            {isRootAdmin ? 'مالك المنصة' : 'صلاحية قديمة'}
                           </span>
                         </div>
-                        <span className="text-[10px] text-slate-400">سوبر أدمن المنصة • كامل الصلاحيات الإدارية</span>
+                        <span className="text-[10px] text-slate-400">
+                          {isRootAdmin
+                            ? 'المشرف العام الوحيد للمنصة • كامل الصلاحيات الإدارية'
+                            : 'حساب مُنح صلاحية المشرف العام سابقاً — يُنصح بسحبها وتعيينه بدور داخل شركة'}
+                        </span>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenEditSuperAdminRole(email)}
-                        className="flex items-center gap-1 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg font-bold text-xs transition cursor-pointer"
-                        title="تعديل الصلاحية أو النقل لشركة"
-                      >
-                        <Edit className="h-3.5 w-3.5" />
-                        <span>تعديل الصلاحية</span>
-                      </button>
-
                       {!isRootAdmin ? (
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveSuperAdmin(email)}
-                          disabled={superAdminActionLoading}
-                          className="flex items-center gap-1 px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-lg font-bold text-xs transition cursor-pointer disabled:opacity-50"
-                          title="إزالة من السوبر أدمن"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                          <span>إزالة</span>
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditSuperAdminRole(email)}
+                            disabled={superAdminActionLoading}
+                            className="flex items-center gap-1 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg font-bold text-xs transition cursor-pointer disabled:opacity-50"
+                            title="سحب صلاحية المشرف العام وتعيينه بدور داخل شركة"
+                          >
+                            <Edit className="h-3.5 w-3.5" />
+                            <span>تحويل لدور شركة</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveSuperAdmin(email)}
+                            disabled={superAdminActionLoading}
+                            className="flex items-center gap-1 px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-lg font-bold text-xs transition cursor-pointer disabled:opacity-50"
+                            title="سحب صلاحية المشرف العام"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            <span>سحب الصلاحية</span>
+                          </button>
+                        </>
                       ) : (
                         <span className="text-[10px] text-slate-400 font-semibold px-2 py-1 bg-slate-100 rounded-lg">
-                          مشرف أساسي محمي
+                          مالك المنصة • محمي
                         </span>
                       )}
                     </div>
@@ -3011,7 +3119,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {/* 4. Provision User Modal */}
       {isProvisionModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
                 <UserPlus className="h-4 w-4 text-indigo-600" />
@@ -3027,27 +3135,49 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <div className="h-12 w-12 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto">
                   <Check className="h-6 w-6" />
                 </div>
-                <h4 className="font-bold text-slate-900 text-sm">تم إنشاء حساب الموظف بنجاح!</h4>
+                <h4 className="font-bold text-slate-900 text-sm">
+                  {createdCredentials.password ? 'تم إنشاء حساب الموظف بنجاح!' : 'تم ربط الحساب الحالي بالشركات المختارة بنجاح!'}
+                </h4>
                 <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 text-right space-y-1.5 text-xs">
                   <div><strong>الاسم:</strong> {createdCredentials.name}</div>
                   <div><strong>البريد:</strong> <span className="font-mono">{createdCredentials.email}</span></div>
-                  <div><strong>كلمة المرور:</strong> <span className="font-mono bg-amber-50 text-amber-900 px-1.5 py-0.5 rounded font-bold">{createdCredentials.password}</span></div>
-                  <div><strong>الشركة:</strong> {createdCredentials.orgName}</div>
+                  {createdCredentials.password ? (
+                    <div><strong>كلمة المرور:</strong> <span className="font-mono bg-amber-50 text-amber-900 px-1.5 py-0.5 rounded font-bold">{createdCredentials.password}</span></div>
+                  ) : (
+                    <div className="text-slate-500">يدخل ببريده الإلكتروني نفسه وحسابه الحالي (لم يتم إنشاء حساب أو كلمة مرور جديدة).</div>
+                  )}
+                  <div>
+                    <strong>{createdCredentials.orgNames.length > 1 ? 'الشركات:' : 'الشركة:'}</strong>{' '}
+                    {createdCredentials.orgNames.length > 0 ? createdCredentials.orgNames.join('، ') : '—'}
+                  </div>
+                  {createdCredentials.skippedNotes.length > 0 && (
+                    <div className="text-amber-800">
+                      <strong>تم التخطي (مسجل بالفعل):</strong> {createdCredentials.skippedNotes.join('، ')}
+                    </div>
+                  )}
                 </div>
+                {createdCredentials.warning && (
+                  <div className="bg-amber-50 border border-amber-200 text-amber-900 p-2.5 rounded-xl text-xs text-right flex items-start gap-2">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span>{createdCredentials.warning}</span>
+                  </div>
+                )}
 
                 <div className="flex gap-2 justify-center pt-3">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(`بيانات دخول منصة المصروفات:\nالبريد: ${createdCredentials.email}\nكلمة المرور: ${createdCredentials.password}`);
-                      setCopiedLink(true);
-                      setTimeout(() => setCopiedLink(false), 2000);
-                    }}
-                    className="px-4 py-2 bg-slate-900 text-white font-bold text-xs rounded-xl flex items-center gap-1.5"
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                    <span>{copiedLink ? 'تم النسخ!' : 'نسخ بيانات الدخول'}</span>
-                  </button>
+                  {createdCredentials.password && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(`بيانات دخول منصة المصروفات:\nالبريد: ${createdCredentials.email}\nكلمة المرور: ${createdCredentials.password}`);
+                        setCopiedLink(true);
+                        setTimeout(() => setCopiedLink(false), 2000);
+                      }}
+                      className="px-4 py-2 bg-slate-900 text-white font-bold text-xs rounded-xl flex items-center gap-1.5"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                      <span>{copiedLink ? 'تم النسخ!' : 'نسخ بيانات الدخول'}</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => {
@@ -3069,19 +3199,64 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   </div>
                 )}
 
-                {canManageOrgs && (
+                <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block font-bold text-slate-700 mb-1">الشركة أو المؤسسة التابع لها *</label>
-                    <select
-                      value={selectedOrgForMember}
-                      onChange={(e) => setSelectedOrgForMember(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
-                    >
-                      {displayOrgs.map(o => (
-                        <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
-                      ))}
-                    </select>
+                    <label className="block font-bold text-slate-700 mb-1">البريد الإلكتروني *</label>
+                    <input
+                      type="email"
+                      required
+                      value={memberEmail}
+                      onChange={(e) => handleProvisionEmailChange(e.target.value)}
+                      placeholder="user@company.com"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-mono"
+                    />
                   </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">
+                      {provisionIsExistingAccount ? 'كلمة المرور (غير مطلوبة)' : 'كلمة المرور *'}
+                    </label>
+                    <input
+                      type="text"
+                      required={!provisionIsExistingAccount}
+                      disabled={provisionIsExistingAccount}
+                      value={provisionIsExistingAccount ? '' : memberPassword}
+                      onChange={(e) => setMemberPassword(e.target.value)}
+                      placeholder={provisionIsExistingAccount ? 'حسابه الحالي' : '123456'}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-mono disabled:opacity-60"
+                    />
+                  </div>
+                </div>
+
+                {provisionIsExistingAccount && (
+                  <div className="bg-sky-50 border border-sky-200 text-sky-900 p-2.5 rounded-xl text-[11px] leading-relaxed">
+                    هذا البريد مسجل بالفعل في:{' '}
+                    <strong>{Array.from(new Set(existingMembershipsForEmail.map(m => orgNameOf(m.orgId)))).join('، ')}</strong>.
+                    {' '}سيُضاف بنفس حسابه الحالي إلى الشركات المختارة الأخرى (لا حاجة لكلمة مرور جديدة)، والشركات المسجل بها تظهر غير متاحة.
+                  </div>
+                )}
+                {provisionHasPendingOnly && (
+                  <div className="bg-sky-50 border border-sky-200 text-sky-900 p-2.5 rounded-xl text-[11px] leading-relaxed">
+                    هذا البريد مضاف بالفعل (بدعوة بالبريد، بدون حساب دخول معروف) في:{' '}
+                    <strong>{Array.from(new Set(existingMembershipsForEmail.map(m => orgNameOf(m.orgId)))).join('، ')}</strong>.
+                    {' '}سيُنشأ له حساب دخول بكلمة المرور ويُضاف للشركات المختارة الأخرى؛ وإن كان له حساب دخول بالفعل (مثل Google) سيُضاف بنفس حسابه. والشركات المسجل بها تظهر غير متاحة.
+                  </div>
+                )}
+
+                {(canManageOrgs || creatableOrgs.length > 1) && (
+                  <OrgMultiSelect
+                    orgs={creatableOrgs}
+                    selected={selectedOrgsForMember}
+                    onChange={setSelectedOrgsForMember}
+                    label="الشركات أو المؤسسات التابع لها (تحديد متعدد) *"
+                    unavailable={memberUnavailableOrgs}
+                    emptyHint="* يرجى تحديد شركة واحدة على الأقل لإضافة الموظف إليها."
+                    disabled={provisionLoading}
+                  />
+                )}
+                {selectedOrgsForMember.length > 0 && provisionTargetOrgIds.length === 0 && (
+                  <p className="text-[11px] text-rose-600 font-bold">
+                    * البريد مسجل بالفعل في كل الشركات المختارة. اختر شركة أخرى لم يُسجل بها بعد.
+                  </p>
                 )}
 
                 <div>
@@ -3098,31 +3273,6 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block font-bold text-slate-700 mb-1">البريد الإلكتروني *</label>
-                    <input
-                      type="email"
-                      required
-                      value={memberEmail}
-                      onChange={(e) => setMemberEmail(e.target.value)}
-                      placeholder="user@company.com"
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-mono"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">كلمة المرور *</label>
-                    <input
-                      type="text"
-                      required
-                      value={memberPassword}
-                      onChange={(e) => setMemberPassword(e.target.value)}
-                      placeholder="123456"
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-mono"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
                     <label className="block font-bold text-slate-700 mb-1">رقم الهاتف</label>
                     <input
                       type="tel"
@@ -3134,14 +3284,12 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   </div>
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">الدور الوظيفي *</label>
+                    {/* No super admin option: only the platform owner is super admin. */}
                     <select
                       value={memberRole}
                       onChange={(e) => setMemberRole(e.target.value as Role)}
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
                     >
-                      {isSuperAdmin && (
-                        <option value="super_admin">👑 مشرف عام على المنصة (Super Admin)</option>
-                      )}
                       <option value="employee">موظف (Employee)</option>
                       <option value="finance">مسؤول الصرف والخزينة (Finance / Disburser)</option>
                       <option value="org_admin">مدير مؤسسة (Admin)</option>
@@ -3183,10 +3331,16 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   </button>
                   <button
                     type="submit"
-                    disabled={provisionLoading}
-                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                    disabled={provisionLoading || provisionTargetOrgIds.length === 0}
+                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs disabled:opacity-50"
                   >
-                    {provisionLoading ? 'جاري الإنشاء...' : 'حفظ وإنشاء الحساب'}
+                    {provisionLoading
+                      ? 'جاري الحفظ...'
+                      : provisionIsExistingAccount
+                      ? `إضافة للشركات المختارة (${provisionTargetOrgIds.length})`
+                      : provisionTargetOrgIds.length > 1
+                      ? `حفظ وإنشاء الحساب (${provisionTargetOrgIds.length} شركات)`
+                      : 'حفظ وإنشاء الحساب'}
                   </button>
                 </div>
               </form>
@@ -3210,6 +3364,17 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </div>
 
             <form onSubmit={handleSaveEditMember} className="mt-4 space-y-3 text-xs">
+              {superAdminEmails.some(e => normalizeEmail(e) === normalizeEmail(editingMember.userEmail)) && (
+                <div className="bg-amber-50 border border-amber-200 text-amber-900 p-2.5 rounded-xl text-[11px] flex items-start gap-2">
+                  <Crown className="h-4 w-4 shrink-0 text-amber-600" />
+                  <span>
+                    {isPlatformOwner(editingMember.userEmail)
+                      ? 'هذا الحساب هو مالك المنصة (المشرف العام الوحيد). الدور أدناه يخص هذه الشركة فقط ولا يغيّر صلاحيته كمشرف عام.'
+                      : 'هذا الحساب لديه صلاحية مشرف عام قديمة. تعديل الدور هنا لا يغيّرها؛ يمكن سحبها من قسم "المشرفين والصلاحيات".'}
+                  </span>
+                </div>
+              )}
+
               <div>
                 <label className="block font-bold text-slate-700 mb-1">اسم الموظف *</label>
                 <input
@@ -3233,12 +3398,12 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">الدور الوظيفي</label>
+                  {/* No super admin option: only the platform owner is super admin. */}
                   <select
                     value={editMemberRole}
                     onChange={(e) => setEditMemberRole(e.target.value as Role)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
                   >
-                    <option value="super_admin">👑 مشرف عام على المنصة (Super Admin)</option>
                     <option value="org_admin">مدير مؤسسة (Admin)</option>
                     <option value="finance">مسؤول الصرف والخزينة (Finance / Disburser)</option>
                     <option value="employee">موظف (Employee)</option>
@@ -3688,7 +3853,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {/* 9. Vendor Modal (Add / Edit) */}
       {isVendorModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
                 <Truck className="h-4 w-4 text-sky-600" />
@@ -3701,27 +3866,6 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
             <form onSubmit={handleSaveVendor} className="mt-4 space-y-3 text-xs">
               <div>
-                <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5">
-                  <Building2 className="h-3.5 w-3.5 text-sky-600" />
-                  <span>الشركة / المؤسسة التابع لها المورد *</span>
-                </label>
-                <select
-                  required
-                  value={vendorOrgId}
-                  onChange={(e) => {
-                    setVendorOrgId(e.target.value);
-                    setVendorServiceIds([]);
-                  }}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 font-semibold outline-hidden focus:border-sky-500 focus:bg-white"
-                >
-                  <option value="" disabled>-- اختر الشركة التابع لها المورد --</option>
-                  {displayOrgs.map(o => (
-                    <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
                 <label className="block font-bold text-slate-700 mb-1">اسم المورد / الشركة *</label>
                 <input
                   type="text"
@@ -3733,45 +3877,83 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 />
               </div>
 
+              {editingVendor ? (
+                // Edit: stays single-company and the company is read-only (a vendor is never moved).
+                <p className="text-[11px] text-slate-500 flex items-center gap-1.5">
+                  <Building2 className="h-3.5 w-3.5 text-sky-600" />
+                  <span>
+                    الشركة التابع لها المورد: <strong className="text-slate-700">{orgNameOf(editingVendor.orgId)}</strong>
+                    {' '}(لا يمكن نقله لشركة أخرى — لإضافته لشركة أخرى استخدم "تسجيل مورد جديد")
+                  </span>
+                </p>
+              ) : (
+                <>
+                  <OrgMultiSelect
+                    orgs={creatableOrgs}
+                    selected={vendorOrgIds}
+                    onChange={handleVendorOrgIdsChange}
+                    label="الشركات أو المؤسسات التابع لها المورد (تحديد متعدد) *"
+                    unavailable={vendorUnavailableOrgs}
+                    emptyHint="* يرجى تحديد شركة واحدة على الأقل لتسجيل المورد بها."
+                    disabled={isSavingVendor}
+                  />
+                  {vendorOrgIds.length > 0 && vendorTargetOrgIds.length === 0 && (
+                    <p className="text-[11px] text-rose-600 font-bold">
+                      * يوجد مورد بنفس الاسم في كل الشركات المختارة. اختر شركة أخرى أو غيّر اسم المورد.
+                    </p>
+                  )}
+                  {vendorTargetOrgIds.length > 1 && (
+                    <p className="text-[11px] text-slate-500">
+                      سيتم تسجيل المورد كسجل مستقل في كل شركة مختارة (بمدفوعاته وأرصدته الخاصة بها).
+                    </p>
+                  )}
+                </>
+              )}
+
               <div>
                 <label className="block font-bold text-slate-700 mb-1">
-                  بنود ومراكز الصرف المرتبطة بهذا المورد في الشركة (اختياري)
+                  {editingVendor
+                    ? 'بنود ومراكز الصرف المرتبطة بهذا المورد في الشركة (اختياري)'
+                    : 'بنود ومراكز الصرف المرتبطة بهذا المورد في الشركات المختارة (اختياري)'}
                 </label>
-                {(() => {
-                  const companyServices = targetServices.filter(s => isServiceMatchingOrg(s, vendorOrgId));
-                  if (companyServices.length === 0) {
-                    return (
-                      <p className="text-[11px] text-slate-400 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        لا توجد بنود صرف مسجلة لهذه الشركة بعد. يمكنك تسجيل المورد الآن وربطه بالبنود لاحقاً.
-                      </p>
-                    );
-                  }
-                  return (
-                    <div className="max-h-32 overflow-y-auto space-y-1.5 p-2 bg-slate-50 border border-slate-200 rounded-xl">
-                      {companyServices.map(srv => {
-                        const isChecked = vendorServiceIds.includes(srv.id);
-                        return (
-                          <label key={srv.id} className="flex items-center gap-2 p-1.5 hover:bg-white rounded-lg cursor-pointer transition">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() => {
-                                if (isChecked) {
-                                  setVendorServiceIds(vendorServiceIds.filter(id => id !== srv.id));
-                                } else {
-                                  setVendorServiceIds([...vendorServiceIds, srv.id]);
-                                }
-                              }}
-                              className="rounded text-sky-600 focus:ring-sky-500"
-                            />
-                            <span className="text-xs font-semibold text-slate-700">{srv.name}</span>
-                            <span className="text-[10px] text-slate-400 font-mono">({srv.code})</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  );
-                })()}
+                {vendorFormServices.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                    {editingVendor || vendorFormOrgIds.length <= 1
+                      ? 'لا توجد بنود صرف مسجلة لهذه الشركة بعد. يمكنك تسجيل المورد الآن وربطه بالبنود لاحقاً.'
+                      : 'لا توجد بنود صرف مسجلة للشركات المختارة بعد. يمكنك تسجيل المورد الآن وربطه بالبنود لاحقاً.'}
+                  </p>
+                ) : (
+                  <div className="max-h-32 overflow-y-auto space-y-1.5 p-2 bg-slate-50 border border-slate-200 rounded-xl">
+                    {vendorFormServices.map(srv => {
+                      const isChecked = vendorServiceIds.includes(srv.id);
+                      // With several companies selected, show which of them each service belongs to.
+                      const srvOrgNames = !editingVendor && vendorFormOrgIds.length > 1
+                        ? vendorFormOrgIds.filter(orgId => isServiceMatchingOrg(srv, orgId)).map(orgNameOf)
+                        : [];
+                      return (
+                        <label key={srv.id} className="flex items-center gap-2 p-1.5 hover:bg-white rounded-lg cursor-pointer transition">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {
+                              if (isChecked) {
+                                setVendorServiceIds(vendorServiceIds.filter(id => id !== srv.id));
+                              } else {
+                                setVendorServiceIds([...vendorServiceIds, srv.id]);
+                              }
+                            }}
+                            className="rounded text-sky-600 focus:ring-sky-500"
+                          />
+                          <span className="text-xs font-semibold text-slate-700">{srv.name}</span>
+                          <span className="text-[10px] text-slate-400 font-mono">({srv.code})</span>
+                          {srvOrgNames.length > 0 && (
+                            <span className="text-[10px] text-sky-700 truncate">— {srvOrgNames.join('، ')}</span>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -3853,10 +4035,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </button>
                 <button
                   type="submit"
-                  disabled={isSavingVendor}
-                  className="px-5 py-2 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                  disabled={isSavingVendor || (!editingVendor && vendorTargetOrgIds.length === 0)}
+                  className="px-5 py-2 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs disabled:opacity-50"
                 >
-                  حفظ المورد
+                  {!editingVendor && vendorTargetOrgIds.length > 1 ? `حفظ المورد في ${vendorTargetOrgIds.length} شركات` : 'حفظ المورد'}
                 </button>
               </div>
             </form>
@@ -4030,7 +4212,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {/* 13. Department Modal (Add / Edit) */}
       {isDeptModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
                 <FolderTree className="h-4 w-4 text-purple-600" />
@@ -4053,6 +4235,33 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden"
                 />
               </div>
+
+              {editingDept ? (
+                // Edit: stays single-company.
+                <p className="text-[11px] text-slate-500 flex items-center gap-1.5">
+                  <Building2 className="h-3.5 w-3.5 text-purple-600" />
+                  <span>الشركة التابع لها القسم: <strong className="text-slate-700">{orgNameOf(editingDept.orgId)}</strong></span>
+                </p>
+              ) : (
+                <>
+                  {(canManageOrgs || creatableOrgs.length > 1) && (
+                    <OrgMultiSelect
+                      orgs={creatableOrgs}
+                      selected={deptOrgIds}
+                      onChange={setDeptOrgIds}
+                      label="الشركات أو المؤسسات التابع لها القسم (تحديد متعدد) *"
+                      unavailable={deptUnavailableOrgs}
+                      emptyHint="* يرجى تحديد شركة واحدة على الأقل لإضافة القسم إليها."
+                      disabled={isSavingDept}
+                    />
+                  )}
+                  {deptOrgIds.length > 0 && deptTargetOrgIds.length === 0 && (
+                    <p className="text-[11px] text-rose-600 font-bold">
+                      * يوجد قسم بنفس الاسم {deptOrgIds.length > 1 ? 'في كل الشركات المختارة' : 'في هذه الشركة'}. غيّر اسم القسم{deptOrgIds.length > 1 ? ' أو اختر شركة أخرى' : ''}.
+                    </p>
+                  )}
+                </>
+              )}
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
@@ -4098,10 +4307,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </button>
                 <button
                   type="submit"
-                  disabled={isSavingDept}
-                  className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                  disabled={isSavingDept || (!editingDept && deptTargetOrgIds.length === 0)}
+                  className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs disabled:opacity-50"
                 >
-                  حفظ القسم
+                  {!editingDept && deptTargetOrgIds.length > 1 ? `حفظ القسم في ${deptTargetOrgIds.length} شركات` : 'حفظ القسم'}
                 </button>
               </div>
             </form>
@@ -4159,88 +4368,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </div>
 
             <div className="mt-4 space-y-4">
-              {/* Option 1: Select registered member */}
-              <div className="p-3.5 bg-gradient-to-br from-amber-50/70 to-amber-100/40 rounded-2xl border border-amber-200/80 space-y-2.5">
-                <label className="block font-bold text-slate-800 text-xs flex items-center gap-1.5">
-                  <Crown className="h-4 w-4 text-amber-600 shrink-0" />
-                  <span>اختيار موظف من المسجلين بالمنصة لترقيته لسوبر أدمن:</span>
-                </label>
-
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={superAdminMemberSearch}
-                    onChange={(e) => setSuperAdminMemberSearch(e.target.value)}
-                    placeholder="بحث سريع بالاسم، الشركة، أو البريد لتصفية القائمة..."
-                    className="w-full pl-8 pr-3 py-1.5 bg-white border border-amber-200/80 rounded-xl text-xs text-slate-700 outline-hidden focus:border-amber-500 placeholder:text-slate-400"
-                  />
-                  <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2" />
-                </div>
-
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <select
-                    value={selectedMemberEmailForSuperAdmin}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setSelectedMemberEmailForSuperAdmin(val);
-                      if (val) {
-                        setNewAdminEmail(val);
-                      }
-                    }}
-                    className="flex-1 p-2.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 outline-hidden focus:border-amber-500 font-semibold"
-                  >
-                    <option value="">-- اختر موظفاً للترقية من المسجلين بالمنصة --</option>
-                    {filteredCandidateMembers.map((m) => {
-                      const org = (allOrganizations && allOrganizations.length > 0 ? allOrganizations : organizations).find(o => o.id === m.orgId);
-                      const orgName = org?.name || 'بدون شركة';
-                      const isAlreadySuper = superAdminEmails.some(sa => sa.toLowerCase().trim() === m.userEmail?.toLowerCase().trim());
-                      return (
-                        <option 
-                          key={`${m.id}-${m.userEmail}`} 
-                          value={m.userEmail}
-                          disabled={isAlreadySuper}
-                        >
-                          {m.userName} - {orgName} ({m.userEmail}) {isAlreadySuper ? '👑 (سوبر أدمن حالياً)' : ''}
-                        </option>
-                      );
-                    })}
-                  </select>
-
-                  <button
-                    type="button"
-                    disabled={!selectedMemberEmailForSuperAdmin || superAdminEmails.some(sa => sa.toLowerCase().trim() === selectedMemberEmailForSuperAdmin.toLowerCase().trim())}
-                    onClick={handlePromoteSelectedMember}
-                    className="px-4 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-bold rounded-xl shadow-xs transition cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 shrink-0"
-                  >
-                    <Crown className="h-4 w-4" />
-                    <span>ترقية إلى سوبر أدمن 👑</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Option 2: Add manually by typing email */}
-              <form onSubmit={handleAddAdmin} className="space-y-2">
-                <label className="block font-bold text-slate-700">أو إدخال بريد سوبر أدمن يدوياً:</label>
-                <div className="flex gap-2">
-                  <input
-                    type="email"
-                    required
-                    value={newAdminEmail}
-                    onChange={(e) => setNewAdminEmail(e.target.value)}
-                    placeholder="admin@domain.com"
-                    className="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-xs text-slate-800 outline-hidden focus:border-amber-500"
-                  />
-                  <button
-                    type="submit"
-                    className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1 shrink-0"
-                  >
-                    <Plus className="h-4 w-4" />
-                    <span>إضافة</span>
-                  </button>
-                </div>
-                {adminSuccessMsg && <p className="text-xs text-emerald-700 font-bold mt-1">{adminSuccessMsg}</p>}
-                {adminErrorMsg && <p className="text-xs text-rose-700 font-bold mt-1">{adminErrorMsg}</p>}
-              </form>
+              {/* Owner-only super admin: no promote / add-by-email here any more. */}
+              {ownerOnlySuperAdminNote}
 
               {superAdminActionFeedback && (
                 <div className={`p-3 rounded-xl text-xs font-bold ${
@@ -4254,45 +4383,47 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <h4 className="font-bold text-slate-700 mb-2">قائمة السوبر أدمن المعتمدين حالياً:</h4>
                 <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
                   {superAdminEmails.map((email) => {
-                    const isRootAdmin = email === 'mahmoud@tieapps.com';
+                    const isRootAdmin = isPlatformOwner(email);
                     return (
-                      <div 
-                        key={email} 
+                      <div
+                        key={email}
                         className="flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-amber-50/50 rounded-xl border border-amber-200/60 text-xs gap-2"
                       >
                         <div className="flex items-center gap-2.5">
                           <Crown className="h-4 w-4 text-amber-600 shrink-0" />
                           <span className="font-mono font-bold text-slate-900 truncate max-w-[200px]">{email}</span>
-                          <span className="bg-amber-100 text-amber-900 font-bold text-[10px] px-2 py-0.5 rounded-full shrink-0">
-                            نشط
+                          <span className={`font-bold text-[10px] px-2 py-0.5 rounded-full shrink-0 ${isRootAdmin ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'}`}>
+                            {isRootAdmin ? 'مالك المنصة' : 'صلاحية قديمة'}
                           </span>
                         </div>
 
                         <div className="flex items-center gap-1.5 shrink-0 justify-end">
-                          <button
-                            type="button"
-                            onClick={() => handleOpenEditSuperAdminRole(email)}
-                            className="flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg font-bold text-[11px] transition cursor-pointer"
-                            title="تعديل الصلاحية والدور"
-                          >
-                            <Edit className="h-3 w-3" />
-                            <span>تعديل الدور</span>
-                          </button>
-
                           {!isRootAdmin ? (
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveSuperAdmin(email)}
-                              disabled={superAdminActionLoading}
-                              className="flex items-center gap-1 px-2 py-1.5 bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 rounded-lg font-bold text-[11px] transition cursor-pointer disabled:opacity-50"
-                              title="إزالة من السوبر أدمن"
-                            >
-                              <Trash2 className="h-3 w-3" />
-                              <span>إزالة</span>
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEditSuperAdminRole(email)}
+                                disabled={superAdminActionLoading}
+                                className="flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg font-bold text-[11px] transition cursor-pointer disabled:opacity-50"
+                                title="سحب صلاحية المشرف العام وتعيينه بدور داخل شركة"
+                              >
+                                <Edit className="h-3 w-3" />
+                                <span>تحويل لدور شركة</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveSuperAdmin(email)}
+                                disabled={superAdminActionLoading}
+                                className="flex items-center gap-1 px-2 py-1.5 bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 rounded-lg font-bold text-[11px] transition cursor-pointer disabled:opacity-50"
+                                title="سحب صلاحية المشرف العام"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                <span>سحب</span>
+                              </button>
+                            </>
                           ) : (
                             <span className="text-[10px] text-slate-400 font-semibold px-2 py-1 bg-slate-100/70 rounded-lg">
-                              أساسي
+                              محمي
                             </span>
                           )}
                         </div>
@@ -4313,7 +4444,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
                 <ShieldCheck className="h-4 w-4 text-indigo-600" />
-                <span>تعديل رتبة وصلاحيات المشرف</span>
+                <span>سحب صلاحية المشرف العام وتعيينه بدور شركة</span>
               </h3>
               <button 
                 onClick={() => setEditingSuperAdminEmail(null)} 
@@ -4331,14 +4462,18 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </div>
               </div>
 
+              <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 p-2.5 rounded-xl leading-relaxed">
+                سيتم سحب صلاحية المشرف العام عن هذا الحساب (المالك هو المشرف العام الوحيد) وتعيينه بالدور المحدد داخل الشركة المختارة.
+              </p>
+
               <div>
-                <label className="block font-bold text-slate-700 mb-1">الدور والصلاحية الجديدة:</label>
+                <label className="block font-bold text-slate-700 mb-1">الدور داخل الشركة:</label>
+                {/* No super admin option: this form only demotes. */}
                 <select
                   value={targetSuperAdminRole}
                   onChange={(e) => setTargetSuperAdminRole(e.target.value as Role)}
                   className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs"
                 >
-                  <option value="super_admin">🛡️ سوبر أدمن المنصة (Super Admin)</option>
                   <option value="org_admin">🏢 مدير شركة (Company Admin)</option>
                   <option value="finance">💸 مسؤول الصرف والخزينة (Finance)</option>
                   <option value="data_entry">✍️ مدخل بيانات (Data Entry)</option>
@@ -4346,20 +4481,18 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </select>
               </div>
 
-              {targetSuperAdminRole !== 'super_admin' && (
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">تعيين في شركة:</label>
-                  <select
-                    value={targetSuperAdminOrgId}
-                    onChange={(e) => setTargetSuperAdminOrgId(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs"
-                  >
-                    {displayOrgs.map(o => (
-                      <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
-                    ))}
-                  </select>
-                </div>
-              )}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">تعيين في شركة:</label>
+                <select
+                  value={targetSuperAdminOrgId}
+                  onChange={(e) => setTargetSuperAdminOrgId(e.target.value)}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs"
+                >
+                  {displayOrgs.map(o => (
+                    <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
+                  ))}
+                </select>
+              </div>
 
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
@@ -4375,7 +4508,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
                 >
                   {superAdminActionLoading && <Loader2 className="h-4 w-4 animate-spin" />}
-                  <span>حفظ وتطبيق الدور</span>
+                  <span>سحب الصلاحية وتطبيق الدور</span>
                 </button>
               </div>
             </form>

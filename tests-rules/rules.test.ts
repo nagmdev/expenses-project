@@ -17,6 +17,8 @@ import { createFirestoreStore } from '../src/domain/firestoreStore';
 import { createExpenseRequest, transitionExpenseRequest } from '../src/domain/requests';
 import { createPaymentAccount, detachLegacyWallet, returnCustodyRemainders, settleCustodyItem, transferBetweenAccounts } from '../src/domain/treasury';
 import { restoreRecord, readLegacySnapshot } from '../src/domain/legacyRecovery';
+import { createEntityInOrgs, createMemberInOrgs, pendingUserIdForEmail } from '../src/domain/directory';
+import type { ServiceProvider } from '../src/types';
 import { DEFAULT_EMAIL_SETTINGS } from '../src/services/emailTemplates';
 import type { Actor } from '../src/domain/common';
 
@@ -216,6 +218,75 @@ describe('real domain operations pass the rules', () => {
     await assertFails(setDoc(doc(db(EMP), 'accountTransactions', 'tx-forged'), { orgId: ORG, accountId: 'acc-cash', type: 'in', amount: 1 }));
     expect((await read('paymentAccounts', 'acc-cash')).currentBalance).toBe(1000);
     expect((await read('custodies', 'cus-1')).remainingAmount).toBe(1000);
+  });
+
+  // Company multi-select: one operation, one document per company, ONE transaction.
+  const newPerson = (email: string, role: Actor['role'] = 'org_admin') => ({
+    userId: '', userName: email.split('@')[0], userEmail: email, role, department: 'الإدارة العامة', jobTitle: 'مدير', active: true,
+  });
+  const vendor = (name: string) => (id: string, orgId: string): ServiceProvider => ({
+    id, orgId, name, serviceCategoryIds: [], serviceCategoryNames: [], contactPerson: '', phone: '010', email: '', taxNumber: '', crNumber: '',
+    bankName: '', iban: '', address: '', rating: 5, totalPaid: 0, active: true,
+  });
+  const describeVendor = (p: ServiceProvider) => `تم إضافة مورد جديد: "${p.name}"`;
+
+  it('the owner adds one person and one provider to two companies in one operation each (and a retry is a no-op)', async () => {
+    const store = createFirestoreStore(db(OWNER));
+    const owner = actor(OWNER, 'super_admin');
+    const email = 'multi@tie.test';
+    const pending = pendingUserIdForEmail(email);
+
+    const res = await createMemberInOrgs(store, owner, newPerson(email), [ORG, OTHER_ORG], 'key-00000030');
+    expect(res.changed).toBe(true);
+    expect(res.value.created.map(m => m.orgId)).toEqual([ORG, OTHER_ORG]);
+    for (const orgId of [ORG, OTHER_ORG]) {
+      expect(await read('members', `${pending}_${orgId}`)).toMatchObject({ orgId, userEmail: email, role: 'org_admin' });
+      expect(await read('auditLogs', `audit-key-00000030-${orgId}`)).toMatchObject({ orgId, entityType: 'member', actorId: OWNER.uid });
+      expect((await read('organizations', orgId)).notificationRecipients).toEqual([email]);
+    }
+    const again = await createMemberInOrgs(store, owner, newPerson(email), [ORG, OTHER_ORG], 'key-00000030');
+    expect(again).toMatchObject({ changed: false, reason: 'duplicate_operation' });
+
+    // already a member of ORG (the admin): only OTHER_ORG gets a new membership
+    const admin = await createMemberInOrgs(store, owner, { ...newPerson(ADMIN.email), userId: ADMIN.uid }, [ORG, OTHER_ORG], 'key-00000031');
+    expect(admin.value.created.map(m => m.orgId)).toEqual([OTHER_ORG]);
+    expect(admin.value.skipped).toEqual([{ orgId: ORG, reason: 'already_member', existingName: undefined }]);
+
+    const prov = await createEntityInOrgs(store, owner, 'provider', [ORG, OTHER_ORG], vendor('Vodafone'), describeVendor, 'key-00000032');
+    expect(prov.value.created.map(p => [p.id, p.orgId])).toEqual([[`prov-key-00000032-${ORG}`, ORG], [`prov-key-00000032-${OTHER_ORG}`, OTHER_ORG]]);
+    expect(await read('providers', `prov-key-00000032-${OTHER_ORG}`)).toMatchObject({ orgId: OTHER_ORG, name: 'Vodafone', totalPaid: 0 });
+    expect((await createEntityInOrgs(store, owner, 'provider', [ORG, OTHER_ORG], vendor('Vodafone'), describeVendor, 'key-00000032')).changed).toBe(false);
+  });
+
+  it('an org admin adds to their own company; an operation that also targets another company is refused by the rules and writes NOTHING', async () => {
+    const store = createFirestoreStore(db(ADMIN));
+    const orgAdmin = actor(ADMIN, 'org_admin');
+
+    const own = await createMemberInOrgs(store, orgAdmin, newPerson('own@acme.test'), [ORG], 'key-00000040');
+    expect(own.value.created.map(m => m.orgId)).toEqual([ORG]);
+    expect((await read('organizations', ORG)).notificationRecipients).toEqual(['own@acme.test']);
+    const ownVendor = await createEntityInOrgs(store, orgAdmin, 'provider', [ORG], vendor('Orange'), describeVendor, 'key-00000041');
+    expect(ownVendor.changed).toBe(true);
+
+    await assertFails(createMemberInOrgs(store, orgAdmin, newPerson('both@acme.test'), [ORG, OTHER_ORG], 'key-00000042'));
+    await assertFails(createEntityInOrgs(store, orgAdmin, 'provider', [ORG, OTHER_ORG], vendor('Etisalat'), describeVendor, 'key-00000043'));
+
+    // atomic: not even the company the admin manages got anything
+    const pending = pendingUserIdForEmail('both@acme.test');
+    expect(await read('members', `${pending}_${ORG}`)).toBeUndefined();
+    expect(await read('members', `${pending}_${OTHER_ORG}`)).toBeUndefined();
+    expect(await read('auditLogs', `audit-key-00000042-${ORG}`)).toBeUndefined();
+    expect(await read('providers', `prov-key-00000043-${ORG}`)).toBeUndefined();
+    expect(await read('auditLogs', `audit-key-00000043-${ORG}`)).toBeUndefined();
+    expect((await read('organizations', ORG)).notificationRecipients).toEqual(['own@acme.test']);
+  });
+
+  it('org admin adds a department to their company through the multi-company operation', async () => {
+    const res = await createEntityInOrgs(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), 'department', [ORG],
+      (id, orgId, nowIso) => ({ id, orgId, name: 'المالية', createdAt: nowIso }), d => `قسم جديد: "${d.name}"`, 'key-00000050');
+    expect(res.changed).toBe(true);
+    expect(await read('departments', `dept-key-00000050-${ORG}`)).toMatchObject({ orgId: ORG, name: 'المالية' });
+    expect(await read('auditLogs', `audit-key-00000050-${ORG}`)).toMatchObject({ orgId: ORG, entityType: 'department', actorId: ADMIN.uid });
   });
 });
 

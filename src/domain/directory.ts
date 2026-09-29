@@ -184,6 +184,8 @@ interface EntitySpec<T> {
   label: string;
   auditType: 'service' | 'provider' | 'department';
   duplicateMessage: (value: string) => string;
+  /** The value is taken in EVERY company of a multi-company operation. */
+  duplicateInAllMessage: (value: string) => string;
 }
 
 const SPECS = {
@@ -195,6 +197,7 @@ const SPECS = {
     label: 'بند الصرف',
     auditType: 'service',
     duplicateMessage: (v: string) => `يوجد بند صرف بنفس الكود (${v}) في هذه الشركة.`,
+    duplicateInAllMessage: (v: string) => `يوجد بند صرف بنفس الكود (${v}) في كل الشركات المختارة.`,
   } as EntitySpec<ServiceCategory>,
   provider: {
     collection: COL.providers,
@@ -204,6 +207,7 @@ const SPECS = {
     label: 'المورد',
     auditType: 'provider',
     duplicateMessage: (v: string) => `يوجد مورد مسجل بنفس الاسم (${v}) في هذه الشركة.`,
+    duplicateInAllMessage: (v: string) => `يوجد مورد مسجل بنفس الاسم (${v}) في كل الشركات المختارة.`,
   } as EntitySpec<ServiceProvider>,
   department: {
     collection: COL.departments,
@@ -213,6 +217,7 @@ const SPECS = {
     label: 'القسم',
     auditType: 'department',
     duplicateMessage: (v: string) => `يوجد قسم بنفس الاسم (${v}) في هذه الشركة.`,
+    duplicateInAllMessage: (v: string) => `يوجد قسم بنفس الاسم (${v}) في كل الشركات المختارة.`,
   } as EntitySpec<Department>,
 };
 export type EntityKind = keyof typeof SPECS;
@@ -384,14 +389,20 @@ function editRecipients(edits: RecipientEdits, orgId: string, before: RecipientF
 async function readRecipientUpdates(tx: TxContext, edits: RecipientEdits) {
   const updates: Array<{ orgId: string; notificationRecipients: string[] }> = [];
   for (const [orgId, { remove, add }] of edits) {
-    const org = await tx.get<Organization>(COL.organizations, orgId);
-    if (!org || !Array.isArray(org.notificationRecipients)) continue; // not initialized: the backfill computes it
-    const next = new Set(org.notificationRecipients.filter(e => !remove.includes(e)));
-    add.forEach(e => next.add(e));
-    const list = Array.from(next).sort();
-    if (list.join('\n') !== [...org.notificationRecipients].sort().join('\n')) updates.push({ orgId, notificationRecipients: list });
+    const update = recipientUpdateFor(orgId, await tx.get<Organization>(COL.organizations, orgId), remove, add);
+    if (update) updates.push(update);
   }
   return updates;
+}
+
+/** The org's new recipient list, or null when unchanged or not initialized yet (the backfill computes it). */
+function recipientUpdateFor(orgId: string, org: Organization | null, remove: string[], add: string[]) {
+  if (!org || !Array.isArray(org.notificationRecipients)) return null;
+  const next = new Set(org.notificationRecipients.filter(e => !remove.includes(e)));
+  add.forEach(e => next.add(e));
+  const list = Array.from(next).sort();
+  if (list.join('\n') === [...org.notificationRecipients].sort().join('\n')) return null;
+  return { orgId, notificationRecipients: list };
 }
 
 function writeRecipientUpdates(tx: TxContext, updates: Array<{ orgId: string; notificationRecipients: string[] }>, nowIso: string) {
@@ -500,6 +511,29 @@ export async function createMember(
 
 /** A Firebase Auth UID (as opposed to a placeholder id for a member who never signed in). */
 export const isRealUid = (id?: string) => Boolean(id && /^[A-Za-z0-9]{20,40}$/.test(id));
+
+/**
+ * The login (real UID) a person's memberships already point to, or '' when there is none
+ * — e.g. only email-invited (pending) memberships: such a person has no known login yet.
+ */
+export const knownLoginUidOf = (memberships: Array<Pick<OrganizationMember, 'userId'>>): string =>
+  memberships.find(m => isRealUid(m.userId))?.userId || '';
+
+/**
+ * A login account created by an earlier, unfinished attempt of the same provisioning intent
+ * (same idempotency key) is re-used only for the SAME email. A changed email is a different
+ * person: re-using that login would attach it (and show its credentials) under another email.
+ */
+export function reusableProvisionedAccount<A extends { email: string }>(account: A | undefined, email: string): A | undefined {
+  if (!account) return undefined;
+  if (normalizeEmail(account.email) !== normalizeEmail(email)) {
+    throw new DomainError(
+      'identity_changed',
+      `تم إنشاء حساب دخول للبريد (${normalizeEmail(account.email)}) في محاولة سابقة لم تكتمل، ولا يمكن استخدامه لبريد آخر. أغلق النموذج وافتحه من جديد ثم أعد المحاولة.`,
+    );
+  }
+  return account;
+}
 
 const LINKABLE_ROLE_PRIORITY: Partial<Record<Role, number>> = { org_admin: 4, finance: 3, data_entry: 2, employee: 1 };
 
@@ -687,5 +721,233 @@ export async function removeMember(
       nowIso,
     );
     return { value: mem, changed: true };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// One operation, several companies (the company multi-select of the add forms)
+// ---------------------------------------------------------------------------
+// Memberships, providers and departments stay ONE document per company (own orgId,
+// own totals, own unique key), which is what firestore.rules check per document.
+// Selecting N companies creates up to N documents in ONE transaction: all or nothing,
+// and a retry with the same operation key never creates a second copy anywhere.
+// A company where the email / name is already taken is skipped (and reported), never
+// a failure for the other companies.
+
+export interface MultiOrgSkip {
+  orgId: string;
+  reason: 'already_member' | 'duplicate';
+  /** Name of the record that already holds the email / name in that company. */
+  existingName?: string;
+}
+
+export interface MultiOrgResult<T> {
+  /** This operation's documents: created now, or by an earlier attempt with the same key (in the order of orgIds). */
+  created: T[];
+  /** Companies left untouched because the email / name is already taken there. */
+  skipped: MultiOrgSkip[];
+}
+
+export const MAX_ORGS_PER_OPERATION = 50;
+
+/**
+ * The platform owner: the ONLY super admin. Identical to builtInSuperAdmins() in
+ * firestore.rules (and DEFAULT_SUPER_ADMINS in AppContext). Nobody else can be promoted.
+ */
+export const PLATFORM_OWNER_EMAILS: readonly string[] = ['mahmoud@tieapps.com'];
+export const isPlatformOwnerEmail = (email?: string | null) => PLATFORM_OWNER_EMAILS.includes(normalizeEmail(email));
+
+export const SUPER_ADMIN_OWNER_ONLY_MESSAGE = 'صلاحية المشرف العام (Super Admin) حصرية لمالك المنصة ولا يمكن منحها لأي مستخدم آخر.';
+
+/** Trimmed, de-duplicated company ids of one operation (1..MAX_ORGS_PER_OPERATION). */
+export function normalizeOrgIds(orgIds: readonly string[]): string[] {
+  const ids = Array.from(new Set((orgIds || []).map(id => String(id ?? '').trim()).filter(id => id && id !== 'all')));
+  if (ids.length === 0) throw new DomainError('missing_org', 'يرجى تحديد شركة واحدة على الأقل.');
+  if (ids.length > MAX_ORGS_PER_OPERATION) {
+    throw new DomainError('invalid_input', `لا يمكن الإضافة إلى أكثر من ${MAX_ORGS_PER_OPERATION} شركة في عملية واحدة.`);
+  }
+  if (ids.some(id => id.includes('/'))) throw new DomainError('invalid_input', 'معرّف الشركة غير صالح.');
+  return ids;
+}
+
+/** Deterministic id of the document an operation creates in one company (a retry addresses the same document). */
+export const entityIdInOrg = (kind: EntityKind, operationKey: string, orgId: string) =>
+  `${idFromKey(SPECS[kind].idPrefix, operationKey)}-${orgId}`;
+
+async function readTargetOrg(tx: TxContext, orgId: string): Promise<Organization> {
+  const org = await tx.get<Organization>(COL.organizations, orgId);
+  if (!org) throw new DomainError('not_found', `الشركة المحددة غير موجودة (${orgId}).`);
+  if (org.archived || org.status === 'archived') throw new DomainError('archived_org', `الشركة "${org.name}" مؤرشفة ولا يمكن الإضافة إليها.`);
+  return org;
+}
+
+const inOrderOf = <T extends { orgId: string }>(targets: string[], list: T[]) =>
+  [...list].sort((a, b) => targets.indexOf(a.orgId) - targets.indexOf(b.orgId));
+
+/**
+ * Adds one person to every selected company in ONE transaction (members/{userId}_{orgId}
+ * per company, like createMember). Companies where they already belong are skipped.
+ * Nobody but the platform owner is super admin: the role is always refused here.
+ */
+export async function createMemberInOrgs(
+  store: DataStore,
+  actor: Actor,
+  input: Omit<MemberInput, 'orgId'>,
+  orgIds: string[],
+  operationKey: string,
+  now: Date = new Date(),
+): Promise<MutationOutcome<MultiOrgResult<OrganizationMember>>> {
+  assertRole(actor, ['super_admin', 'org_admin'], 'إضافة الموظفين متاحة لمدير الشركة فقط.');
+  if (input.role === 'super_admin') throw new DomainError('forbidden', SUPER_ADMIN_OWNER_ONLY_MESSAGE);
+  const targets = normalizeOrgIds(orgIds);
+  const email = normalizeEmail(input.userEmail);
+  const userId = input.userId && !input.userId.startsWith('temp_') ? input.userId : email ? pendingUserIdForEmail(email) : idFromKey('usr', operationKey);
+  const who = email ? `البريد الإلكتروني (${email})` : `الموظف (${input.userName})`;
+  const nowIso = now.toISOString();
+  type Stored = OrganizationMember & { operationKey?: string };
+
+  return store.runTransaction(async tx => {
+    // Read phase for every company (a transaction allows no read after its first write).
+    const replayed: Stored[] = [];
+    const skipped: MultiOrgSkip[] = [];
+    const toCreate: Array<{ org: Organization; member: Stored & { operationKey: string }; key: UniqueKeyRead | null }> = [];
+    for (const orgId of targets) {
+      const org = await readTargetOrg(tx, orgId);
+      const id = `${userId}_${orgId}`;
+      const existing = await tx.get<Stored>(COL.members, id);
+      if (existing) {
+        if (existing.operationKey === operationKey) replayed.push(existing);
+        else skipped.push({ orgId, reason: 'already_member', existingName: existing.userName });
+        continue;
+      }
+      const key = email ? await readUniqueKey(tx, 'member_email', orgId, email) : null;
+      if (key?.owner && isKeyTakenByOther(key, id)) {
+        const holder = key.owner.collection === COL.members ? await tx.get<Stored>(COL.members, key.owner.id) : null;
+        // Created by this very operation under another id (the real UID became known between attempts).
+        if (holder && holder.operationKey === operationKey) replayed.push(holder);
+        else skipped.push({ orgId, reason: 'already_member', existingName: holder?.userName });
+        continue;
+      }
+      toCreate.push({
+        org,
+        key,
+        member: { ...input, id, orgId, userId, userEmail: email, joinedAt: nowIso.split('T')[0], active: input.active !== false, operationKey },
+      });
+    }
+
+    if (toCreate.length === 0) {
+      if (replayed.length > 0) return { value: { created: inOrderOf(targets, replayed), skipped }, changed: false, reason: 'duplicate_operation' };
+      const name = skipped[0]?.existingName;
+      throw new DomainError(
+        'duplicate',
+        targets.length === 1
+          ? `${who} مسجل بالفعل في هذه المؤسسة${name ? ` باسم "${name}"` : ''}.`
+          : `${who} مسجل بالفعل في كل الشركات المختارة.`,
+      );
+    }
+
+    const recipientUpdates = toCreate
+      .map(({ org, member }) => recipientUpdateFor(member.orgId, org, [], isNotificationRecipient(member) ? [member.userEmail] : []))
+      .filter((u): u is NonNullable<typeof u> => u !== null);
+
+    for (const { member, key } of toCreate) {
+      tx.set(COL.members, member.id, member);
+      if (key) claimUniqueKey(tx, key, { collection: COL.members, id: member.id }, nowIso);
+    }
+    writeRecipientUpdates(tx, recipientUpdates, nowIso);
+    for (const { org, member } of toCreate) {
+      writeAudit(
+        tx,
+        actor,
+        {
+          actionType: 'create',
+          entityType: 'member',
+          entityId: member.id,
+          entityName: member.userName,
+          orgId: member.orgId,
+          orgName: org.name,
+          details: `تم إضافة وتعيين موظف جديد: "${member.userName}" (${member.userEmail || '-'} | ${member.jobTitle} - ${member.department}) برتبة ${member.role}${targets.length > 1 ? ` في "${org.name}" (إضافة واحدة إلى ${targets.length} شركات)` : ''}`,
+        },
+        auditIdFor(operationKey, member.orgId),
+        nowIso,
+      );
+    }
+    return { value: { created: inOrderOf(targets, [...replayed, ...toCreate.map(c => c.member)]), skipped }, changed: true };
+  });
+}
+
+/**
+ * Creates one provider / department / service document per selected company in ONE
+ * transaction (id = entityIdInOrg(kind, operationKey, orgId)); each company keeps its own
+ * orgId, totals and unique name key. Companies where the name is taken are skipped.
+ */
+export async function createEntityInOrgs<T extends { id: string; orgId: string }>(
+  store: DataStore,
+  actor: Actor,
+  kind: EntityKind,
+  orgIds: string[],
+  build: (id: string, orgId: string, nowIso: string) => T,
+  audit: (entity: T) => string,
+  operationKey: string,
+  now: Date = new Date(),
+): Promise<MutationOutcome<MultiOrgResult<T>>> {
+  assertRole(actor, ['super_admin', 'org_admin', 'data_entry'], 'ليس لديك صلاحية الإضافة.');
+  const spec = SPECS[kind] as unknown as EntitySpec<T>;
+  const targets = normalizeOrgIds(orgIds);
+  const nowIso = now.toISOString();
+  const drafts = targets.map(orgId => {
+    const id = entityIdInOrg(kind, operationKey, orgId);
+    return { ...build(id, orgId, nowIso), id, orgId } as T;
+  });
+
+  return store.runTransaction(async tx => {
+    const replayed: T[] = [];
+    const skipped: MultiOrgSkip[] = [];
+    const toCreate: Array<{ org: Organization; entity: T; key: UniqueKeyRead | null }> = [];
+    for (const entity of drafts) {
+      const org = await readTargetOrg(tx, entity.orgId);
+      const existing = await tx.get<T>(spec.collection, entity.id);
+      if (existing) {
+        replayed.push(existing as T);
+        continue;
+      }
+      const value = spec.keyOf(entity);
+      const key = await readKeyIfAny(tx, spec.scope, entity.orgId, value);
+      if (key?.owner && isKeyTakenByOther(key, entity.id)) {
+        const holder = key.owner.collection === spec.collection ? await tx.get<Record<string, any>>(spec.collection, key.owner.id) : null;
+        skipped.push({ orgId: entity.orgId, reason: 'duplicate', existingName: String(holder?.name || value) });
+        continue;
+      }
+      toCreate.push({ org, entity, key });
+    }
+
+    if (toCreate.length === 0) {
+      if (replayed.length > 0) return { value: { created: inOrderOf(targets, replayed), skipped }, changed: false, reason: 'duplicate_operation' };
+      const value = spec.keyOf(drafts[0]);
+      throw new DomainError('duplicate', targets.length === 1 ? spec.duplicateMessage(value) : spec.duplicateInAllMessage(value));
+    }
+
+    for (const { entity, key } of toCreate) {
+      tx.set(spec.collection, entity.id, entity);
+      if (key) claimUniqueKey(tx, key, { collection: spec.collection, id: entity.id }, nowIso);
+    }
+    for (const { org, entity } of toCreate) {
+      writeAudit(
+        tx,
+        actor,
+        {
+          actionType: 'create',
+          entityType: spec.auditType,
+          entityId: entity.id,
+          entityName: (entity as any).name || entity.id,
+          orgId: entity.orgId,
+          orgName: org.name,
+          details: audit(entity),
+        },
+        auditIdFor(operationKey, entity.orgId),
+        nowIso,
+      );
+    }
+    return { value: { created: inOrderOf(targets, [...replayed, ...toCreate.map(c => c.entity)]), skipped }, changed: true };
   });
 }

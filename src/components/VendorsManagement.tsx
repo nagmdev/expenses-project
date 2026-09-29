@@ -1,21 +1,20 @@
-import React, { useState } from 'react';
-import { useApp } from '../context/AppContext';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useApp, type MultiOrgSkip } from '../context/AppContext';
 import { ServiceProvider, isServiceMatchingOrg } from '../types';
+import { normalizeKeyValue } from '../domain/common';
+import { OrgMultiSelect } from './OrgMultiSelect';
 import { 
   Building, 
   Building2,
   Plus, 
   Phone, 
-  Mail, 
-  MapPin, 
-  CreditCard, 
-  Star, 
+  Mail,
+  Star,
   Edit3, 
   Trash2, 
   X, 
-  FileText,
   Search,
-  CheckCircle
+  AlertCircle,
 } from 'lucide-react';
 
 import { 
@@ -37,15 +36,23 @@ export const VendorsManagement: React.FC = () => {
     organizations, 
     allOrganizations,
     currentRole,
-    addProvider, 
-    updateProvider, 
-    deleteProvider 
+    addProviderToOrgs,
+    updateProvider,
+    deleteProvider
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
+  // The current firestore.rules reject provider creation by data entry: the add button is
+  // disabled for that role instead of ending in a guaranteed permission error.
+  const canCreateProviders = currentRole !== 'data_entry';
   const orgList = isSuperAdmin ? allOrganizations : organizations;
   const targetProviders = isSuperAdmin ? allProviders : providers;
   const targetServices = isSuperAdmin ? allServices : services;
+  // A new provider can only be attached to companies that are still active.
+  const creatableOrgs = useMemo(
+    () => orgList.filter(o => !o.archived && o.status !== 'archived'),
+    [orgList]
+  );
 
   const [selectedOrgFilter, setSelectedOrgFilter] = useState<string>(
     activeOrgId && activeOrgId !== 'all' ? activeOrgId : 'all'
@@ -56,9 +63,18 @@ export const VendorsManagement: React.FC = () => {
   const saveGuard = useSubmitGuard();
   const providerActions = useKeyedSubmitGuard();
   const [search, setSearch] = useState('');
+  const [formError, setFormError] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<{ message: string; tone: 'success' | 'warning' } | null>(null);
+
+  useEffect(() => {
+    if (!feedback) return;
+    const timer = setTimeout(() => setFeedback(null), 9000);
+    return () => clearTimeout(timer);
+  }, [feedback]);
 
   // Form states
-  const [selectedOrgId, setSelectedOrgId] = useState<string>('');
+  // Create mode: every company the new provider is added to (one provider record per company).
+  const [selectedOrgIds, setSelectedOrgIds] = useState<string[]>([]);
   const [name, setName] = useState('');
   const [contactPerson, setContactPerson] = useState('');
   const [phone, setPhone] = useState('');
@@ -80,7 +96,46 @@ export const VendorsManagement: React.FC = () => {
     (p.phone && p.phone.includes(search))
   );
 
+  const orgLabel = (orgId: string) => {
+    const org = orgList.find(o => o.id === orgId);
+    return org ? `${org.name} (${org.code})` : orgId;
+  };
+
+  // Companies that already have a provider with the typed name (same normalization as the
+  // domain's unique name key) cannot be picked: the save would skip them anyway.
+  const typedNameKey = normalizeKeyValue(name);
+  const unavailableOrgs = useMemo(() => {
+    const result: Record<string, string> = {};
+    if (!typedNameKey) return result;
+    for (const org of creatableOrgs) {
+      if (targetProviders.some(p => p.orgId === org.id && normalizeKeyValue(p.name) === typedNameKey)) {
+        result[org.id] = 'يوجد مورد بنفس الاسم';
+      }
+    }
+    return result;
+  }, [creatableOrgs, targetProviders, typedNameKey]);
+
+  // Create mode: the companies that will actually receive the provider.
+  const effectiveOrgIds = selectedOrgIds.filter(id => !unavailableOrgs[id] && creatableOrgs.some(o => o.id === id));
+  const effectiveOrgs = creatableOrgs.filter(o => effectiveOrgIds.includes(o.id));
+  const blockedByNameOnly = selectedOrgIds.length > 0 && effectiveOrgIds.length === 0 && selectedOrgIds.some(id => unavailableOrgs[id]);
+
+  // Services offered in the checklist: those of the provider's company (edit) or of ANY selected company (create).
+  const serviceOrgIds = editingProvider ? [editingProvider.orgId] : effectiveOrgIds;
+  const availableServices = targetServices.filter(s => serviceOrgIds.some(orgId => isServiceMatchingOrg(s, orgId)));
+
+  const handleOrgSelectionChange = (orgIds: string[]) => {
+    setSelectedOrgIds(orgIds);
+    setFormError(null);
+    // Drop service links that no longer belong to any of the selected companies.
+    setSelectedServices(prev => prev.filter(serviceId => {
+      const srv = targetServices.find(s => s.id === serviceId);
+      return srv ? orgIds.some(orgId => isServiceMatchingOrg(srv, orgId)) : false;
+    }));
+  };
+
   const handleOpenAdd = () => {
+    if (!canCreateProviders) return;
     setEditingProvider(null);
     setName('');
     setContactPerson('');
@@ -91,14 +146,20 @@ export const VendorsManagement: React.FC = () => {
     setBankName('');
     setIban('');
     setAddress('');
-    const defaultOrg = selectedOrgFilter !== 'all' 
-      ? selectedOrgFilter 
-      : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (orgList[0]?.id || ''));
-    setSelectedOrgId(defaultOrg);
-    const initialOrgServices = targetServices.filter(s => isServiceMatchingOrg(s, defaultOrg));
+    const isCreatable = (orgId?: string) => Boolean(orgId && orgId !== 'all' && creatableOrgs.some(o => o.id === orgId));
+    const defaultOrg = isCreatable(selectedOrgFilter)
+      ? selectedOrgFilter
+      : isCreatable(activeOrgId)
+      ? activeOrgId
+      : creatableOrgs.length === 1
+      ? creatableOrgs[0].id
+      : '';
+    setSelectedOrgIds(defaultOrg ? [defaultOrg] : []);
+    const initialOrgServices = defaultOrg ? targetServices.filter(s => isServiceMatchingOrg(s, defaultOrg)) : [];
     setSelectedServices(initialOrgServices.length > 0 ? [initialOrgServices[0].id] : []);
     setRating(5.0);
     setNotes('');
+    setFormError(null);
     saveGuard.rotateKey();
     setIsModalOpen(true);
   };
@@ -114,68 +175,88 @@ export const VendorsManagement: React.FC = () => {
     setBankName(prov.bankName || '');
     setIban(prov.iban || '');
     setAddress(prov.address || '');
-    setSelectedOrgId(prov.orgId || orgList[0]?.id || '');
+    setSelectedOrgIds([]);
     setSelectedServices(prov.serviceCategoryIds || []);
     setRating(prov.rating || 5.0);
     setNotes(prov.notes || '');
+    setFormError(null);
     setIsModalOpen(true);
+  };
+
+  const buildSuccessFeedback = (providerName: string, addedOrgIds: string[], skipped: MultiOrgSkip[]) => {
+    const parts: string[] = [];
+    if (addedOrgIds.length > 0) {
+      parts.push(`تمت إضافة المورد "${providerName}" بنجاح في: ${addedOrgIds.map(orgLabel).join('، ')}.`);
+    } else {
+      parts.push(`المورد "${providerName}" محفوظ بالفعل من محاولة سابقة، ولم تتم إضافة سجلات جديدة.`);
+    }
+    if (skipped.length > 0) {
+      const skippedText = skipped
+        .map(s => `${orgLabel(s.orgId)} (${s.reason === 'already_member' ? 'مسجل بالفعل' : 'يوجد مورد بنفس الاسم'}${s.existingName ? `: "${s.existingName}"` : ''})`)
+        .join('، ');
+      parts.push(`تم تخطي: ${skippedText}.`);
+    }
+    return { message: parts.join(' '), tone: skipped.length > 0 ? 'warning' as const : 'success' as const };
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    const trimmedName = name.trim();
+    if (!trimmedName) return;
+    setFormError(null);
 
-    const finalOrgId = selectedOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || orgList[0]?.id || '';
-    const relevantServices = targetServices.filter(s => isServiceMatchingOrg(s, finalOrgId));
-    const matchedServiceNames = relevantServices
-      .filter(s => selectedServices.includes(s.id))
-      .map(s => s.name);
+    const details = {
+      name: trimmedName,
+      contactPerson: contactPerson.trim(),
+      phone: phone.trim(),
+      email: email.trim(),
+      taxNumber: taxNumber.trim(),
+      crNumber: crNumber.trim(),
+      bankName: bankName.trim(),
+      iban: iban.trim(),
+      address: address.trim(),
+      rating,
+      notes: notes.trim(),
+    };
+
+    if (!editingProvider && effectiveOrgIds.length === 0) {
+      setFormError(blockedByNameOnly
+        ? 'يوجد مورد بنفس الاسم في كل الشركات المحددة. غيّر الاسم أو اختر شركة أخرى.'
+        : 'يرجى تحديد شركة واحدة على الأقل لإضافة المورد إليها.');
+      return;
+    }
 
     await saveGuard.run(async (idempotencyKey) => {
-    try {
-    if (editingProvider) {
-      await updateProvider({
-        ...editingProvider,
-        name: name.trim(),
-        contactPerson: contactPerson.trim(),
-        phone: phone.trim(),
-        email: email.trim(),
-        taxNumber: taxNumber.trim(),
-        crNumber: crNumber.trim(),
-        bankName: bankName.trim(),
-        iban: iban.trim(),
-        address: address.trim(),
-        serviceCategoryIds: selectedServices,
-        serviceCategoryNames: matchedServiceNames,
-        rating,
-        notes: notes.trim(),
-        orgId: finalOrgId,
-      });
-    } else {
-      await addProvider({
-        orgId: finalOrgId,
-        name: name.trim(),
-        contactPerson: contactPerson.trim(),
-        phone: phone.trim(),
-        email: email.trim(),
-        taxNumber: taxNumber.trim(),
-        crNumber: crNumber.trim(),
-        bankName: bankName.trim(),
-        iban: iban.trim(),
-        address: address.trim(),
-        serviceCategoryIds: selectedServices,
-        serviceCategoryNames: matchedServiceNames,
-        rating,
-        notes: notes.trim(),
-        active: true,
-      }, { idempotencyKey });
-      saveGuard.rotateKey();
-    }
+      try {
+        if (editingProvider) {
+          // The company of an existing provider never changes (one provider record per company).
+          const matchedServiceNames = availableServices
+            .filter(s => selectedServices.includes(s.id))
+            .map(s => s.name);
+          await updateProvider({
+            ...editingProvider,
+            ...details,
+            serviceCategoryIds: selectedServices,
+            serviceCategoryNames: matchedServiceNames,
+          });
+          setIsModalOpen(false);
+          return;
+        }
 
-    setIsModalOpen(false);
-    } catch (err: any) {
-      alert(err?.message || 'تعذر تنفيذ العملية');
-    }
+        // Each company keeps only the services that belong to it (filtered per company by the context).
+        const chosenServices = availableServices.filter(s => selectedServices.includes(s.id));
+        const result = await addProviderToOrgs({
+          ...details,
+          serviceCategoryIds: chosenServices.map(s => s.id),
+          serviceCategoryNames: chosenServices.map(s => s.name),
+          active: true,
+        }, effectiveOrgIds, { idempotencyKey });
+        saveGuard.rotateKey();
+        setIsModalOpen(false);
+        setFeedback(buildSuccessFeedback(trimmedName, result.addedOrgIds, result.skipped));
+      } catch (err: any) {
+        setFormError(err?.message || 'تعذر تنفيذ العملية');
+      }
     });
   };
 
@@ -216,13 +297,35 @@ export const VendorsManagement: React.FC = () => {
           <button
             type="button"
             onClick={handleOpenAdd}
-            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto"
+            disabled={!canCreateProviders}
+            title={canCreateProviders ? undefined : 'إضافة مقدمي الخدمة متاحة لمدير الشركة فقط حالياً (قواعد قاعدة البيانات لا تسمح بها لمدخل البيانات).'}
+            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Plus className="h-4 w-4" />
             <span>إضافة مقدم خدمة جديد</span>
           </button>
+          {!canCreateProviders && (
+            <span className="text-[11px] text-slate-500 font-semibold self-start sm:self-auto">
+              الإضافة متاحة لمدير الشركة فقط
+            </span>
+          )}
         </div>
       </div>
+
+      {/* Save Feedback (added companies / skipped companies) */}
+      {feedback && (
+        <div
+          role="status"
+          className={`p-3.5 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 animate-in fade-in duration-150 ${
+            feedback.tone === 'warning' ? 'bg-amber-50 border border-amber-200 text-amber-900' : 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+          }`}
+        >
+          <span>{feedback.message}</span>
+          <button type="button" onClick={() => setFeedback(null)} className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer shrink-0">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Search Bar */}
       <div className="max-w-md relative">
@@ -366,14 +469,16 @@ export const VendorsManagement: React.FC = () => {
             <Building className="h-10 w-10 text-slate-300 mx-auto mb-2" />
             <h3 className="font-bold text-slate-800 text-sm">لا يوجد موردون أو مقدمو خدمات مسجلين</h3>
             <p className="text-xs text-slate-400 mt-1 mb-4">أضف مقدمي الخدمات والشركات المتعامل معها وحساباتهم البنكية لتسهيل أوامر الصرف</p>
-            <button
-              type="button"
-              onClick={handleOpenAdd}
-              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
-            >
-              <Plus className="h-4 w-4" />
-              <span>إضافة أول مقدم خدمة الآن</span>
-            </button>
+            {canCreateProviders && (
+              <button
+                type="button"
+                onClick={handleOpenAdd}
+                className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+              >
+                <Plus className="h-4 w-4" />
+                <span>إضافة أول مقدم خدمة الآن</span>
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -395,27 +500,40 @@ export const VendorsManagement: React.FC = () => {
             </div>
 
             <form onSubmit={handleSubmit} className="mt-4 space-y-3 text-xs">
-              {/* Company Selection Dropdown */}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5">
-                  <Building2 className="h-3.5 w-3.5 text-emerald-600" />
-                  <span>الشركة أو المؤسسة التابع لها المورد *</span>
-                </label>
-                <select
-                  required
-                  value={selectedOrgId}
-                  onChange={(e) => {
-                    setSelectedOrgId(e.target.value);
-                    setSelectedServices([]);
-                  }}
-                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-800 outline-hidden focus:border-emerald-500 focus:bg-white"
-                >
-                  <option value="" disabled>-- اختر الشركة التابع لها المورد --</option>
-                  {orgList.map(o => (
-                    <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
-                  ))}
-                </select>
-              </div>
+              {/* Company Selection: multi-select on create, read-only on edit */}
+              {editingProvider ? (
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+                    <Building2 className="h-3.5 w-3.5 text-emerald-600" />
+                    <span>الشركة أو المؤسسة التابع لها المورد</span>
+                  </label>
+                  <div className="w-full p-2.5 bg-slate-100 border border-slate-200 rounded-xl font-semibold text-slate-700">
+                    {editingProvider.orgId ? orgLabel(editingProvider.orgId) : 'شركة غير محددة'}
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    لا يمكن نقل المورد إلى شركة أخرى. لإضافته لشركة أخرى استخدم "إضافة مقدم خدمة جديد".
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <OrgMultiSelect
+                    orgs={creatableOrgs}
+                    selected={effectiveOrgIds}
+                    onChange={handleOrgSelectionChange}
+                    label="الشركات أو المؤسسات التابع لها المورد (تحديد متعدد) *"
+                    unavailable={unavailableOrgs}
+                    emptyHint={blockedByNameOnly
+                      ? '* يوجد مورد بنفس الاسم في الشركات المحددة. غيّر الاسم أو اختر شركة أخرى.'
+                      : '* يرجى تحديد شركة واحدة على الأقل.'}
+                    disabled={saveGuard.pending}
+                  />
+                  {effectiveOrgIds.length > 1 && (
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      سيتم إنشاء سجل مستقل للمورد في كل شركة محددة (بإجمالي مصروفات منفصل لكل شركة).
+                    </p>
+                  )}
+                </div>
+              )}
 
               <div>
                 <label className="block font-bold text-slate-700 mb-1">اسم المؤسسة / مقدم الخدمة *</label>
@@ -423,7 +541,7 @@ export const VendorsManagement: React.FC = () => {
                   type="text"
                   required
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => { setName(e.target.value); setFormError(null); }}
                   placeholder="مثال: شركة سحابة الخليج للتقنية..."
                   className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl"
                 />
@@ -432,43 +550,57 @@ export const VendorsManagement: React.FC = () => {
               {/* Connected Services Checklist */}
               <div>
                 <label className="block font-bold text-slate-700 mb-1">
-                  بنود ومراكز الصرف المرتبطة بهذا المورد في الشركة (اختياري)
+                  {!editingProvider && effectiveOrgs.length > 1
+                    ? 'بنود ومراكز الصرف المرتبطة بهذا المورد في الشركات المحددة (اختياري)'
+                    : 'بنود ومراكز الصرف المرتبطة بهذا المورد في الشركة (اختياري)'}
                 </label>
-                {(() => {
-                  const companyServices = targetServices.filter(s => isServiceMatchingOrg(s, selectedOrgId));
-                  if (companyServices.length === 0) {
-                    return (
-                      <p className="text-[11px] text-slate-400 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                        لا توجد بنود صرف مسجلة لهذه الشركة بعد. يمكنك حفظ المورد الآن وربطه بالبنود لاحقاً.
-                      </p>
-                    );
-                  }
-                  return (
-                    <div className="max-h-32 overflow-y-auto space-y-1.5 p-2 bg-slate-50 border border-slate-200 rounded-xl">
-                      {companyServices.map(srv => {
-                        const isChecked = selectedServices.includes(srv.id);
-                        return (
-                          <label key={srv.id} className="flex items-center gap-2 p-1.5 hover:bg-white rounded-lg cursor-pointer transition">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() => {
-                                if (isChecked) {
-                                  setSelectedServices(selectedServices.filter(id => id !== srv.id));
-                                } else {
-                                  setSelectedServices([...selectedServices, srv.id]);
-                                }
-                              }}
-                              className="rounded text-emerald-600 focus:ring-emerald-500"
-                            />
-                            <span className="text-xs font-semibold text-slate-700">{srv.name}</span>
-                            <span className="text-[10px] text-slate-400 font-mono">({srv.code})</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  );
-                })()}
+                {!editingProvider && effectiveOrgIds.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                    اختر شركة واحدة على الأقل لعرض بنود الصرف الخاصة بها.
+                  </p>
+                ) : availableServices.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                    {!editingProvider && effectiveOrgs.length > 1
+                      ? 'لا توجد بنود صرف مسجلة للشركات المحددة بعد. يمكنك حفظ المورد الآن وربطه بالبنود لاحقاً.'
+                      : 'لا توجد بنود صرف مسجلة لهذه الشركة بعد. يمكنك حفظ المورد الآن وربطه بالبنود لاحقاً.'}
+                  </p>
+                ) : (
+                  <div className="max-h-32 overflow-y-auto space-y-1.5 p-2 bg-slate-50 border border-slate-200 rounded-xl">
+                    {availableServices.map(srv => {
+                      const isChecked = selectedServices.includes(srv.id);
+                      const srvOrgs = !editingProvider && effectiveOrgs.length > 1
+                        ? effectiveOrgs.filter(o => isServiceMatchingOrg(srv, o.id))
+                        : [];
+                      return (
+                        <label key={srv.id} className="flex items-center gap-2 p-1.5 hover:bg-white rounded-lg cursor-pointer transition">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {
+                              if (isChecked) {
+                                setSelectedServices(selectedServices.filter(id => id !== srv.id));
+                              } else {
+                                setSelectedServices([...selectedServices, srv.id]);
+                              }
+                            }}
+                            className="rounded text-emerald-600 focus:ring-emerald-500"
+                          />
+                          <span className="text-xs font-semibold text-slate-700">{srv.name}</span>
+                          <span className="text-[10px] text-slate-400 font-mono">({srv.code})</span>
+                          {srvOrgs.length > 0 && (
+                            <span className="mr-auto flex flex-wrap items-center gap-1">
+                              {srvOrgs.map(o => (
+                                <span key={o.id} title={o.name} className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-sky-50 text-sky-800 border border-sky-200/80">
+                                  {o.code || o.name}
+                                </span>
+                              ))}
+                            </span>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -578,6 +710,13 @@ export const VendorsManagement: React.FC = () => {
                 />
               </div>
 
+              {formError && (
+                <div role="alert" className="flex items-start gap-2 p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 font-semibold">
+                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{formError}</span>
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-3">
                 <button
                   type="button"
@@ -588,10 +727,14 @@ export const VendorsManagement: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={saveGuard.pending}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl"
+                  disabled={saveGuard.pending || (!editingProvider && effectiveOrgIds.length === 0)}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  حفظ مقدم الخدمة
+                  {saveGuard.pending
+                    ? 'جارٍ الحفظ...'
+                    : !editingProvider && effectiveOrgIds.length > 1
+                    ? `حفظ المورد في ${effectiveOrgIds.length} شركات`
+                    : 'حفظ مقدم الخدمة'}
                 </button>
               </div>
             </form>
