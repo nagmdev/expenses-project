@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp, deleteApp, type FirebaseApp, type FirebaseOptions } from 'firebase/app';
 import {
   getAuth,
+  connectAuthEmulator,
   GoogleAuthProvider,
   signInWithPopup,
   signInWithEmailAndPassword,
@@ -17,6 +18,7 @@ import {
 } from 'firebase/auth';
 import {
   getFirestore,
+  connectFirestoreEmulator,
   initializeFirestore,
   persistentLocalCache,
   persistentMultipleTabManager,
@@ -87,10 +89,35 @@ export const DEFAULT_FIREBASE_CONFIG: FirebaseConfig = {
 };
 
 /**
+ * Local end-to-end testing only: `npm run dev:e2e` (vite --mode e2e, see .env.e2e) points
+ * the app at the Firebase Auth + Firestore emulators under a `demo-` project, which the
+ * SDK never connects to production for. Unset in every real build.
+ */
+export const USE_FIREBASE_EMULATORS = import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true';
+const EMULATOR_HOST = import.meta.env.VITE_FIREBASE_EMULATOR_HOST || '127.0.0.1';
+const EMULATOR_CONFIG: FirebaseConfig = {
+  apiKey: 'demo-api-key',
+  authDomain: 'demo-expenses-e2e.firebaseapp.com',
+  projectId: 'demo-expenses-e2e',
+  storageBucket: '',
+  messagingSenderId: '0',
+  appId: 'demo-expenses-e2e',
+};
+const connectEmulatedAuth = (a: ReturnType<typeof getAuth>) => {
+  try {
+    connectAuthEmulator(a, `http://${EMULATOR_HOST}:9099`, { disableWarnings: true });
+  } catch {
+    // already connected (HMR)
+  }
+};
+
+/**
  * Retrieve Firebase credentials from localStorage first, then fallback to Vite environment variables,
  * and finally fallback to the built-in default configuration.
  */
 export function getFirebaseConfig(): FirebaseConfig | null {
+  if (USE_FIREBASE_EMULATORS) return EMULATOR_CONFIG;
+
   // 1. Check localStorage first (allows user custom configuration or explicit disconnection)
   try {
     const saved = localStorage.getItem(FIREBASE_STORAGE_KEY);
@@ -199,8 +226,16 @@ export function initFirebase(): { app: FirebaseApp | null; db: Firestore | null;
       // Already initialized for this app (e.g. HMR) or persistence unavailable.
       dbInstance = getFirestore(appInstance);
     }
+    if (USE_FIREBASE_EMULATORS) {
+      try {
+        connectFirestoreEmulator(dbInstance, EMULATOR_HOST, 8085);
+      } catch {
+        // already connected (HMR)
+      }
+    }
     try {
-      storageInstance = getStorage(appInstance);
+      // No Storage emulator: uploads fall back to data URLs (see utils/fileUpload.ts).
+      storageInstance = USE_FIREBASE_EMULATORS ? null : getStorage(appInstance);
     } catch (storageErr) {
       console.warn('[Firebase] Storage initialization notice:', storageErr);
       storageInstance = null;
@@ -243,6 +278,7 @@ export { ref, uploadBytes, getDownloadURL };
 
 // Firebase Authentication
 export const auth = app ? getAuth(app) : getAuth();
+if (USE_FIREBASE_EMULATORS) connectEmulatedAuth(auth);
 export const googleProvider = new GoogleAuthProvider();
 
 /**
@@ -282,6 +318,7 @@ export async function adminCreateUserAccount(
   const tempApp = initializeApp(config as FirebaseOptions, tempAppName);
   try {
     const tempAuth = getAuth(tempApp);
+    if (USE_FIREBASE_EMULATORS) connectEmulatedAuth(tempAuth);
     const userCredential = await createUserWithEmailAndPassword(tempAuth, email.trim(), password);
     if (displayName) {
       await updateProfile(userCredential.user, { displayName: displayName.trim() });

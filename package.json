@@ -10,7 +10,10 @@
     "lint": "oxlint",
     "test": "vitest run",
     "test:rules": "npx -y firebase-tools@15.32.0 emulators:exec --project demo-expenses-rules --only firestore \"vitest run -c vitest.rules.config.ts\"",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "dev:e2e": "vite --mode e2e",
+    "e2e:emulators": "npx -y firebase-tools@15.32.0 emulators:start --project demo-expenses-e2e --only firestore,auth",
+    "e2e:seed": "vitest run -c vitest.e2e.config.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
