@@ -1,6 +1,7 @@
 import { getStorageInstance, ref, uploadBytes, getDownloadURL } from '../lib/firebase';
 import { RequestAttachment } from '../types';
 import { newId, uuid } from './ids';
+import { localToday } from './requestUi';
 
 /**
  * Format bytes to human readable format (KB, MB)
@@ -170,7 +171,7 @@ export async function processAndUploadInvoice(
 ): Promise<RequestAttachment> {
   const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const now = new Date();
-  const dateFormatted = now.toISOString().split('T')[0];
+  const dateFormatted = localToday(now); // the viewer's local day, like every displayed date
   const isImage = file.type.startsWith('image/');
   const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 

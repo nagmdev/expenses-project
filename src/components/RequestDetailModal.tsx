@@ -1,25 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
-import { ExpenseRequest, PaymentMethod, PaymentAccount, PaymentAccountType } from '../types';
-import { 
-  X, 
-  CheckCircle2, 
-  XCircle, 
-  HelpCircle, 
-  CreditCard, 
-  Clock, 
-  Paperclip, 
-  FileText, 
+import { ExpenseRequest, PaymentMethod } from '../types';
+import {
+  X,
+  CheckCircle2,
+  XCircle,
+  HelpCircle,
+  CreditCard,
+  FileText,
   Send,
-  Building,
-  User as UserIcon,
-  Tag,
   AlertTriangle,
   ArrowDownLeft,
   Landmark,
-  Smartphone,
-  Wallet,
-  Coins,
   Pencil,
   Receipt,
   Eye,
@@ -28,8 +20,30 @@ import {
 } from 'lucide-react';
 import { processAndUploadInvoice } from '../utils/fileUpload';
 import { useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { can } from '../utils/permissions';
+import {
+  accountBalance,
+  accountTypeLabel,
+  accountTypeToPaymentMethod,
+  accountsForRequest,
+  checkRequestCoverage,
+  currencyCode,
+  fmtMoney,
+  formatLocalDate,
+  formatLocalDateTime,
+  incomeMethodLabel,
+  insufficientBalanceMessage,
+  paymentMethodLabel,
+  pickDisbursementAccount,
+  requestPaymentMethodLabel,
+  resolveRequestPaymentMethod,
+} from '../utils/requestUi';
 import { NewRequestModal } from './NewRequestModal';
 import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
+
+/** Largest invoice file accepted here (the same limit as the new-request form). */
+const MAX_UPLOAD_MB = 15;
 
 interface RequestDetailModalProps {
   request: ExpenseRequest | null;
@@ -58,6 +72,13 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
   const isSuperAdmin = currentRole === 'super_admin' || currentUser.role === 'super_admin';
   const canEdit = request ? ((request.status === 'pending' || request.status === 'clarification_requested') &&
     (currentUser.id === request.requesterId || currentUser.email === request.requesterEmail || isSuperAdmin || currentRole === 'org_admin')) : false;
+
+  // Every action is shown only to the roles the domain (and firestore.rules) accept.
+  const canApprove = can(currentRole, 'approveRequests');
+  const canReject = can(currentRole, 'rejectRequests');
+  const canClarify = can(currentRole, 'clarifyRequests');
+  const canDisburse = can(currentRole, 'disburseRequests');
+  const rootRef = useRef<HTMLDivElement>(null);
   
   // Action form states
   const [approvalNote, setApprovalNote] = useState('');
@@ -65,12 +86,15 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
   const [clarificationQuestion, setClarificationQuestion] = useState('');
   const [replyText, setReplyText] = useState('');
   const [replyAttachment, setReplyAttachment] = useState('');
+  // Inline message of the open sub-form (an empty reason / question never fails silently)
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Disbursement states
   const [disburseAccountId, setDisburseAccountId] = useState<string>('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('bank_transfer');
   const [referenceNumber, setReferenceNumber] = useState('');
-  const [bankName, setBankName] = useState('المصرف الرئيسي');
+  // Optional free text for the payment advice; empty = the selected account's name.
+  const [bankName, setBankName] = useState('');
   const [disbursementNotes, setDisbursementNotes] = useState('');
   const [isUploadingInvoice, setIsUploadingInvoice] = useState(false);
 
@@ -81,8 +105,9 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     const file = e.target.files?.[0];
     if (!file || !request) return;
 
-    if (file.size > 15 * 1024 * 1024) {
-      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 15 ميجابايت');
+    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      alert(`حجم الملف كبير جداً، يرجى اختيار ملف أقل من ${MAX_UPLOAD_MB} ميجابايت`);
+      e.target.value = '';
       return;
     }
 
@@ -113,14 +138,15 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
   // same request must not wipe a half-typed reason/question or regenerate the reference).
   useEffect(() => {
     if (request) {
-      setDisburseAccountId(request.targetAccountId || '');
-      setPaymentMethod(request.preferredPaymentMethod || (request.requestType === 'income' ? 'instapay' : 'bank_transfer'));
+      // '' = the default account picked below (pickDisbursementAccount), shown selected in the form.
+      setDisburseAccountId('');
+      setPaymentMethod(resolveRequestPaymentMethod(request));
       setReferenceNumber(
         request.requestType === 'income'
           ? `IN-${Math.floor(100000 + Math.random() * 900000)}`
           : `TXN-${Math.floor(10000000 + Math.random() * 90000000)}`
       );
-      setBankName('المصرف الرئيسي');
+      setBankName('');
       setDisbursementNotes(request.requestType === 'income' ? `استلام وتوريد لحساب ${request.providerName || ''}`.trim() : '');
       setActiveAction('none');
       setApprovalNote('');
@@ -128,47 +154,53 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
       setClarificationQuestion('');
       setReplyText('');
       setReplyAttachment('');
+      setActionError(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request?.id]);
 
-  // Close on Escape key press for accessibility
-  useEffect(() => {
-    if (!request) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [request, onClose]);
+  // Esc closes this window only when it is the top-most dialog: an invoice preview or
+  // the edit form opened from here closes first.
+  useEscapeToClose(Boolean(request), onClose, rootRef);
 
   if (!request) return null;
-
-  const mapAccountTypeToPaymentMethod = (type: PaymentAccount['type']): PaymentMethod => {
-    switch (type) {
-      case 'bank': return 'bank_transfer';
-      case 'instapay': return 'instapay';
-      case 'wallet': return 'digital_wallet';
-      case 'cash': return 'cash';
-      default: return 'bank_transfer';
-    }
-  };
-
-  const mapPaymentMethodToAccountType = (method: PaymentMethod): PaymentAccount['type'] => {
-    switch (method) {
-      case 'bank_transfer': return 'bank';
-      case 'instapay': return 'instapay';
-      case 'digital_wallet': return 'wallet';
-      case 'cash': return 'cash';
-      default: return 'other';
-    }
-  };
 
   const companyAccounts = (paymentAccounts || []).filter(
     a => a.orgId === request?.orgId && a.active !== false
   );
+  // Accounts a disbursement / receipt can use: active, this company, the request's currency
+  // (the domain refuses any other).
+  const eligibleAccounts = accountsForRequest(companyAccounts, request);
+  const defaultDisburseAccount = pickDisbursementAccount(eligibleAccounts, request, resolveParentBankAccount);
+  const selectedDisburseAccount = eligibleAccounts.find(a => a.id === disburseAccountId) || defaultDisburseAccount;
+  const selectedDisburseParent = resolveParentBankAccount(selectedDisburseAccount);
+  const isIncome = request.requestType === 'income';
+  // No money operation takes an account below zero: the expense disbursement is blocked
+  // here already when the chosen account (and the bank behind an InstaPay) cannot cover it.
+  const disburseShortfall = !isIncome
+    ? insufficientBalanceMessage(selectedDisburseAccount, selectedDisburseParent, request.amount)
+    : null;
+  const openAction = (action: typeof activeAction) => {
+    setActionError(null);
+    setActiveAction(activeAction === action ? 'none' : action);
+  };
+  const selectDisburseAccount = (accountId: string) => {
+    setDisburseAccountId(accountId);
+    setActionError(null);
+    const acc = eligibleAccounts.find(a => a.id === accountId);
+    if (acc) {
+      setBankName('');
+      setPaymentMethod(accountTypeToPaymentMethod(acc.type));
+    }
+  };
+  const isRequester =
+    request.requesterId === currentUser.id ||
+    Boolean(request.requesterEmail && currentUser.email && request.requesterEmail.toLowerCase() === currentUser.email.toLowerCase());
+  // Which actions this viewer really has on the request right now (no empty action bar).
+  const incomeActions = isIncome && (request.status === 'pending' || request.status === 'approved') && (canDisburse || canReject);
+  const reviewActions = !isIncome && (request.status === 'pending' || request.status === 'clarification_requested') && (canApprove || canClarify || canReject);
+  const payAction = !isIncome && request.status === 'approved' && canDisburse;
+  const showActions = incomeActions || reviewActions || payAction;
 
   // Guarded + awaited action: UI is reset / closed only after the call succeeded.
   // On failure the idempotency key is kept so a retry resolves to the same operation.
@@ -198,7 +230,10 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
   const handleReject = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!rejectionReason.trim()) return;
+    if (!rejectionReason.trim()) {
+      setActionError('يرجى كتابة سبب الرفض ليصل للموظف.');
+      return;
+    }
     await runAction('reject', (idempotencyKey) =>
       rejectRequest(request.id, rejectionReason.trim(), { idempotencyKey })
     );
@@ -206,7 +241,10 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
   const handleClarify = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!clarificationQuestion.trim()) return;
+    if (!clarificationQuestion.trim()) {
+      setActionError('يرجى كتابة سؤال الاستيضاح أو المستندات المطلوبة من الموظف.');
+      return;
+    }
     await runAction('clarify', (idempotencyKey) =>
       requestClarification(request.id, clarificationQuestion.trim(), { idempotencyKey })
     );
@@ -214,7 +252,10 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
   const handleReply = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!replyText.trim()) return;
+    if (!replyText.trim()) {
+      setActionError('يرجى كتابة ردك على الاستيضاح.');
+      return;
+    }
     await runAction('reply', (idempotencyKey) =>
       replyClarification(request.id, replyText.trim(), replyAttachment.trim() || undefined, { idempotencyKey })
     );
@@ -222,19 +263,30 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
   const handleDisburse = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!referenceNumber.trim()) return;
+    if (!referenceNumber.trim()) {
+      setActionError('يرجى إدخال رقم المرجع / العملية.');
+      return;
+    }
+    // The account shown selected in the form is the one paid from (never a different fallback).
+    const targetAcc = selectedDisburseAccount;
+    if (!targetAcc) {
+      setActionError(`لا يوجد حساب خزينة نشط بعملة الطلب (${currencyCode(request.currency)}) في هذه الشركة. يرجى إضافة حساب أو تفعيله أولاً.`);
+      return;
+    }
+    if (disburseShortfall) {
+      setActionError(disburseShortfall);
+      return;
+    }
+    setActionError(null);
     await runAction('disburse', async (idempotencyKey) => {
-      const targetAcc = companyAccounts.find(a => a.id === disburseAccountId)
-        || companyAccounts.find(a => a.type === mapPaymentMethodToAccountType(paymentMethod))
-        || companyAccounts[0];
-
       // changed=false (e.g. 'already_disbursed' / 'duplicate_operation') means it was already paid — not an error.
       await disburseRequest(request.id, {
         paymentMethod,
         referenceNumber: referenceNumber.trim(),
-        bankName: targetAcc ? `${targetAcc.name} (${targetAcc.accountIdentifier})` : bankName,
-        accountId: targetAcc?.id || disburseAccountId || undefined,
-        accountName: targetAcc?.name,
+        // The requester sees this on their payment advice: the account's name, never the company's account number.
+        bankName: bankName.trim() || targetAcc.name,
+        accountId: targetAcc.id,
+        accountName: targetAcc.name,
         notes: disbursementNotes.trim() || undefined,
       }, { idempotencyKey });
     });
@@ -242,6 +294,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
   return (
     <div 
+      ref={rootRef}
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto"
       role="dialog"
       aria-modal="true"
@@ -254,8 +307,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
         
         {/* Modal Header */}
         <div className="flex items-center justify-between p-5 border-b border-slate-100 bg-slate-50/50 sticky top-0 bg-white z-10">
-          <div className="flex items-center gap-3">
-            <span className="font-mono text-xs font-bold text-slate-500 bg-slate-200 px-2.5 py-1 rounded-lg">
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="font-mono text-xs font-bold text-slate-500 bg-slate-200 px-2.5 py-1 rounded-lg shrink-0">
               {request.requestNumber}
             </span>
             <h3 id="request-detail-title" className="text-base font-bold text-slate-900 truncate max-w-md">
@@ -302,7 +355,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 </span>
               </div>
               <div className={`text-3xl font-black mt-0.5 ${request.requestType === 'income' ? 'text-emerald-700' : 'text-slate-900'}`}>
-                {request.requestType === 'income' ? '+' : '-'}{request.amount.toLocaleString()} <span className="text-base font-bold text-slate-500">{request.currency}</span>
+                {request.requestType === 'income' ? '+' : '-'}{fmtMoney(request.amount)} <span className="text-base font-bold text-slate-500">{request.currency}</span>
               </div>
             </div>
 
@@ -382,11 +435,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                 <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
                   <span className="text-slate-400 block mb-1">طريقة وشكل التوريد</span>
                   <span className="font-bold text-emerald-700 flex items-center gap-1">
-                    {request.preferredPaymentMethod === 'instapay' && '📱 إنستاباي'}
-                    {request.preferredPaymentMethod === 'digital_wallet' && '💳 محفظة كاش'}
-                    {request.preferredPaymentMethod === 'bank_transfer' && '🏦 حساب بنكي'}
-                    {request.preferredPaymentMethod === 'cash' && '💵 خزينة نقدية'}
-                    {!['instapay', 'digital_wallet', 'bank_transfer', 'cash'].includes(request.preferredPaymentMethod || '') && '📥 توريد مباشر'}
+                    {request.preferredPaymentMethod ? incomeMethodLabel(request.preferredPaymentMethod) : '📥 توريد مباشر'}
                   </span>
                 </div>
 
@@ -401,19 +450,15 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
                 <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
                   <span className="text-slate-400 block mb-1">تاريخ إنشاء الطلب</span>
-                  <span className="font-bold text-slate-800">{request.createdAt.split('T')[0]}</span>
+                  <span className="font-bold text-slate-800">{formatLocalDate(request.createdAt)}</span>
                 </div>
               </div>
 
               {/* Target Treasury Card Preview with live balance */}
               {(() => {
-                const targetType = request.preferredPaymentMethod 
-                  ? mapPaymentMethodToAccountType(request.preferredPaymentMethod) 
-                  : undefined;
-                const targetAcc = companyAccounts.find(a => a.id === request.targetAccountId) 
-                  || (targetType ? companyAccounts.find(a => a.type === targetType) : undefined);
+                // The request's target account, else the account of its method (same rule as the receipt form).
+                const targetAcc = defaultDisburseAccount;
                 if (!targetAcc) return null;
-                const accBal = targetAcc.currentBalance ?? targetAcc.balance ?? 0;
                 return (
                   <div className="p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-xl flex items-center justify-between">
                     <div className="flex items-center gap-3">
@@ -427,7 +472,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                     </div>
                     <div className="text-left">
                       <span className="text-[10px] text-slate-500 block">الرصيد الفعلي الحالي بالكارت</span>
-                      <span className="font-black text-emerald-700 text-sm font-mono">{accBal.toLocaleString()} {targetAcc.currency || 'EGP'}</span>
+                      <span className="font-black text-emerald-700 text-sm font-mono">{fmtMoney(accountBalance(targetAcc))} {currencyCode(targetAcc.currency)}</span>
                     </div>
                   </div>
                 );
@@ -464,7 +509,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
 
                 <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
                   <span className="text-slate-400 block mb-1">تاريخ الطلب</span>
-                  <span className="font-bold text-slate-800">{request.createdAt.split('T')[0]}</span>
+                  <span className="font-bold text-slate-800">{formatLocalDate(request.createdAt)}</span>
                 </div>
               </div>
 
@@ -491,10 +536,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                   <div>
                     <span className="text-slate-400 block text-[10px] mb-0.5">طريقة التحويل المطلوبة:</span>
                     <span className="font-bold text-slate-900">
-                      {request.preferredPaymentMethod === 'instapay' ? 'انستاباي (InstaPay) 📱' :
-                       request.preferredPaymentMethod === 'digital_wallet' ? 'محفظة إلكترونية 💳' :
-                       request.preferredPaymentMethod === 'bank_transfer' ? 'تحويل بنكي (IBAN) 🏦' :
-                       request.preferredPaymentMethod === 'cash' ? 'نقداً من الخزينة 💵' : 'أخرى'}
+                      {requestPaymentMethodLabel(request)}
                     </span>
                   </div>
 
@@ -932,13 +974,13 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 text-slate-700">
                 <div>طريقة الدفع / التوريد: <span className="font-bold">
-                  {request.disbursement.paymentMethod === 'bank_transfer' ? 'تحويل بنكي' : 
-                   request.disbursement.paymentMethod === 'instapay' ? 'إنستاباي' : 
-                   request.disbursement.paymentMethod === 'digital_wallet' ? 'محفظة كاش' : 
-                   request.disbursement.paymentMethod === 'cash' ? 'خزينة نقدية' : 'أخرى'}
+                  {isIncome ? incomeMethodLabel(request.disbursement.paymentMethod) : paymentMethodLabel(request.disbursement.paymentMethod)}
                 </span></div>
                 <div>رقم المرجع: <span className="font-mono font-bold">{request.disbursement.referenceNumber}</span></div>
-                <div>تاريخ العملية: <span className="font-bold">{request.disbursement.disbursedAt}</span></div>
+                <div>تاريخ العملية: <span className="font-bold">{formatLocalDateTime(request.disbursement.disbursedAt)}</span></div>
+                {(request.disbursement.accountName || request.disbursement.bankName) && (
+                  <div className="col-span-2 sm:col-span-3">الحساب: <span className="font-bold">{request.disbursement.accountName || request.disbursement.bankName}</span></div>
+                )}
               </div>
             </div>
           )}
@@ -967,7 +1009,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                   >
                     <div className="flex items-center justify-between font-bold mb-1 text-[11px]">
                       <span>{comm.authorName}</span>
-                      <span className="text-slate-400 font-normal">{comm.createdAt.split('T')[0]}</span>
+                      <span className="text-slate-400 font-normal">{formatLocalDateTime(comm.createdAt)}</span>
                     </div>
                     <p>{comm.content}</p>
                     {comm.attachmentName && (
@@ -981,133 +1023,140 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
             </div>
           )}
 
-          {/* ACTION FORMS ACCORDING TO ROLES */}
-          {(currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance') && (
+          {/* ACTION FORMS — each action only for the roles the domain accepts (src/utils/permissions.ts);
+              the section is not rendered at all when this viewer has nothing to do on the request. */}
+          {showActions && (
             <div className="pt-4 border-t border-slate-100">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-xs font-bold text-slate-500">
-                  {request.requestType === 'income' ? 'إجراءات استلام وتوريد المبلغ في الخزينة:' : 'إجراءات الاعتماد والصرف المالي:'}
+                  {isIncome ? 'إجراءات استلام وتوريد المبلغ في الخزينة:' : 'إجراءات الاعتماد والصرف المالي:'}
                 </span>
-                
+
                 <div className="flex items-center gap-2 flex-wrap">
                   {/* For Income Requests: Direct Receipt or Reject */}
-                  {request.requestType === 'income' ? (
-                    (request.status === 'pending' || request.status === 'approved') && (
-                      <>
+                  {incomeActions && (
+                    <>
+                      {canDisburse && (
                         <button
                           type="button"
-                          onClick={() => setActiveAction(activeAction === 'disburse' ? 'none' : 'disburse')}
+                          onClick={() => openAction('disburse')}
                           className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
                         >
                           <ArrowDownLeft className="h-4 w-4" />
                           <span>📥 تأكيد الاستلام والتوريد في الخزينة (تم الاستلام)</span>
                         </button>
+                      )}
 
+                      {canReject && (
                         <button
                           type="button"
-                          onClick={() => setActiveAction(activeAction === 'reject' ? 'none' : 'reject')}
+                          onClick={() => openAction('reject')}
                           className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
                         >
                           <XCircle className="h-4 w-4" />
                           <span>رفض التوريد</span>
                         </button>
-                      </>
-                    )
-                  ) : (
-                    /* For Expense Requests */
-                    <>
-                      {(request.status === 'pending' || request.status === 'clarification_requested') && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => setActiveAction(activeAction === 'approve' ? 'none' : 'approve')}
-                            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-                          >
-                            <CheckCircle2 className="h-4 w-4" />
-                            <span>اعتماد الطلب</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => setActiveAction(activeAction === 'clarify' ? 'none' : 'clarify')}
-                            className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-                          >
-                            <HelpCircle className="h-4 w-4" />
-                            <span>طلب توضيح أكثر</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => setActiveAction(activeAction === 'reject' ? 'none' : 'reject')}
-                            className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-                          >
-                            <XCircle className="h-4 w-4" />
-                            <span>رفض الطلب</span>
-                          </button>
-                        </>
                       )}
+                    </>
+                  )}
 
-                      {request.status === 'approved' && (
+                  {/* For Expense Requests under review */}
+                  {reviewActions && (
+                    <>
+                      {canApprove && (
                         <button
                           type="button"
-                          onClick={() => setActiveAction(activeAction === 'disburse' ? 'none' : 'disburse')}
-                          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                          onClick={() => openAction('approve')}
+                          className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
                         >
-                          <CreditCard className="h-4 w-4" />
-                          <span>تسجيل وتنفيذ الصرف المالي</span>
+                          <CheckCircle2 className="h-4 w-4" />
+                          <span>اعتماد الطلب</span>
+                        </button>
+                      )}
+
+                      {canClarify && (
+                        <button
+                          type="button"
+                          onClick={() => openAction('clarify')}
+                          className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <HelpCircle className="h-4 w-4" />
+                          <span>طلب توضيح أكثر</span>
+                        </button>
+                      )}
+
+                      {canReject && (
+                        <button
+                          type="button"
+                          onClick={() => openAction('reject')}
+                          className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <XCircle className="h-4 w-4" />
+                          <span>رفض الطلب</span>
                         </button>
                       )}
                     </>
+                  )}
+
+                  {payAction && (
+                    <button
+                      type="button"
+                      onClick={() => openAction('disburse')}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                    >
+                      <CreditCard className="h-4 w-4" />
+                      <span>تسجيل وتنفيذ الصرف المالي</span>
+                    </button>
                   )}
                 </div>
               </div>
 
               {/* Sub-form: Approve Form — with Treasury Balance Alert */}
-              {activeAction === 'approve' && (
+              {activeAction === 'approve' && canApprove && (
                 <form onSubmit={handleApprove} className="mt-4 p-4 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-3">
-                  <h5 className="font-bold text-emerald-900 text-xs">تأكيد اعتماد الطلب بمبلغ {request.amount.toLocaleString()} {request.currency}</h5>
-                  
-                  {/* 🟡 NEW: Treasury Balance Warning */}
-                  {request.requestType !== 'income' && (() => {
-                    const totalBalance = companyAccounts.reduce((sum, acc) => sum + Number(acc.currentBalance ?? acc.balance ?? 0), 0);
-                    const isInsufficient = totalBalance < request.amount;
-                    const matchingAcc = companyAccounts.find(a => {
-                      const methodType = request.preferredPaymentMethod === 'instapay' ? 'instapay' 
-                        : request.preferredPaymentMethod === 'digital_wallet' ? 'wallet'
-                        : request.preferredPaymentMethod === 'bank_transfer' ? 'bank'
-                        : request.preferredPaymentMethod === 'cash' ? 'cash' : null;
-                      return methodType && a.type === methodType;
-                    });
-                    const matchingBalance = matchingAcc ? Number(matchingAcc.currentBalance ?? matchingAcc.balance ?? 0) : null;
-                    const isMatchingInsufficient = matchingBalance !== null && matchingBalance < request.amount;
+                  <h5 className="font-bold text-emerald-900 text-xs">تأكيد اعتماد الطلب بمبلغ {fmtMoney(request.amount)} {currencyCode(request.currency)}</h5>
 
+                  {/* Treasury balance check: can the company actually pay this? One disbursement is
+                      paid from ONE account, and an InstaPay channel pays with its linked bank's money. */}
+                  {!isIncome && (() => {
+                    const cover = checkRequestCoverage(eligibleAccounts, request, resolveParentBankAccount);
+                    const cur = currencyCode(request.currency);
+                    const matchingName = cover.matching?.name || `حساب ${paymentMethodLabel(resolveRequestPaymentMethod(request))}`;
+                    const tone =
+                      cover.level === 'ok'
+                        ? 'bg-teal-50 border-teal-200 text-teal-900'
+                        : cover.level === 'other'
+                        ? 'bg-amber-50 border-amber-300 text-amber-900'
+                        : 'bg-rose-50 border-rose-300 text-rose-900';
+                    const iconTone = cover.level === 'ok' ? 'text-teal-600' : cover.level === 'other' ? 'text-amber-600' : 'text-rose-600';
                     return (
-                      <div className={`p-3 rounded-xl border text-xs flex items-start gap-2.5 ${
-                        isInsufficient || isMatchingInsufficient
-                          ? 'bg-rose-50 border-rose-300 text-rose-900' 
-                          : 'bg-teal-50 border-teal-200 text-teal-900'
-                      }`}>
-                        <AlertTriangle className={`h-4 w-4 shrink-0 mt-0.5 ${
-                          isInsufficient || isMatchingInsufficient ? 'text-rose-600' : 'text-teal-600'
-                        }`} />
-                        <div className="space-y-1">
+                      <div className={`p-3 rounded-xl border text-xs flex items-start gap-2.5 ${tone}`}>
+                        <AlertTriangle className={`h-4 w-4 shrink-0 mt-0.5 ${iconTone}`} />
+                        <div className="space-y-1 min-w-0">
                           <div className="font-bold">
-                            {isInsufficient 
-                              ? '⚠️ تنبيه: رصيد الخزينة قد لا يكفي لتنفيذ هذا الصرف!'
-                              : isMatchingInsufficient
-                              ? `⚠️ تنبيه: رصيد حساب ${matchingAcc?.name || 'الصرف'} قد لا يكفي`
-                              : '✅ رصيد الخزينة كافٍ لتنفيذ هذا الصرف'}
+                            {cover.level === 'ok'
+                              ? `✅ رصيد "${matchingName}" يكفي لتنفيذ هذا الصرف`
+                              : cover.level === 'other'
+                              ? `رصيد "${matchingName}" لا يكفي لهذا المبلغ، ويمكن الصرف من "${cover.best?.name}"`
+                              : eligibleAccounts.length === 0
+                              ? `⚠️ لا يوجد حساب خزينة نشط بعملة الطلب (${cur}) في هذه الشركة`
+                              : `⚠️ لا يوجد حساب بعملة ${cur} يكفي رصيده لتنفيذ هذا الصرف`}
                           </div>
                           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
-                            <span>إجمالي الرصيد المتاح: <strong>{totalBalance.toLocaleString()} {request.currency}</strong></span>
-                            {matchingAcc && (
-                              <span>رصيد {matchingAcc.name}: <strong>{matchingBalance?.toLocaleString()} {request.currency}</strong></span>
+                            {cover.matching && (
+                              <span>رصيد {cover.matching.name}: <strong>{fmtMoney(accountBalance(cover.matching))} {cur}</strong></span>
                             )}
-                            <span>المبلغ المطلوب: <strong>{request.amount.toLocaleString()} {request.currency}</strong></span>
+                            {cover.matchingLinkedBank && (
+                              <span>البنك المرتبط ({cover.matchingLinkedBank.name}): <strong>{fmtMoney(accountBalance(cover.matchingLinkedBank))} {cur}</strong></span>
+                            )}
+                            {cover.level === 'other' && cover.best && (
+                              <span>المتاح في {cover.best.name}: <strong>{fmtMoney(cover.bestSpendable)} {cur}</strong></span>
+                            )}
+                            <span>المبلغ المطلوب: <strong>{fmtMoney(request.amount)} {cur}</strong></span>
                           </div>
-                          {(isInsufficient || isMatchingInsufficient) && (
+                          {cover.level === 'none' && (
                             <div className="text-[11px] font-bold text-rose-700 mt-1">
-                              يمكنك الاعتماد لكن قد يتعذر التنفيذ الفعلي عند الصرف لعدم كفاية الرصيد.
+                              يمكنك الاعتماد الآن، لكن الصرف لن يتم حتى يُودَع المبلغ في أحد الحسابات أولاً (لا يُسمح بأن يصبح رصيد أي حساب بالسالب).
                             </div>
                           )}
                         </div>
@@ -1133,26 +1182,32 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                     <button
                       type="submit"
                       disabled={isActionPending('approve')}
-                      className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg"
+                      className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg disabled:opacity-60"
                     >
-                      تأكيد الاعتماد
+                      {isActionPending('approve') ? 'جاري الاعتماد...' : 'تأكيد الاعتماد'}
                     </button>
                   </div>
                 </form>
               )}
 
               {/* Sub-form: Clarify Form */}
-              {activeAction === 'clarify' && (
+              {activeAction === 'clarify' && canClarify && (
                 <form onSubmit={handleClarify} className="mt-4 p-4 bg-amber-50/70 border border-amber-200 rounded-xl space-y-3">
                   <h5 className="font-bold text-amber-900 text-xs">طلب استفسار وتوضيح من طالب الصرف ({request.requesterName})</h5>
                   <textarea
                     rows={3}
                     required
                     value={clarificationQuestion}
-                    onChange={(e) => setClarificationQuestion(e.target.value)}
+                    onChange={(e) => {
+                      setClarificationQuestion(e.target.value);
+                      if (actionError) setActionError(null);
+                    }}
                     placeholder="اكتب التساؤل المطلوب من الموظف توضيحه أو المستندات المطلوبة..."
                     className="w-full p-2.5 bg-white border border-amber-300 rounded-lg text-xs"
                   />
+                  {actionError && (
+                    <p role="alert" className="text-[11px] font-bold text-rose-700">⚠️ {actionError}</p>
+                  )}
                   <div className="flex justify-end gap-2">
                     <button
                       type="button"
@@ -1164,26 +1219,32 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                     <button
                       type="submit"
                       disabled={isActionPending('clarify')}
-                      className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg"
+                      className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg disabled:opacity-60"
                     >
-                      إرسال الاستفسار للموظف
+                      {isActionPending('clarify') ? 'جاري الإرسال...' : 'إرسال الاستفسار للموظف'}
                     </button>
                   </div>
                 </form>
               )}
 
               {/* Sub-form: Reject Form */}
-              {activeAction === 'reject' && (
+              {activeAction === 'reject' && canReject && (
                 <form onSubmit={handleReject} className="mt-4 p-4 bg-rose-50/70 border border-rose-200 rounded-xl space-y-3">
-                  <h5 className="font-bold text-rose-900 text-xs">رفض الطلب</h5>
+                  <h5 className="font-bold text-rose-900 text-xs">{isIncome ? 'رفض التوريد' : 'رفض الطلب'}</h5>
                   <textarea
                     rows={2}
                     required
                     value={rejectionReason}
-                    onChange={(e) => setRejectionReason(e.target.value)}
+                    onChange={(e) => {
+                      setRejectionReason(e.target.value);
+                      if (actionError) setActionError(null);
+                    }}
                     placeholder="اذكر سبب الرفض لتوضيحه للموظف..."
                     className="w-full p-2.5 bg-white border border-rose-300 rounded-lg text-xs"
                   />
+                  {actionError && (
+                    <p role="alert" className="text-[11px] font-bold text-rose-700">⚠️ {actionError}</p>
+                  )}
                   <div className="flex justify-end gap-2">
                     <button
                       type="button"
@@ -1195,24 +1256,24 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                     <button
                       type="submit"
                       disabled={isActionPending('reject')}
-                      className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg"
+                      className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg disabled:opacity-60"
                     >
-                      تأكيد الرفض
+                      {isActionPending('reject') ? 'جاري الرفض...' : 'تأكيد الرفض'}
                     </button>
                   </div>
                 </form>
               )}
 
               {/* Sub-form: Disburse / Receipt Form */}
-              {activeAction === 'disburse' && (
+              {activeAction === 'disburse' && canDisburse && (
                 <form onSubmit={handleDisburse} className={`mt-4 p-4 border rounded-xl space-y-3 ${
-                  request.requestType === 'income' ? 'bg-emerald-50/80 border-emerald-300' : 'bg-blue-50/70 border-blue-200'
+                  isIncome ? 'bg-emerald-50/80 border-emerald-300' : 'bg-blue-50/70 border-blue-200'
                 }`}>
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
                     <h5 className={`font-black text-xs flex items-center gap-1.5 ${
-                      request.requestType === 'income' ? 'text-emerald-900' : 'text-blue-900'
+                      isIncome ? 'text-emerald-900' : 'text-blue-900'
                     }`}>
-                      {request.requestType === 'income' ? (
+                      {isIncome ? (
                         <>
                           <ArrowDownLeft className="h-4 w-4 text-emerald-600" />
                           <span>📥 تأكيد استلام المبلغ وتوريده في الرصيد (+ IN)</span>
@@ -1222,63 +1283,68 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                       )}
                     </h5>
                     <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-white border border-slate-200">
-                      المبلغ: {request.amount.toLocaleString()} {request.currency}
+                      المبلغ: {fmtMoney(request.amount)} {currencyCode(request.currency)}
                     </span>
                   </div>
 
-                  {request.requestType === 'income' ? (
-                    <>
-                      {/* Income: Card selection and quick reference */}
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Account selection: only this company's active accounts in the request's currency */}
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      {isIncome ? 'حساب الخزينة / الكارت المستلم للرصيد:' : 'حساب / خزينة الصرف المحول منه (- OUT):'}
+                    </label>
+                    {eligibleAccounts.length === 0 ? (
+                      <div role="alert" className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-[11px] font-bold">
+                        لا يوجد حساب خزينة نشط بعملة الطلب ({currencyCode(request.currency)}) في هذه الشركة. يرجى إضافة حساب أو تفعيله من شاشة الخزينة أولاً.
+                      </div>
+                    ) : (
+                      <select
+                        value={selectedDisburseAccount?.id || ''}
+                        onChange={(e) => selectDisburseAccount(e.target.value)}
+                        className={`w-full p-2.5 bg-white border rounded-lg text-xs font-bold ${
+                          isIncome ? 'border-emerald-300' : disburseShortfall ? 'border-rose-400' : 'border-slate-200'
+                        }`}
+                      >
+                        {eligibleAccounts.map(acc => (
+                          <option key={acc.id} value={acc.id}>
+                            {acc.name} — {accountTypeLabel(acc.type)} ({acc.accountIdentifier}) — الرصيد: {fmtMoney(accountBalance(acc))} {currencyCode(acc.currency)}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {selectedDisburseAccount && selectedDisburseParent && (
+                      <div className="mt-1.5 p-2 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 text-[11px] flex items-start gap-1.5">
+                        <Landmark className="h-3.5 w-3.5 text-blue-600 shrink-0 mt-0.5" />
                         <div>
-                          <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                            حساب الخزينة / الكارت المستلم للرصيد:
-                          </label>
-                          <select
-                            value={disburseAccountId}
-                            onChange={(e) => {
-                              setDisburseAccountId(e.target.value);
-                              const acc = companyAccounts.find(a => a.id === e.target.value);
-                              if (acc) setPaymentMethod(mapAccountTypeToPaymentMethod(acc.type));
-                            }}
-                            className="w-full p-2.5 bg-white border border-emerald-300 rounded-lg text-xs font-medium"
-                          >
-                            {companyAccounts.map(acc => (
-                              <option key={acc.id} value={acc.id}>
-                                {acc.name} ({acc.accountIdentifier}) - رصيده الحالي: {(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency || 'EGP'}
-                              </option>
-                            ))}
-                          </select>
-                          {(() => {
-                            const acc = companyAccounts.find(a => a.id === disburseAccountId) || companyAccounts[0];
-                            const parentBank = resolveParentBankAccount(acc);
-                            if (!parentBank) return null;
-                            return (
-                              <div className="mt-1.5 p-2 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 text-[11px] flex items-start gap-1.5">
-                                <Landmark className="h-3.5 w-3.5 text-blue-600 shrink-0 mt-0.5" />
-                                <div>
-                                  <span className="font-bold block">إيداع بنكي مزدوج تلقائي:</span>
-                                  <span className="text-[10.5px] text-blue-800 leading-relaxed">
-                                    حساب ({acc?.name}) مربوط بالحساب البنكي (<strong>{parentBank.name}</strong>). سيتم إضافة المبلغ في الحسابين تلقائياً.
-                                  </span>
-                                </div>
-                              </div>
-                            );
-                          })()}
+                          <span className="font-bold block">{isIncome ? 'إيداع بنكي مزدوج تلقائي:' : 'خصم بنكي مزدوج تلقائي:'}</span>
+                          <span className="text-[10.5px] text-blue-800 leading-relaxed">
+                            {isIncome
+                              ? <>حساب ({selectedDisburseAccount.name}) مربوط بالحساب البنكي (<strong>{selectedDisburseParent.name}</strong>). سيتم إضافة المبلغ في الحسابين تلقائياً.</>
+                              : <>حساب ({selectedDisburseAccount.name}) مربوط بالحساب البنكي (<strong>{selectedDisburseParent.name}</strong> — رصيده {fmtMoney(accountBalance(selectedDisburseParent))} {currencyCode(selectedDisburseParent.currency)}). سيتم خصم مبلغ الصرف تلقائياً من هذا الحساب ومن الحساب البنكي معاً، ويجب أن يكفي رصيد الاثنين.</>}
+                          </span>
                         </div>
+                      </div>
+                    )}
+                    {disburseShortfall && (
+                      <div role="alert" className="mt-1.5 p-2 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-[11px] font-bold flex items-start gap-1.5">
+                        <AlertTriangle className="h-3.5 w-3.5 text-rose-600 shrink-0 mt-0.5" />
+                        <span>{disburseShortfall}</span>
+                      </div>
+                    )}
+                  </div>
 
-                        <div>
-                          <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                            رقم إيصال / مرجع التوريد:
-                          </label>
-                          <input
-                            type="text"
-                            required
-                            value={referenceNumber}
-                            onChange={(e) => setReferenceNumber(e.target.value)}
-                            className="w-full p-2.5 bg-white border border-emerald-300 rounded-lg text-xs font-mono font-bold"
-                          />
-                        </div>
+                  {isIncome ? (
+                    <>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          رقم إيصال / مرجع التوريد:
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={referenceNumber}
+                          onChange={(e) => setReferenceNumber(e.target.value)}
+                          className="w-full p-2.5 bg-white border border-emerald-300 rounded-lg text-xs font-mono font-bold"
+                        />
                       </div>
 
                       <div>
@@ -1293,75 +1359,16 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           className="w-full p-2.5 bg-white border border-emerald-200 rounded-lg text-xs"
                         />
                       </div>
-
-                      <div className="flex justify-end gap-2 pt-2">
-                        <button
-                          type="button"
-                          onClick={() => setActiveAction('none')}
-                          className="px-3.5 py-2 text-xs text-slate-600 hover:bg-slate-100 rounded-lg cursor-pointer"
-                        >
-                          إلغاء
-                        </button>
-                        <button
-                          type="submit"
-                          disabled={isSubmitting}
-                          className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl shadow-sm flex items-center gap-1.5 transition cursor-pointer"
-                        >
-                          <CheckCircle2 className="h-4 w-4" />
-                          <span>{isSubmitting ? 'جارٍ توريد المبلغ...' : `✓ تأكيد الاستلام والتوريد في الرصيد الآن (+ ${request.amount.toLocaleString()} ${request.currency})`}</span>
-                        </button>
-                      </div>
                     </>
                   ) : (
-                    /* Expense disburse form */
+                    /* Expense disburse details */
                     <>
-                      {/* Account selection for expense */}
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                          حساب / خزينة الصرف المحول منه (- OUT):
-                        </label>
-                        <select
-                          value={disburseAccountId}
-                          onChange={(e) => {
-                            setDisburseAccountId(e.target.value);
-                            const acc = companyAccounts.find(a => a.id === e.target.value);
-                            if (acc) {
-                              setBankName(`${acc.name} (${acc.accountIdentifier})`);
-                              setPaymentMethod(mapAccountTypeToPaymentMethod(acc.type));
-                            }
-                          }}
-                          className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-xs font-bold"
-                        >
-                          {companyAccounts.map(acc => (
-                            <option key={acc.id} value={acc.id}>
-                              {acc.name} — {acc.type === 'bank' ? 'حساب بنكي' : acc.type === 'instapay' ? 'انستاباي' : 'خزينة'} ({acc.accountIdentifier}) - الرصيد: {(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency || 'EGP'}
-                            </option>
-                          ))}
-                        </select>
-                        {(() => {
-                          const acc = companyAccounts.find(a => a.id === disburseAccountId) || companyAccounts[0];
-                          const parentBank = resolveParentBankAccount(acc);
-                          if (!parentBank) return null;
-                          return (
-                            <div className="mt-1.5 p-2 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 text-[11px] flex items-start gap-1.5">
-                              <Landmark className="h-3.5 w-3.5 text-blue-600 shrink-0 mt-0.5" />
-                              <div>
-                                <span className="font-bold block">خصم بنكي مزدوج تلقائي:</span>
-                                <span className="text-[10.5px] text-blue-800 leading-relaxed">
-                                  حساب ({acc?.name}) مربوط بالحساب البنكي (<strong>{parentBank.name}</strong>). سيتم خصم مبلغ الصرف تلقائياً من هذا الحساب ومن الحساب البنكي الرئيسي معاً.
-                                </span>
-                              </div>
-                            </div>
-                          );
-                        })()}
-                      </div>
-
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <div>
                           <label className="block text-[11px] font-bold text-slate-600 mb-1">طريقة الدفع:</label>
                           <select
                             value={paymentMethod}
-                            onChange={(e: any) => setPaymentMethod(e.target.value)}
+                            onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}
                             className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold"
                           >
                             <option value="bank_transfer">تحويل بنكي</option>
@@ -1389,6 +1396,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                             type="text"
                             value={bankName}
                             onChange={(e) => setBankName(e.target.value)}
+                            placeholder={selectedDisburseAccount ? `${selectedDisburseAccount.name} (${selectedDisburseAccount.accountIdentifier})` : ''}
                             className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs"
                           />
                         </div>
@@ -1404,32 +1412,46 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs"
                         />
                       </div>
-
-                      <div className="flex justify-end gap-2 pt-1">
-                        <button
-                          type="button"
-                          onClick={() => setActiveAction('none')}
-                          className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
-                        >
-                          إلغاء
-                        </button>
-                        <button
-                          type="submit"
-                          disabled={isSubmitting}
-                          className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg"
-                        >
-                          {isSubmitting ? 'جارٍ تسجيل الصرف...' : 'تأكيد الصرف وإغلاق الطلب'}
-                        </button>
-                      </div>
                     </>
                   )}
+
+                  {actionError && actionError !== disburseShortfall && (
+                    <p role="alert" className="text-[11px] font-bold text-rose-700">⚠️ {actionError}</p>
+                  )}
+
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setActiveAction('none')}
+                      className="px-3.5 py-2 text-xs text-slate-600 hover:bg-slate-100 rounded-lg cursor-pointer"
+                    >
+                      إلغاء
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSubmitting || !selectedDisburseAccount || Boolean(disburseShortfall)}
+                      title={disburseShortfall || undefined}
+                      className={`px-5 py-2 text-white font-black text-xs rounded-xl shadow-sm flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                        isIncome ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-blue-600 hover:bg-blue-700'
+                      }`}
+                    >
+                      {isIncome ? (
+                        <>
+                          <CheckCircle2 className="h-4 w-4" />
+                          <span>{isSubmitting ? 'جارٍ توريد المبلغ...' : `✓ تأكيد الاستلام والتوريد في الرصيد الآن (+ ${fmtMoney(request.amount)} ${currencyCode(request.currency)})`}</span>
+                        </>
+                      ) : (
+                        <span>{isSubmitting ? 'جارٍ تسجيل الصرف...' : 'تأكيد الصرف وإغلاق الطلب'}</span>
+                      )}
+                    </button>
+                  </div>
                 </form>
               )}
             </div>
           )}
 
-          {/* Requester Action: Reply if clarification requested */}
-          {(currentRole === 'employee' || request.requesterId === currentUser.id || (request.requesterEmail && currentUser.email && request.requesterEmail.toLowerCase() === currentUser.email.toLowerCase())) && request.status === 'clarification_requested' && (
+          {/* Requester Action: Reply if clarification requested (the domain accepts only the requester) */}
+          {isRequester && request.status === 'clarification_requested' && (
             <div className="pt-4 border-t border-slate-100">
               <form onSubmit={handleReply} className="p-4 bg-rose-50/70 border border-rose-300 rounded-xl space-y-3">
                 <h5 className="font-bold text-rose-900 text-xs">الرد على طلب التوضيح وتقديم المستندات:</h5>
@@ -1437,7 +1459,10 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                   rows={2}
                   required
                   value={replyText}
-                  onChange={(e) => setReplyText(e.target.value)}
+                  onChange={(e) => {
+                    setReplyText(e.target.value);
+                    if (actionError) setActionError(null);
+                  }}
                   placeholder="اكتب ردك وتوضيحك لمدير المؤسسة..."
                   className="w-full p-2.5 bg-white border border-rose-300 rounded-lg text-xs"
                 />
@@ -1448,14 +1473,22 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                   placeholder="اسم الملف المرفق الإضافي (اختياري)..."
                   className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs"
                 />
+                {canEdit && (
+                  <p className="text-[11px] text-rose-800">
+                    لإرفاق المستند المطلوب نفسه (مثل عرض السعر أو الفاتورة) استخدم زر «✏️ تعديل الطلب» أعلاه وأضفه للطلب، ثم أرسل ردك.
+                  </p>
+                )}
+                {actionError && (
+                  <p role="alert" className="text-[11px] font-bold text-rose-700">⚠️ {actionError}</p>
+                )}
                 <div className="flex justify-end">
                   <button
                     type="submit"
                     disabled={isActionPending('reply')}
-                    className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5"
+                    className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-60"
                   >
                     <Send className="h-3.5 w-3.5" />
-                    <span>إرسال الرد للمدير</span>
+                    <span>{isActionPending('reply') ? 'جاري إرسال الرد...' : 'إرسال الرد للمدير'}</span>
                   </button>
                 </div>
               </form>

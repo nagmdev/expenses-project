@@ -1,7 +1,6 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
-  DollarSign, 
   TrendingUp, 
   Clock, 
   AlertCircle, 
@@ -16,7 +15,6 @@ import {
   ChevronDown,
   X,
   RotateCcw,
-  CalendarRange,
   Wallet
 } from 'lucide-react';
 import { 
@@ -28,22 +26,35 @@ import {
   Tooltip, 
   PieChart, 
   Pie, 
-  Cell, 
-  Legend 
+  Cell 
 } from 'recharts';
-import { ExpenseRequest } from '../types';
+import { ExpenseRequest, isServiceMatchingOrg } from '../types';
 
 interface DashboardAnalyticsProps {
   onSelectRequest: (request: ExpenseRequest) => void;
   onOpenNewRequest: () => void;
 }
 
+// Amounts always in Western digits, whatever the browser locale.
+const fmtNum = (value: unknown) => {
+  const n = Number(value);
+  return (Number.isFinite(n) ? n : 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+};
+
+/**
+ * The LOCAL calendar day (YYYY-MM-DD) of a stored date. A plain date ("2026-09-30") is used
+ * as-is; a timestamp (stored in UTC) is converted first, so a disbursement at 01:30 Cairo
+ * time counts on that day and not on the previous (UTC) one.
+ */
 const getNormalizedDateStr = (dateVal: string | undefined): string | null => {
   if (!dateVal) return null;
-  const match = String(dateVal).match(/^(\d{4}-\d{2}-\d{2})/);
-  if (match) return match[1];
+  const plain = String(dateVal).match(/^(\d{4}-\d{2}-\d{2})$/);
+  if (plain) return plain[1];
   const d = new Date(dateVal);
-  if (isNaN(d.getTime())) return null;
+  if (isNaN(d.getTime())) {
+    const match = String(dateVal).match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : null;
+  }
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
@@ -68,8 +79,7 @@ const formatDateArabic = (dateStr: string) => {
 };
 
 export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({ 
-  onSelectRequest, 
-  onOpenNewRequest 
+  onSelectRequest 
 }) => {
   const { 
     activeOrg, 
@@ -140,7 +150,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
   }, [isSuperAdmin, activeOrgId, allCustodySettlements, custodySettlements]);
 
   const currentOrgServices = useMemo(() => {
-    return isSuperAdmin ? (activeOrgId === 'all' ? allServices : allServices.filter(s => !s.orgIds || s.orgIds.includes(activeOrgId))) : services;
+    return isSuperAdmin ? (activeOrgId === 'all' ? allServices : allServices.filter(s => isServiceMatchingOrg(s, activeOrgId))) : services;
   }, [isSuperAdmin, activeOrgId, allServices, services]);
 
   const currentOrgProviders = useMemo(() => {
@@ -183,7 +193,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
     return `${year}-${month}-${day}`;
   }, []);
 
-  const isDateInTimeFilter = (dateStr: string | undefined): boolean => {
+  const isDateInTimeFilter = useCallback((dateStr: string | undefined): boolean => {
     if (timeFilter === 'all') return true;
     const normalized = getNormalizedDateStr(dateStr);
     if (!normalized) return false;
@@ -206,7 +216,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
       return true;
     }
     return true;
-  };
+  }, [timeFilter, todayStr, specificDate, startDate, endDate]);
 
   // Filter requests reactively according to selected time frame or specific date
   const filteredRequests = useMemo(() => {
@@ -215,7 +225,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
       const dateToCheck = req.disbursement?.disbursedAt || req.createdAt;
       return isDateInTimeFilter(dateToCheck);
     });
-  }, [targetRequests, timeFilter, specificDate, startDate, endDate, todayStr]);
+  }, [targetRequests, timeFilter, isDateInTimeFilter]);
 
   // Filter custody settlements reactively according to selected time frame or specific date
   const filteredSettlements = useMemo(() => {
@@ -224,7 +234,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
       const dateToCheck = stl.invoiceDate || stl.createdAt;
       return isDateInTimeFilter(dateToCheck);
     });
-  }, [targetSettlements, timeFilter, specificDate, startDate, endDate, todayStr]);
+  }, [targetSettlements, timeFilter, isDateInTimeFilter]);
 
   // Filter issued custodies reactively according to selected time frame or specific date
   const filteredCustodies = useMemo(() => {
@@ -233,7 +243,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
       const dateToCheck = cus.issuedAt || cus.createdAt;
       return isDateInTimeFilter(dateToCheck);
     });
-  }, [targetCustodies, timeFilter, specificDate, startDate, endDate, todayStr]);
+  }, [targetCustodies, timeFilter, isDateInTimeFilter]);
 
   // Financial Metrics
   const disbursedRequests = filteredRequests.filter(r => r.status === 'disbursed');
@@ -259,6 +269,11 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
   const activeCustodies = filteredCustodies.filter(c => c.status === 'active');
   const totalActiveCustodiesRemaining = activeCustodies.reduce((sum, c) => sum + Number(c.remainingAmount || 0), 0);
   const totalCustodiesIssued = filteredCustodies.reduce((sum, c) => sum + Number(c.totalAmount || 0), 0);
+  // The custody widget reconciles on the same custodies: issued = still with employees
+  // + settled by invoices + returned to the treasury (returnCustodyRemainders).
+  const totalCustodiesSettledByInvoices = filteredCustodies.reduce((sum, c) => sum + Number(c.settledAmount || 0), 0);
+  const totalCustodiesReturned = filteredCustodies.reduce((sum, c) => sum + Number(c.returnedAmount || 0), 0);
+  const totalCustodiesInHand = filteredCustodies.reduce((sum, c) => sum + Math.max(0, Number(c.remainingAmount || 0)), 0);
 
   // Total budget
   const totalBudget = activeOrgId === 'all' 
@@ -710,13 +725,13 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
           </div>
           <div className="mt-3">
             <div className="text-2xl font-black text-slate-900">
-              {totalActualExpenses.toLocaleString()} <span className="text-sm font-semibold text-slate-500">{currency}</span>
+              {fmtNum(totalActualExpenses)} <span className="text-sm font-semibold text-slate-500">{currency}</span>
             </div>
             <div className="text-[11px] text-emerald-700 font-semibold mt-1.5 flex items-center gap-1.5 flex-wrap">
-              <span>{disbursedRequests.length} طلبات صرف ({totalDisbursedRequests.toLocaleString()} {currency})</span>
+              <span>{disbursedRequests.length} طلبات صرف ({fmtNum(totalDisbursedRequests)} {currency})</span>
               {totalSettledCustodies > 0 && (
                 <span className="bg-emerald-100/80 text-emerald-900 px-1.5 py-0.5 rounded-md font-bold">
-                  + {filteredSettlements.length} فواتير تصفية عُهد ({totalSettledCustodies.toLocaleString()} {currency})
+                  + {filteredSettlements.length} فواتير تصفية عُهد ({fmtNum(totalSettledCustodies)} {currency})
                 </span>
               )}
             </div>
@@ -734,7 +749,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
           </div>
           <div className="mt-3">
             <div className="text-2xl font-black text-slate-900">
-              {totalApprovedAwaitingDisbursement.toLocaleString()} <span className="text-sm font-semibold text-slate-500">{currency}</span>
+              {fmtNum(totalApprovedAwaitingDisbursement)} <span className="text-sm font-semibold text-slate-500">{currency}</span>
             </div>
             <div className="text-xs text-blue-600 font-semibold mt-1 flex items-center gap-1">
               <span>{approvedRequests.length} طلبات جاهزة للصرف المالي</span>
@@ -753,7 +768,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
           </div>
           <div className="mt-3">
             <div className="text-2xl font-black text-slate-900">
-              {totalPending.toLocaleString()} <span className="text-sm font-semibold text-slate-500">{currency}</span>
+              {fmtNum(totalPending)} <span className="text-sm font-semibold text-slate-500">{currency}</span>
             </div>
             <div className="text-xs text-amber-600 font-semibold mt-1 flex items-center gap-1">
               <span>{pendingRequests.length} طلبات جديدة تحت المراجعة</span>
@@ -776,7 +791,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
                 %{budgetUtilization}
               </div>
               <span className="text-xs text-slate-400 font-medium">
-                المتبقي: {remainingBudget.toLocaleString()} {currency}
+                المتبقي: {fmtNum(remainingBudget)} {currency}
               </span>
             </div>
             {/* Progress bar */}
@@ -806,28 +821,35 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
               </span>
             </h4>
             <p className="text-xs text-slate-300 mt-0.5">
-              متابعة مباشرة للعهد المنصرفة، المتبقي قيد التصفية، والمصروفات المسواة فعلياً بالفواتير.
+              متابعة مباشرة للعهد المنصرفة، المتبقي قيد التصفية، المصروفات المسواة فعلياً بالفواتير، وما رُدّ منها للخزينة.
             </p>
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-3 divide-x divide-x-reverse divide-white/10 text-center">
+        {/* issued = with employees + settled by invoices + returned to the treasury */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:divide-x sm:divide-x-reverse divide-white/10 text-center">
           <div className="px-2">
             <span className="text-[10.5px] text-slate-300 block">إجمالي المنصرف كعُهد</span>
             <span className="text-sm sm:text-base font-black text-white">
-              {totalCustodiesIssued.toLocaleString()} <span className="text-[10px] font-normal text-slate-300">{currency}</span>
+              {fmtNum(totalCustodiesIssued)} <span className="text-[10px] font-normal text-slate-300">{currency}</span>
             </span>
           </div>
           <div className="px-2">
             <span className="text-[10.5px] text-amber-300 block">جارية مع الموظفين</span>
             <span className="text-sm sm:text-base font-black text-amber-400">
-              {totalActiveCustodiesRemaining.toLocaleString()} <span className="text-[10px] font-normal text-amber-200">{currency}</span>
+              {fmtNum(totalCustodiesInHand)} <span className="text-[10px] font-normal text-amber-200">{currency}</span>
             </span>
           </div>
           <div className="px-2">
             <span className="text-[10.5px] text-emerald-300 block">مسواة بفواتير (مصروف)</span>
             <span className="text-sm sm:text-base font-black text-emerald-400">
-              {totalSettledCustodies.toLocaleString()} <span className="text-[10px] font-normal text-emerald-200">{currency}</span>
+              {fmtNum(totalCustodiesSettledByInvoices)} <span className="text-[10px] font-normal text-emerald-200">{currency}</span>
+            </span>
+          </div>
+          <div className="px-2">
+            <span className="text-[10.5px] text-teal-300 block">مُردة للخزينة</span>
+            <span className="text-sm sm:text-base font-black text-teal-300">
+              {fmtNum(totalCustodiesReturned)} <span className="text-[10px] font-normal text-teal-200">{currency}</span>
             </span>
           </div>
         </div>
@@ -885,11 +907,11 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
                       const req = item?.payload?.requestsSpent || 0;
                       const cus = item?.payload?.custodySpent || 0;
                       return [
-                        `${Number(value).toLocaleString()} ${currency} (طلبات: ${req.toLocaleString()} + عُهد: ${cus.toLocaleString()})`, 
+                        `${fmtNum(Number(value))} ${currency} (طلبات: ${fmtNum(req)} + عُهد: ${fmtNum(cus)})`, 
                         'المصروف الفعلي'
                       ];
                     }
-                    return [`${Number(value).toLocaleString()} ${currency}`, 'الميزانية المخصصة'];
+                    return [`${fmtNum(Number(value))} ${currency}`, 'الميزانية المخصصة'];
                   }}
                   labelFormatter={(label, payload) => {
                     const item = payload?.[0]?.payload;
@@ -977,7 +999,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
                 </div>
                 <div className="text-left">
                   <div className="font-extrabold text-slate-900 text-sm">
-                    {prov.paid.toLocaleString()} {currency}
+                    {fmtNum(prov.paid)} {currency}
                   </div>
                   <span className="text-[11px] text-emerald-600 font-medium">مدفوع ومسوى</span>
                 </div>
@@ -1023,7 +1045,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
 
                 <div className="text-left shrink-0">
                   <div className="font-black text-slate-900 text-base">
-                    {req.amount.toLocaleString()} {req.currency}
+                    {fmtNum(req.amount)} {req.currency}
                   </div>
                   <span className="text-xs font-semibold text-emerald-600 flex items-center gap-0.5 hover:underline">
                     <span>مراجعة والبت</span>

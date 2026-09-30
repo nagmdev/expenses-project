@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
   X, 
   Flame, 
@@ -22,6 +22,7 @@ import {
   initFirebase,
   FirebaseConfig 
 } from '../lib/firebase';
+import { copyTextToClipboard } from '../utils/requestUi';
 
 interface FirebaseConfigModalProps {
   isOpen: boolean;
@@ -45,12 +46,14 @@ export const FirebaseConfigModal: React.FC<FirebaseConfigModalProps> = ({
   
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
-  const [copiedVar, setCopiedVar] = useState<string | null>(null);
+  // The last copy attempt: `ok` false when the browser refused the clipboard write.
+  const [copiedVar, setCopiedVar] = useState<{ key: string; ok: boolean } | null>(null);
 
-  // Sync state whenever modal is opened
-  useEffect(() => {
-    if (!isOpen) return;
-    const cfg = getFirebaseConfig();
+  // Reload the saved configuration each time the modal opens (adjusted during render, no effect).
+  const [wasOpen, setWasOpen] = useState(isOpen);
+  if (isOpen !== wasOpen) {
+    setWasOpen(isOpen);
+    const cfg = isOpen ? getFirebaseConfig() : null;
     if (cfg) {
       setApiKey(cfg.apiKey || '');
       setAuthDomain(cfg.authDomain || '');
@@ -59,7 +62,7 @@ export const FirebaseConfigModal: React.FC<FirebaseConfigModalProps> = ({
       setMessagingSenderId(cfg.messagingSenderId || '');
       setAppId(cfg.appId || '');
     }
-  }, [isOpen]);
+  }
 
 
   if (!isOpen) return null;
@@ -184,9 +187,10 @@ export const FirebaseConfigModal: React.FC<FirebaseConfigModalProps> = ({
     }
   };
 
-  const copyToClipboard = (text: string, label: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedVar(label);
+  // Never reports "copied" when the browser refused the clipboard write.
+  const copyToClipboard = async (text: string, label: string) => {
+    const ok = await copyTextToClipboard(text);
+    setCopiedVar({ key: label, ok });
     setTimeout(() => setCopiedVar(null), 2000);
   };
 
@@ -521,16 +525,18 @@ export const FirebaseConfigModal: React.FC<FirebaseConfigModalProps> = ({
                       </div>
                       <button
                         type="button"
-                        onClick={() => copyToClipboard(item.key, item.key)}
+                        onClick={() => void copyToClipboard(item.key, item.key)}
                         className="p-1 text-slate-400 hover:text-emerald-600 transition flex items-center gap-1"
                         title="نسخ اسم المتغير"
                       >
-                        {copiedVar === item.key ? (
+                        {copiedVar?.key === item.key && copiedVar.ok ? (
                           <Check className="h-3.5 w-3.5 text-emerald-600" />
                         ) : (
                           <Copy className="h-3.5 w-3.5" />
                         )}
-                        <span className="text-[10px]">{copiedVar === item.key ? 'تم النسخ' : 'نسخ'}</span>
+                        <span className={`text-[10px] ${copiedVar?.key === item.key && !copiedVar.ok ? 'text-rose-600 font-bold' : ''}`}>
+                          {copiedVar?.key === item.key ? (copiedVar.ok ? 'تم النسخ' : 'تعذر النسخ، انسخه يدوياً') : 'نسخ'}
+                        </span>
                       </button>
                     </div>
                   ))}

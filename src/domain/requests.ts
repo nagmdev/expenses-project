@@ -14,15 +14,19 @@ import { idFromKey } from '../utils/ids';
 import {
   COL,
   DomainError,
+  assertOrgWritable,
   assertRole,
   normalizeEmail,
   pad,
+  paymentMethodLabel,
+  roleLabel,
   readCounter,
   timelineTimestamp,
   toMoney,
   writeAudit,
   writeCounter,
   type Actor,
+  formatAmount,
 } from './common';
 import { buildOutboxEvent, enqueueOutbox, outboxEventId } from './outbox';
 import type { DataStore } from './store';
@@ -87,6 +91,7 @@ export async function createExpenseRequest(
       // Retry / double submit of the same intent: return the record created the first time.
       return { value: existing, changed: false, reason: 'duplicate_operation', outboxEventIds: [] };
     }
+    await assertOrgWritable(tx, draft.orgId);
     const counter = await readCounter(tx, `requests-${year}`);
 
     const request: ExpenseRequest & { operationKey: string } = {
@@ -105,7 +110,7 @@ export async function createExpenseRequest(
           status: 'created',
           title: isIncome ? 'تم إنشاء وتقديم طلب توريد / تحصيل مالي' : 'تم إنشاء وتقديم طلب الصرف',
           description: draft.paymentAccountDetails
-            ? `طريقة التحويل: ${draft.preferredPaymentMethod || 'انستاباي'} (${draft.paymentAccountDetails})`
+            ? `طريقة التحويل: ${paymentMethodLabel(draft.preferredPaymentMethod || 'instapay')} (${draft.paymentAccountDetails})`
             : isIncome
             ? 'تم إرسال طلب التوريد للمراجعة والاستلام المالي'
             : 'تم إرسال الطلب للاعتماد المالي والإداري',
@@ -317,7 +322,7 @@ export async function transitionExpenseRequest(
             id: `cmt-${operationKey}`,
             authorId: actor.id,
             authorName: actor.name,
-            authorRole: 'مدير المؤسسة',
+            authorRole: roleLabel(actor.role),
             content: action.note.trim(),
             type: 'internal_note',
             createdAt: nowIso,
@@ -333,7 +338,7 @@ export async function transitionExpenseRequest(
           id: `cmt-${operationKey}`,
           authorId: actor.id,
           authorName: actor.name,
-          authorRole: 'مدير المؤسسة',
+          authorRole: roleLabel(actor.role),
           content: `سبب الرفض: ${action.reason.trim()}`,
           type: 'internal_note',
           createdAt: nowIso,
@@ -347,7 +352,7 @@ export async function transitionExpenseRequest(
           id: `cmt-${operationKey}`,
           authorId: actor.id,
           authorName: actor.name,
-          authorRole: 'مدير المؤسسة',
+          authorRole: roleLabel(actor.role),
           content: action.question.trim(),
           type: 'clarification_request',
           createdAt: nowIso,
@@ -429,15 +434,6 @@ export interface DisburseInput extends Omit<DisbursementDetails, 'disbursedAt' |
   batchId?: string;
 }
 
-const METHOD_LABELS: Record<string, string> = {
-  instapay: 'انستاباي (InstaPay)',
-  bank_transfer: 'تحويل بنكي',
-  digital_wallet: 'محفظة إلكترونية',
-  wallet: 'محفظة إلكترونية',
-  cash: 'نقداً / خزينة',
-  cheque: 'شيك مصرفي',
-};
-
 export async function disburseExpenseRequest(
   store: DataStore,
   actor: Actor,
@@ -505,7 +501,7 @@ export async function disburseExpenseRequest(
       nowIso,
     });
 
-    const methodLabel = METHOD_LABELS[input.paymentMethod] || 'شيك مصرفي';
+    const methodLabel = paymentMethodLabel(input.paymentMethod);
     const disbursement: DisbursementDetails & { batchId?: string; operationKey: string } = {
       paymentMethod: input.paymentMethod,
       referenceNumber: input.referenceNumber.trim(),
@@ -551,7 +547,7 @@ export async function disburseExpenseRequest(
         entityName: req.requestNumber,
         orgId: req.orgId,
         orgName: notify.org?.name,
-        details: `${isIncome ? 'تأكيد توريد' : 'صرف'} الطلب ${req.requestNumber} بمبلغ ${amount.toLocaleString()} ${reqCurrency} عبر "${account.name}" (مرجع: ${disbursement.referenceNumber}${input.batchId ? ` | دفعة مجمعة ${input.batchId}` : ''})`,
+        details: `${isIncome ? 'تأكيد توريد' : 'صرف'} الطلب ${req.requestNumber} بمبلغ ${formatAmount(amount)} ${reqCurrency} عبر "${account.name}" (مرجع: ${disbursement.referenceNumber}${input.batchId ? ` | دفعة مجمعة ${input.batchId}` : ''})`,
       },
       `audit-disburse-${requestId}`,
       nowIso,

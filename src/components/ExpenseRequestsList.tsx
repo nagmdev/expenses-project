@@ -8,29 +8,22 @@ import {
   CheckCircle2, 
   XCircle, 
   AlertCircle, 
-  Eye, 
-  Check, 
-  Layers,
+  Eye,
+  Check,
   Building,
-  Calendar,
   CreditCard,
   Copy,
   Printer,
   Smartphone,
   ShieldCheck,
-  Send,
   HelpCircle,
   X,
   FileText,
   User as UserIcon,
-  Tag,
   Flame,
-  Filter,
   Download,
   QrCode,
   Zap,
-  CheckSquare,
-  Square,
   FileSpreadsheet,
   ArrowDownLeft,
   Landmark,
@@ -41,7 +34,26 @@ import {
 import { NewRequestModal } from './NewRequestModal';
 import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { newOperationKey } from '../utils/ids';
+import { can } from '../utils/permissions';
+import {
+  accountBalance,
+  accountTypeLabel,
+  accountTypeToPaymentMethod,
+  accountsForRequest,
+  copyTextToClipboard,
+  currencyCode,
+  fmtMoney,
+  formatLocalDate,
+  formatLocalDateTime,
+  incomeMethodLabel,
+  insufficientBalanceMessage,
+  localToday,
+  paymentMethodLabel,
+  pickDisbursementAccount,
+  resolveRequestPaymentMethod,
+} from '../utils/requestUi';
 
 const errorText = (err: unknown, fallback: string) =>
   err instanceof Error && err.message ? err.message : fallback;
@@ -51,6 +63,50 @@ const newBatchRef = (key: string = newOperationKey()) => `BATCH-${key.replace(/-
 /** Deterministic per-request idempotency key inside one batch (must match /^[A-Za-z0-9_-]{8,128}$/). */
 const batchItemKey = (batchKey: string, requestId: string) =>
   `${batchKey}__${requestId}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 128);
+
+type QrModule = typeof import('qrcode');
+
+/**
+ * The payment QR code, drawn in the browser by the "qrcode" package (loaded on first
+ * use). The payee's account data never leaves the app — no third-party QR service.
+ * Rendered with key={value}, so a new value starts from a fresh (loading) state.
+ */
+const PaymentQrCode: React.FC<{ value: string }> = ({ value }) => {
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    import('qrcode')
+      .then((mod: QrModule & { default?: QrModule }) => (mod.default ?? mod).toDataURL(value, { width: 440, margin: 1, errorCorrectionLevel: 'M' }))
+      .then(url => {
+        if (!cancelled) setDataUrl(url);
+      })
+      .catch(err => {
+        console.error('[PaymentQrCode] QR generation failed:', err);
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [value]);
+
+  if (failed) {
+    return (
+      <div role="alert" className="w-48 h-48 sm:w-52 sm:h-52 mx-auto flex items-center justify-center text-center text-xs font-bold text-rose-700 p-3">
+        تعذر إنشاء رمز QR على هذا الجهاز. استخدم زر «نسخ البيانات» بالأسفل.
+      </div>
+    );
+  }
+  if (!dataUrl) {
+    return (
+      <div className="w-48 h-48 sm:w-52 sm:h-52 mx-auto flex items-center justify-center text-xs text-slate-400 bg-slate-100 rounded-lg animate-pulse">
+        جاري إنشاء الرمز...
+      </div>
+    );
+  }
+  return <img src={dataUrl} alt={`رمز QR لبيانات الدفع: ${value}`} className="w-48 h-48 sm:w-52 sm:h-52 mx-auto object-contain" />;
+};
 
 interface ExpenseRequestsListProps {
   onSelectRequest: (request: ExpenseRequest) => void;
@@ -67,8 +123,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     requests, 
     allRequests,
     organizations,
-    allOrganizations,
-    activeOrg, 
+    activeOrg,  
     activeOrgId, 
     services, 
     providers, 
@@ -87,12 +142,16 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     return (isSuperAdmin && activeOrgId === 'all') ? (allRequests && allRequests.length > 0 ? allRequests : requests) : requests;
   }, [isSuperAdmin, activeOrgId, allRequests, requests]);
 
-  const canApprove = currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance';
+  // Each action only for the roles the domain (and firestore.rules) accept.
+  const canApprove = can(currentRole, 'approveRequests');
+  const canReject = can(currentRole, 'rejectRequests');
+  const canClarify = can(currentRole, 'clarifyRequests');
+  const canDisburse = can(currentRole, 'disburseRequests');
 
   const [editingRequest, setEditingRequest] = useState<ExpenseRequest | null>(null);
   const [selectedReqId, setSelectedReqId] = useState<string | null>(null);
-  const [copiedText, setCopiedText] = useState(false);
-  const [copiedItemId, setCopiedItemId] = useState<string | null>(null);
+  // Result of the last copy button press (never "copied" when the browser refused it)
+  const [copyState, setCopyState] = useState<{ id: string; ok: boolean } | null>(null);
   const [previewInvoice, setPreviewInvoice] = useState<InvoiceViewerAttachment | null>(null);
 
   // Search and Rich Filter States
@@ -130,12 +189,14 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   const [approvalNote, setApprovalNote] = useState('');
   const [rejectionReason, setRejectionReason] = useState('');
   const [clarificationQuestion, setClarificationQuestion] = useState('');
+  // Inline message of the open action panel (an empty reason / question never fails silently)
+  const [inlineError, setInlineError] = useState<string | null>(null);
 
   // Disbursement States
+  // '' = the default account picked for the request (pickDisbursementAccount), shown selected.
   const [disburseAccountId, setDisburseAccountId] = useState<string>('');
-  const [disburseMethod, setDisburseMethod] = useState<PaymentMethod>('instapay');
+  const [disburseMethod, setDisburseMethod] = useState<PaymentMethod>('bank_transfer');
   const [disburseRefNumber, setDisburseRefNumber] = useState(`TXN-${Math.floor(10000000 + Math.random() * 90000000)}`);
-  const [disburseBankName, setDisburseBankName] = useState('انستاباي / المصرف الرئيسي');
   const [disburseNotes, setDisburseNotes] = useState('');
   // Per-request action locks + idempotency keys (scope = `${action}:${requestId}`)
   const actionGuard = useKeyedSubmitGuard();
@@ -203,8 +264,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
       // Urgency
       if (urgencyFilter !== 'all' && req.urgency !== urgencyFilter) return false;
 
-      // Payment Method
-      if (paymentMethodFilter !== 'all' && req.preferredPaymentMethod !== paymentMethodFilter) return false;
+      // Payment Method (the same resolved method the badge shows, also for older records without one)
+      if (paymentMethodFilter !== 'all' && resolveRequestPaymentMethod(req) !== paymentMethodFilter) return false;
 
       // Date Period
       if (datePeriodFilter !== 'all') {
@@ -214,8 +275,9 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
         if (datePeriodFilter === 'week' && diffHours > 24 * 7) return false;
         if (datePeriodFilter === 'month' && diffHours > 24 * 30) return false;
         if (datePeriodFilter === 'specific' && specificDateFilter) {
-          const reqCreated = String(req.createdAt).startsWith(specificDateFilter);
-          const reqDisbursed = req.disbursement?.disbursedAt ? String(req.disbursement.disbursedAt).startsWith(specificDateFilter) : false;
+          // Compared as local calendar days (createdAt is stored in UTC).
+          const reqCreated = formatLocalDate(req.createdAt) === specificDateFilter;
+          const reqDisbursed = req.disbursement?.disbursedAt ? formatLocalDate(req.disbursement.disbursedAt) === specificDateFilter : false;
           if (!reqCreated && !reqDisbursed) return false;
         }
       }
@@ -239,8 +301,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
       return true;
     });
   }, [
-    requests, 
-    statusFilter, 
+    targetRequests,
+    statusFilter,  
     categoryFilter, 
     providerFilter, 
     departmentFilter, 
@@ -257,14 +319,15 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     return filteredRequests.slice(0, visibleCount);
   }, [filteredRequests, visibleCount]);
 
-  // Selected Active Request for Deep Tracking Workspace
+  // Selected Active Request for Deep Tracking Workspace — always one of the listed results
+  // (a request the filters hide is not kept on screen next to "0 results").
   const activeRequest: ExpenseRequest | undefined = useMemo(() => {
     if (selectedReqId) {
-      const found = filteredRequests.find(r => r.id === selectedReqId) || targetRequests.find(r => r.id === selectedReqId);
+      const found = filteredRequests.find(r => r.id === selectedReqId);
       if (found) return found;
     }
     return filteredRequests[0];
-  }, [selectedReqId, filteredRequests, targetRequests]);
+  }, [selectedReqId, filteredRequests]);
 
   const canEditActive = useMemo(() => {
     if (!activeRequest) return false;
@@ -272,21 +335,44 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
       (currentUser.id === activeRequest.requesterId || currentUser.email === activeRequest.requesterEmail || isSuperAdmin || currentRole === 'org_admin');
   }, [activeRequest, currentUser, isSuperAdmin, currentRole]);
 
-  // Synchronize disburse method with request preference when activeRequest changes
+  // Another request selected: start its panels fresh, with the method the request asks for
+  // and its default account. Keyed on the id only: live balance updates must not reset the
+  // account the user picked or close an open panel.
+  const activeRequestId = activeRequest?.id;
+  const activeRequestMethod = activeRequest ? resolveRequestPaymentMethod(activeRequest) : 'bank_transfer';
+  // A card's quick action ("تم الاستلام") selects the request AND opens its panel: the
+  // panel to open survives the reset below.
+  const openAfterSelectRef = React.useRef<typeof activeAction | null>(null);
   React.useEffect(() => {
-    if (activeRequest?.preferredPaymentMethod) {
-      setDisburseMethod(activeRequest.preferredPaymentMethod);
-    }
-    if (activeRequest?.targetAccountId) {
-      setDisburseAccountId(activeRequest.targetAccountId);
-      const acc = paymentAccounts.find(a => a.id === activeRequest.targetAccountId);
-      if (acc) setDisburseBankName(`${acc.name} (${acc.accountIdentifier})`);
-    } else if (paymentAccounts.length > 0) {
-      setDisburseAccountId(paymentAccounts[0].id);
-      setDisburseBankName(`${paymentAccounts[0].name} (${paymentAccounts[0].accountIdentifier})`);
-    }
-    setActiveAction('none');
-  }, [activeRequest?.id, paymentAccounts]);
+    setDisburseMethod(activeRequestMethod);
+    setDisburseAccountId('');
+    setActiveAction(openAfterSelectRef.current ?? 'none');
+    openAfterSelectRef.current = null;
+    setInlineError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRequestId]);
+
+  // Accounts this request can be paid from / received into (its company, active, its currency).
+  const activeEligibleAccounts = useMemo(
+    () => (activeRequest ? accountsForRequest(paymentAccounts, activeRequest) : []),
+    [activeRequest, paymentAccounts],
+  );
+  const activeDisburseAccount = activeRequest
+    ? activeEligibleAccounts.find(a => a.id === disburseAccountId) ||
+      pickDisbursementAccount(activeEligibleAccounts, activeRequest, resolveParentBankAccount)
+    : null;
+  const activeDisburseParent = resolveParentBankAccount(activeDisburseAccount);
+  // No money operation takes an account below zero: refuse here already (the domain would).
+  const activeDisburseShortfall =
+    activeRequest && activeRequest.requestType !== 'income'
+      ? insufficientBalanceMessage(activeDisburseAccount, activeDisburseParent, activeRequest.amount)
+      : null;
+  const selectActiveDisburseAccount = (accountId: string) => {
+    setDisburseAccountId(accountId);
+    setInlineError(null);
+    const acc = activeEligibleAccounts.find(a => a.id === accountId);
+    if (acc) setDisburseMethod(accountTypeToPaymentMethod(acc.type));
+  };
 
   // Opening an action panel starts a new intent: give it a fresh idempotency key
   // (retries while the panel stays open keep reusing the same key).
@@ -297,19 +383,23 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     }
   }, [activeAction, activeRequest?.id, rotateActionKey]);
 
+  const toggleAction = (action: typeof activeAction) => {
+    setInlineError(null);
+    setActiveAction(prev => (prev === action ? 'none' : action));
+  };
+
   const disbursing = activeRequest ? actionGuard.isPending(`disburse:${activeRequest.id}`) : false;
 
-  // Copy Bank Account Details to Clipboard with Visual Feedback
-  const handleCopyAccountDetails = (text: string, itemId?: string) => {
+  // Copy the payee's account details; the button says "copied" only when the browser
+  // really wrote them, and tells the user to copy by hand when it refused.
+  const handleCopyAccountDetails = async (text: string, itemId: string) => {
     if (!text) return;
-    navigator.clipboard.writeText(text);
-    if (itemId) setCopiedItemId(itemId);
-    setCopiedText(true);
-    setTimeout(() => {
-      setCopiedText(false);
-      setCopiedItemId(null);
-    }, 2500);
+    const ok = await copyTextToClipboard(text);
+    setCopyState({ id: itemId, ok });
+    window.setTimeout(() => setCopyState(cur => (cur && cur.id === itemId ? null : cur)), ok ? 2500 : 4500);
   };
+  const copiedOk = (id: string) => copyState?.id === id && copyState.ok;
+  const copyFailed = (id: string) => copyState?.id === id && !copyState.ok;
 
   // Approved requests currently visible in filtered results
   const approvedRequestsInFilter = useMemo(() => {
@@ -318,12 +408,28 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
   // Selected approved requests objects for batch payment
   const selectedBatchRequests = useMemo(() => {
-    return requests.filter(r => selectedApprovedIds.includes(r.id) && r.status === 'approved');
-  }, [requests, selectedApprovedIds]);
+    return targetRequests.filter(r => selectedApprovedIds.includes(r.id) && r.status === 'approved');
+  }, [targetRequests, selectedApprovedIds]);
 
   const selectedBatchSum = useMemo(() => {
     return selectedBatchRequests.reduce((sum, r) => sum + r.amount, 0);
   }, [selectedBatchRequests]);
+
+  // The batch is paid from ONE account: of the batch's company and currency, and it must
+  // cover every expense in it (no account ever goes below zero).
+  const batchOrgIds = new Set(selectedBatchRequests.map(r => r.orgId));
+  const batchCurrencies = new Set(selectedBatchRequests.map(r => currencyCode(r.currency)));
+  const batchAccounts = paymentAccounts.filter(
+    a =>
+      a.active !== false &&
+      (batchOrgIds.size !== 1 || !a.orgId || batchOrgIds.has(a.orgId)) &&
+      (batchCurrencies.size !== 1 || batchCurrencies.has(currencyCode(a.currency))),
+  );
+  const batchAccount = batchAccounts.find(a => a.id === batchAccountId) || batchAccounts[0] || null;
+  const batchOutSum = selectedBatchRequests.filter(r => r.requestType !== 'income').reduce((sum, r) => sum + r.amount, 0);
+  const batchShortfall = batchAccount
+    ? insufficientBalanceMessage(batchAccount, resolveParentBankAccount(batchAccount), batchOutSum)
+    : null;
 
   const toggleSelectApproved = (id: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -348,9 +454,6 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   // Open batch modal & prefill defaults
   const handleOpenBatchDisburseModal = () => {
     if (selectedApprovedIds.length === 0) return;
-    if (paymentAccounts.length > 0 && !batchAccountId) {
-      setBatchAccountId(paymentAccounts[0].id);
-    }
     if (!batchGuard.pending) {
       // New batch intent: new batch key (per-request keys derive from it) and a fresh reference.
       batchGuard.rotateKey();
@@ -364,14 +467,22 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   const handleConfirmBatchDisburse = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedBatchRequests.length === 0) return;
+    // The account shown selected is the one paid from; refuse a batch it cannot cover.
+    const selectedAccount = batchAccount;
+    if (!selectedAccount) {
+      alert('لا يوجد حساب خزينة نشط بعملة الطلبات المحددة. يرجى إضافة حساب أو تفعيله أولاً.');
+      return;
+    }
+    if (batchShortfall) {
+      alert(batchShortfall);
+      return;
+    }
     const batchRequests = [...selectedBatchRequests];
 
     await batchGuard.run(async (batchKey) => {
-      const selectedAccount = paymentAccounts.find(a => a.id === batchAccountId);
-      const accName = selectedAccount
-        ? `${selectedAccount.name} (${selectedAccount.accountIdentifier})`
-        : (paymentAccounts[0] ? `${paymentAccounts[0].name} (${paymentAccounts[0].accountIdentifier})` : 'الخزينة المعتمدة');
-      const accountId = selectedAccount?.id || paymentAccounts[0]?.id;
+      // Shown to each requester on their payment advice: the account's name, never the company's account number.
+      const accName = selectedAccount.name;
+      const accountId = selectedAccount.id;
 
       let paidCount = 0;
       let skippedCount = 0;
@@ -387,7 +498,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
         }
         const singleRef = `${batchRefNumber.trim()}-${seq}`;
         const methodToUse: PaymentMethod = batchPaymentMethod === 'auto'
-          ? (req.preferredPaymentMethod || 'instapay')
+          ? resolveRequestPaymentMethod(req)
           : batchPaymentMethod;
 
         try {
@@ -396,7 +507,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
             referenceNumber: singleRef,
             bankName: accName,
             accountId: accountId,
-            accountName: selectedAccount?.name || paymentAccounts[0]?.name,
+            accountName: selectedAccount.name,
             notes: batchNotes.trim()
               ? `${batchNotes.trim()} [دفعة مجمعة ${batchRefNumber.trim()}]`
               : `صرف دفعة مجمعة [${batchRefNumber.trim()}]`,
@@ -467,8 +578,9 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
         req.targetAccountId ? paymentAccounts.find(a => a.id === req.targetAccountId)?.name : ''
       ) || '';
 
-      const createdAtStr = req.createdAt ? req.createdAt.replace('T', ' ').slice(0, 16) : '';
-      const disbursedAtStr = req.disbursement?.disbursedAt ? req.disbursement.disbursedAt.replace('T', ' ').slice(0, 16) : '';
+      // Local time (like every other screen), never the stored UTC value.
+      const createdAtStr = formatLocalDateTime(req.createdAt);
+      const disbursedAtStr = formatLocalDateTime(req.disbursement?.disbursedAt);
 
       return [
         req.requestNumber || '',
@@ -493,7 +605,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `طلبات_المصروفات_${new Date().toISOString().slice(0, 10)}.csv`);
+    link.setAttribute('download', `طلبات_المصروفات_${localToday()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -519,7 +631,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   };
 
   const handleReject = async () => {
-    if (!activeRequest || !rejectionReason.trim()) return;
+    if (!activeRequest) return;
+    if (!rejectionReason.trim()) {
+      setInlineError('يرجى كتابة سبب الرفض ليصل للموظف.');
+      return;
+    }
     const requestId = activeRequest.id;
     const scope = `reject:${requestId}`;
     await actionGuard.run(scope, async (idempotencyKey) => {
@@ -536,7 +652,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   };
 
   const handleClarify = async () => {
-    if (!activeRequest || !clarificationQuestion.trim()) return;
+    if (!activeRequest) return;
+    if (!clarificationQuestion.trim()) {
+      setInlineError('يرجى كتابة سؤال الاستيضاح أو المستندات المطلوبة من الموظف.');
+      return;
+    }
     const requestId = activeRequest.id;
     const scope = `clarify:${requestId}`;
     await actionGuard.run(scope, async (idempotencyKey) => {
@@ -554,19 +674,33 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
   const handleDisburse = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeRequest || !disburseRefNumber.trim()) return;
+    if (!activeRequest) return;
+    if (!disburseRefNumber.trim()) {
+      setInlineError('يرجى إدخال رقم المرجع / العملية.');
+      return;
+    }
+    // The account shown selected in the form is the one used (never a different fallback).
+    const selectedAccount = activeDisburseAccount;
+    if (!selectedAccount) {
+      setInlineError(`لا يوجد حساب خزينة نشط بعملة الطلب (${currencyCode(activeRequest.currency)}) في هذه الشركة. يرجى إضافة حساب أو تفعيله أولاً.`);
+      return;
+    }
+    if (activeDisburseShortfall) {
+      setInlineError(activeDisburseShortfall);
+      return;
+    }
+    setInlineError(null);
 
     const requestId = activeRequest.id;
     const scope = `disburse:${requestId}`;
     await actionGuard.run(scope, async (idempotencyKey) => {
       try {
-        const selectedAccount = paymentAccounts.find(a => a.id === disburseAccountId);
         const outcome = await disburseRequest(requestId, {
           paymentMethod: disburseMethod,
           referenceNumber: disburseRefNumber.trim(),
-          bankName: selectedAccount ? `${selectedAccount.name} (${selectedAccount.accountIdentifier})` : (disburseBankName.trim() || 'المصرف الرئيسي'),
-          accountId: disburseAccountId || undefined,
-          accountName: selectedAccount?.name,
+          bankName: selectedAccount.name, // the requester's payment advice shows it: no company account number
+          accountId: selectedAccount.id,
+          accountName: selectedAccount.name,
           notes: disburseNotes.trim() || undefined,
         }, { idempotencyKey });
         actionGuard.rotateKey(scope);
@@ -581,6 +715,62 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
       }
     });
   };
+
+  // Account field of the disbursement / receipt forms: only the accounts the request can
+  // use (its company, active, its currency), the linked-bank note of an InstaPay channel,
+  // and the refusal when the account cannot cover an expense.
+  const renderDisburseAccountField = (req: ExpenseRequest) => {
+    const isIncomeReq = req.requestType === 'income';
+    return (
+      <div>
+        <label className="block font-bold text-slate-700 mb-1">
+          {isIncomeReq ? 'خزينة / حساب الاستلام المودع فيه (+ IN) *' : 'خزينة / حساب الصرف المحول منه (- OUT) *'}
+        </label>
+        {activeEligibleAccounts.length === 0 ? (
+          <div role="alert" className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-[11px] font-bold">
+            لا يوجد حساب خزينة نشط بعملة الطلب ({currencyCode(req.currency)}) في هذه الشركة. يرجى إضافة حساب أو تفعيله من شاشة الخزينة أولاً.
+          </div>
+        ) : (
+          <select
+            value={activeDisburseAccount?.id || ''}
+            onChange={(e) => selectActiveDisburseAccount(e.target.value)}
+            className={`w-full p-2.5 bg-slate-50 border rounded-xl font-bold ${!isIncomeReq && activeDisburseShortfall ? 'border-rose-400' : 'border-slate-200'}`}
+          >
+            {activeEligibleAccounts.map(acc => (
+              <option key={acc.id} value={acc.id}>
+                {acc.name} — {accountTypeLabel(acc.type)} ({acc.accountIdentifier}) — الرصيد: {fmtMoney(accountBalance(acc))} {currencyCode(acc.currency)}
+              </option>
+            ))}
+          </select>
+        )}
+        {activeDisburseAccount && activeDisburseParent && (
+          <div className="mt-2 p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 text-xs flex items-start gap-2">
+            <Landmark className="h-4 w-4 text-blue-600 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold block">{isIncomeReq ? 'إيداع بنكي مزدوج تلقائي:' : 'خصم بنكي مزدوج تلقائي:'}</span>
+              <span className="text-[11px] text-blue-800 leading-relaxed">
+                {isIncomeReq
+                  ? <>حساب ({activeDisburseAccount.name}) مربوط بالحساب البنكي (<strong>{activeDisburseParent.name}</strong>). سيتم إضافة التوريد تلقائياً في هذا الحساب وفي الحساب البنكي الرئيسي معاً.</>
+                  : <>حساب ({activeDisburseAccount.name}) مربوط بالحساب البنكي (<strong>{activeDisburseParent.name}</strong> — رصيده {fmtMoney(accountBalance(activeDisburseParent))} {currencyCode(activeDisburseParent.currency)}). سيتم خصم مبلغ الصرف تلقائياً من هذا الحساب ومن الحساب البنكي معاً، ويجب أن يكفي رصيد الاثنين.</>}
+              </span>
+            </div>
+          </div>
+        )}
+        {!isIncomeReq && activeDisburseShortfall && (
+          <div role="alert" className="mt-2 p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-[11px] font-bold flex items-start gap-1.5">
+            <AlertCircle className="h-3.5 w-3.5 text-rose-600 shrink-0 mt-0.5" />
+            <span>{activeDisburseShortfall}</span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Esc closes the list's own pop-ups (the QR code, the batch window when not paying).
+  useEscapeToClose(Boolean(qrModalRequest), () => setQrModalRequest(null));
+  useEscapeToClose(isBatchModalOpen, () => {
+    if (!batchGuard.pending) setIsBatchModalOpen(false);
+  });
 
   // Financial KPIs Calculations
   const totalAmount = targetRequests.reduce((sum, r) => sum + r.amount, 0);
@@ -637,12 +827,16 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     }
   };
 
-  const getMethodBadge = (method?: string) => {
+  // The payout method badge: the same resolved method (and label) as the method filter,
+  // the detail window and the edit form, also for older records that have none stored.
+  const getMethodBadge = (req: ExpenseRequest) => {
+    const method = resolveRequestPaymentMethod(req);
+    const label = paymentMethodLabel(method);
     if (method === 'instapay') {
       return (
         <span className="inline-flex items-center gap-1 text-[11px] font-bold text-teal-700 bg-teal-50 px-2 py-0.5 rounded-md border border-teal-200">
           <Smartphone className="h-3 w-3" />
-          <span>انستاباي (InstaPay)</span>
+          <span>{label}</span>
         </span>
       );
     }
@@ -650,22 +844,22 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
       return (
         <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-200">
           <Smartphone className="h-3 w-3" />
-          <span>محفظة إلكترونية</span>
+          <span>{label}</span>
         </span>
       );
     }
-    if (method === 'cash') {
+    if (method === 'cash' || method === 'cheque') {
       return (
         <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
           <CreditCard className="h-3 w-3" />
-          <span>نقداً من الخزينة</span>
+          <span>{label}</span>
         </span>
       );
     }
     return (
       <span className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
         <Building className="h-3 w-3" />
-        <span>تحويل بنكي / IBAN</span>
+        <span>{label}</span>
       </span>
     );
   };
@@ -751,7 +945,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
             <span className="text-[11px] text-slate-400 block mb-1">إجمالي المبالغ المنصرفة</span>
             <div className="flex items-baseline gap-1.5 text-lg sm:text-xl font-black text-emerald-400">
-              <span>{totalDisbursed.toLocaleString()}</span>
+              <span>{fmtMoney(totalDisbursed)}</span>
               <span className="text-xs text-slate-400 font-semibold">{currency}</span>
             </div>
           </div>
@@ -759,7 +953,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
             <span className="text-[11px] text-slate-400 block mb-1">مبالغ معتمدة بانتظار الصرف</span>
             <div className="flex items-baseline gap-1.5 text-lg sm:text-xl font-black text-blue-400">
-              <span>{totalApproved.toLocaleString()}</span>
+              <span>{fmtMoney(totalApproved)}</span>
               <span className="text-xs text-slate-400 font-semibold">{currency}</span>
             </div>
           </div>
@@ -767,7 +961,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
             <span className="text-[11px] text-slate-400 block mb-1">مبالغ قيد فحص الإدارة</span>
             <div className="flex items-baseline gap-1.5 text-lg sm:text-xl font-black text-amber-400">
-              <span>{totalPending.toLocaleString()}</span>
+              <span>{fmtMoney(totalPending)}</span>
               <span className="text-xs text-slate-400 font-semibold">{currency}</span>
             </div>
           </div>
@@ -775,8 +969,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
             <span className="text-[11px] text-slate-400 block mb-1">إجمالي المطالبات المسجلة</span>
             <div className="flex items-baseline gap-1.5 text-lg sm:text-xl font-black text-white">
-              <span>{requests.length}</span>
-              <span className="text-xs text-slate-400 font-semibold">طلب ({totalAmount.toLocaleString()} {currency})</span>
+              <span>{targetRequests.length}</span>
+              <span className="text-xs text-slate-400 font-semibold">طلب ({fmtMoney(totalAmount)} {currency})</span>
             </div>
           </div>
         </div>
@@ -987,7 +1181,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
           </div>
 
           {/* Select All Approved for Batch Payment Toggle */}
-          {approvedRequestsInFilter.length > 0 && (
+          {canDisburse && approvedRequestsInFilter.length > 0 && (
             <div className="flex items-center justify-between px-3.5 py-2.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200/80 rounded-2xl text-xs shadow-2xs">
               <label className="flex items-center gap-2 cursor-pointer font-bold text-blue-950 select-none">
                 <input
@@ -1034,8 +1228,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
-                      {/* Batch Checkbox for Approved Requests */}
-                      {isApproved && (
+                      {/* Batch Checkbox for Approved Requests (only for who can disburse) */}
+                      {isApproved && canDisburse && (
                         <div 
                           className="flex items-center mr-0.5"
                           onClick={(e) => e.stopPropagation()}
@@ -1112,22 +1306,24 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                         <span className="text-[10px] text-slate-400">({req.requesterDepartment})</span>
                       )}
                     </div>
-                    <span className="text-[11px] text-slate-400">{req.createdAt.split('T')[0]}</span>
+                    <span className="text-[11px] text-slate-400">{formatLocalDate(req.createdAt)}</span>
                   </div>
 
                   <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100 text-xs">
                     <div className="flex items-center gap-1.5">
-                      {getMethodBadge(req.preferredPaymentMethod)}
+                      {getMethodBadge(req)}
                       {req.paymentAccountDetails && (
                         <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                           <button
                             type="button"
                             onClick={() => handleCopyAccountDetails(req.paymentAccountDetails!, req.id)}
                             className="p-1 hover:bg-slate-100 text-slate-400 hover:text-emerald-700 rounded-lg transition"
-                            title={copiedItemId === req.id ? 'تم النسخ بنجاح ✓' : 'نسخ بيانات الحساب'}
+                            title={copiedOk(req.id) ? 'تم النسخ بنجاح ✓' : copyFailed(req.id) ? 'تعذر النسخ، انسخ البيانات يدوياً' : 'نسخ بيانات الحساب'}
                           >
-                            {copiedItemId === req.id ? (
+                            {copiedOk(req.id) ? (
                               <span className="text-[10px] text-emerald-600 font-bold">تم النسخ ✓</span>
+                            ) : copyFailed(req.id) ? (
+                              <span className="text-[10px] text-rose-600 font-bold">تعذر النسخ</span>
                             ) : (
                               <Copy className="h-3.5 w-3.5" />
                             )}
@@ -1145,16 +1341,19 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
-                      {req.requestType === 'income' && req.status === 'pending' && canApprove && (
+                      {req.requestType === 'income' && req.status === 'pending' && canDisburse && (
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            setSelectedReqId(req.id);
-                            if (!disburseRefNumber) {
-                              setDisburseRefNumber(`IN-${Math.floor(100000 + Math.random() * 900000)}`);
+                            setDisburseRefNumber(`IN-${Math.floor(100000 + Math.random() * 900000)}`);
+                            setInlineError(null);
+                            if (activeRequest?.id === req.id) {
+                              setActiveAction('disburse');
+                            } else {
+                              openAfterSelectRef.current = 'disburse';
+                              setSelectedReqId(req.id);
                             }
-                            setActiveAction('disburse');
                           }}
                           className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[10px] rounded-lg shadow-2xs flex items-center gap-1 transition cursor-pointer active:scale-95"
                           title="تأكيد الاستلام والتوريد في الخزينة"
@@ -1164,7 +1363,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                         </button>
                       )}
                       <span className={`font-black text-sm ${req.requestType === 'income' ? 'text-emerald-700' : 'text-slate-900'}`}>
-                        {req.requestType === 'income' ? '+' : '-'}{req.amount.toLocaleString()} {req.currency}
+                        {req.requestType === 'income' ? '+' : '-'}{fmtMoney(req.amount)} {req.currency}
                       </span>
                     </div>
                   </div>
@@ -1202,24 +1401,24 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
             <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xs p-6 sm:p-7 space-y-6">
               
               {/* Active Request Header Info */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
-                <div>
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 pb-4 border-b border-slate-100">
+                <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-mono text-xs font-bold text-slate-500">{activeRequest.requestNumber}</span>
-                    <span className="text-xs text-slate-400">• تاريخ التقديم: {activeRequest.createdAt.split('T')[0]}</span>
+                    <span className="text-xs text-slate-400">• تاريخ التقديم: {formatLocalDate(activeRequest.createdAt)}</span>
                     {getUrgencyBadge(activeRequest.urgency)}
                   </div>
-                  <h2 className="text-lg font-black text-slate-900 mt-1">{activeRequest.title}</h2>
-                  <div className="text-xs text-slate-500 mt-1 flex items-center gap-2">
+                  <h2 className="text-lg font-black text-slate-900 mt-1 break-words">{activeRequest.title}</h2>
+                  <div className="text-xs text-slate-500 mt-1 flex items-center gap-x-2 gap-y-0.5 flex-wrap">
                     <span>مقدم الطلب: <strong className="text-slate-800">{activeRequest.requesterName}</strong></span>
                     {activeRequest.requesterDepartment && <span>• القسم: <strong>{activeRequest.requesterDepartment}</strong></span>}
                     {activeRequest.requesterEmail && <span className="font-mono text-[11px] text-slate-400">({activeRequest.requesterEmail})</span>}
                   </div>
                 </div>
 
-                <div className="text-left shrink-0">
-                  <div className="text-2xl font-black text-slate-900">
-                    {activeRequest.amount.toLocaleString()} <span className="text-sm font-semibold text-slate-500">{activeRequest.currency}</span>
+                <div className="text-left min-w-0 sm:max-w-[55%]">
+                  <div className="text-2xl font-black text-slate-900 whitespace-nowrap">
+                    {fmtMoney(activeRequest.amount)} <span className="text-sm font-semibold text-slate-500">{activeRequest.currency}</span>
                   </div>
                   <div className="mt-1 flex items-center justify-end gap-2 flex-wrap">
                     {canEditActive ? (
@@ -1276,6 +1475,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                           ? 'bg-rose-500 text-white animate-pulse'
                           : activeRequest.status === 'pending'
                           ? 'bg-amber-500 text-white'
+                          : activeRequest.status === 'rejected'
+                          ? 'bg-slate-400 text-white'
                           : 'bg-emerald-600 text-white'
                       }`}>
                         {activeRequest.status === 'pending' ? (
@@ -1289,7 +1490,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                       <span className="text-xs font-bold text-slate-800 mt-2">مراجعة الإدارة</span>
                       <span className="text-[10px] text-slate-400 font-medium">
                         {activeRequest.status === 'clarification_requested' ? 'مطلوب توضيح' :
-                         activeRequest.status === 'pending' ? 'جاري الفحص' : 'معتمد'}
+                         activeRequest.status === 'pending' ? 'جاري الفحص' : 'تمت المراجعة'}
                       </span>
                     </div>
 
@@ -1354,10 +1555,15 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                         onClick={() => handleCopyAccountDetails(activeRequest.paymentAccountDetails!, activeRequest.id)}
                         className="flex items-center gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-xl transition cursor-pointer shadow-xs active:scale-95 relative"
                       >
-                        {copiedText && (!copiedItemId || copiedItemId === activeRequest.id) ? (
+                        {copiedOk(activeRequest.id) ? (
                           <>
                             <Check className="h-3.5 w-3.5 stroke-[3]" />
                             <span className="animate-pulse">تم النسخ بنجاح ✓</span>
+                          </>
+                        ) : copyFailed(activeRequest.id) ? (
+                          <>
+                            <AlertCircle className="h-3.5 w-3.5" />
+                            <span>تعذر النسخ — انسخ يدوياً</span>
                           </>
                         ) : (
                           <>
@@ -1383,16 +1589,22 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                   <div className="bg-white p-3 rounded-xl border border-emerald-100">
                     <span className="text-slate-400 block mb-0.5">وسيلة الدفع المطلوبة:</span>
                     <span className="font-bold text-slate-900">
-                      {getMethodBadge(activeRequest.preferredPaymentMethod)}
+                      {getMethodBadge(activeRequest)}
                     </span>
+                    {activeRequest.beneficiaryName && (
+                      <div className="mt-2">
+                        <span className="text-slate-400 block mb-0.5">اسم المستفيد (للمطابقة):</span>
+                        <span className="font-bold text-emerald-900 break-words">{activeRequest.beneficiaryName}</span>
+                      </div>
+                    )}
                   </div>
 
                   <div className="bg-white p-3 rounded-xl border border-emerald-100 sm:col-span-2">
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-slate-400 block">
-                        {activeRequest.preferredPaymentMethod === 'instapay' ? 'عنوان انستاباي / رقم الهاتف:' :
-                         activeRequest.preferredPaymentMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية:' :
-                         activeRequest.preferredPaymentMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN) / الحساب:' : 'جهة الاستلام:'}
+                        {activeRequestMethod === 'instapay' ? 'عنوان انستاباي / رقم الهاتف:' :
+                         activeRequestMethod === 'digital_wallet' ? 'رقم المحفظة الإلكترونية:' :
+                         activeRequestMethod === 'bank_transfer' ? 'رقم الآيبان (IBAN) / الحساب:' : 'جهة الاستلام:'}
                       </span>
                       {activeRequest.paymentAccountDetails && (
                         <div className="flex items-center gap-1.5">
@@ -1402,7 +1614,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                             className="inline-flex items-center gap-1 text-[11px] text-emerald-700 hover:text-emerald-900 font-bold bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 rounded-md transition cursor-pointer"
                           >
                             <Copy className="h-3 w-3" />
-                            <span>{copiedText && (!copiedItemId || copiedItemId === activeRequest.id) ? 'تم النسخ ✓' : 'نسخ سريع'}</span>
+                            <span>{copiedOk(activeRequest.id) ? 'تم النسخ ✓' : copyFailed(activeRequest.id) ? 'تعذر النسخ' : 'نسخ سريع'}</span>
                           </button>
                           <button
                             type="button"
@@ -1579,6 +1791,20 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 </div>
               )}
 
+              {/* Rejection reason (the side panel shows it too, not only the detail window) */}
+              {activeRequest.status === 'rejected' && (
+                <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 text-xs text-rose-900">
+                  <div className="flex items-center gap-2 font-bold mb-1">
+                    <XCircle className="h-4 w-4 text-rose-600" />
+                    <span>تم رفض هذا الطلب</span>
+                  </div>
+                  <p className="leading-relaxed">
+                    <span className="font-semibold">سبب الرفض: </span>
+                    {activeRequest.rejectionReason || 'لم يُذكر سبب.'}
+                  </p>
+                </div>
+              )}
+
               {/* Official Payment Advice Receipt (When Disbursed) */}
               {activeRequest.status === 'disbursed' && activeRequest.disbursement && (
                 <div className="bg-emerald-50/80 border-2 border-emerald-300 rounded-3xl p-6 space-y-4 shadow-sm animate-in fade-in duration-200">
@@ -1607,10 +1833,9 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                     <div className="bg-white/80 p-3 rounded-xl border border-emerald-100">
                       <span className="text-slate-500 block mb-0.5">طريقة التحويل:</span>
                       <span className="font-bold text-slate-900">
-                        {activeRequest.disbursement.paymentMethod === 'instapay' ? 'انستاباي (InstaPay)' :
-                         activeRequest.disbursement.paymentMethod === 'bank_transfer' ? 'تحويل بنكي' :
-                         activeRequest.disbursement.paymentMethod === 'digital_wallet' ? 'محفظة إلكترونية' :
-                         activeRequest.disbursement.paymentMethod === 'cash' ? 'نقداً / خزينة' : 'شيك'}
+                        {activeRequest.requestType === 'income'
+                          ? incomeMethodLabel(activeRequest.disbursement.paymentMethod)
+                          : paymentMethodLabel(activeRequest.disbursement.paymentMethod)}
                       </span>
                     </div>
                     <div className="bg-white/80 p-3 rounded-xl border border-emerald-100">
@@ -1628,7 +1853,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                     <div className="bg-white/80 p-3 rounded-xl border border-emerald-100">
                       <span className="text-slate-500 block mb-0.5">تاريخ وساعة الصرف:</span>
                       <span className="font-bold text-slate-900">
-                        {activeRequest.disbursement.disbursedAt}
+                        {formatLocalDateTime(activeRequest.disbursement.disbursedAt)}
                       </span>
                     </div>
                   </div>
@@ -1645,14 +1870,14 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
               {/* ACTION PANELS ACCORDING TO ROLES */}
               <div className="pt-4 border-t border-slate-100 space-y-4">
                 
-                {/* 1. If Manager / Admin / Finance: Can Approve, Clarify, or Reject */}
-                {(currentRole === 'org_admin' || currentRole === 'super_admin' || currentRole === 'finance') && 
-                 (activeRequest.status === 'pending' || activeRequest.status === 'clarification_requested') && (
+                {/* 1. Under review: each action only for the roles the domain accepts (permissions.ts) */}
+                {(activeRequest.status === 'pending' || activeRequest.status === 'clarification_requested') && (
                   activeRequest.requestType === 'income' ? (
+                    (canDisburse || canReject) && (
                     <div className="p-5 bg-gradient-to-r from-emerald-50 via-teal-50/60 to-white rounded-2xl border-2 border-emerald-300 shadow-xs space-y-4 animate-in fade-in duration-150">
                       <div className="flex items-center justify-between flex-wrap gap-3">
-                        <div>
-                          <div className="flex items-center gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="p-1.5 bg-emerald-600 text-white rounded-lg">
                               <ArrowDownLeft className="h-4 w-4" />
                             </span>
@@ -1663,43 +1888,43 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                               تحت المراجعة والاستلام
                             </span>
                           </div>
-                          <p className="text-xs text-emerald-800 mt-1">
-                            المبلغ: <strong className="text-emerald-950 font-black">+{activeRequest.amount.toLocaleString()} {activeRequest.currency}</strong> | طريقة التوريد: <strong>{activeRequest.preferredPaymentMethod === 'instapay' ? 'إنستاباي' : activeRequest.preferredPaymentMethod === 'digital_wallet' ? 'محفظة إلكترونية' : activeRequest.preferredPaymentMethod === 'bank_transfer' ? 'حساب بنكي' : 'خزينة نقدية'}</strong> {activeRequest.paymentAccountDetails ? `| المودع: ${activeRequest.paymentAccountDetails}` : ''}
+                          <p className="text-xs text-emerald-800 mt-1 break-words">
+                            المبلغ: <strong className="text-emerald-950 font-black">+{fmtMoney(activeRequest.amount)} {activeRequest.currency}</strong> | طريقة التوريد: <strong>{incomeMethodLabel(activeRequestMethod)}</strong> {activeRequest.paymentAccountDetails ? `| المودع: ${activeRequest.paymentAccountDetails}` : ''}
                           </p>
                         </div>
 
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (activeAction !== 'disburse') {
-                                if (!disburseRefNumber) {
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {canDisburse && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (activeAction !== 'disburse') {
                                   setDisburseRefNumber(`IN-${Math.floor(100000 + Math.random() * 900000)}`);
                                 }
-                                setActiveAction('disburse');
-                              } else {
-                                setActiveAction('none');
-                              }
-                            }}
-                            className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl shadow-md flex items-center gap-2 transition cursor-pointer active:scale-95"
-                          >
-                            <CheckCircle2 className="h-4 w-4" />
-                            <span>📥 تأكيد الاستلام والتوريد في الخزينة (تم الاستلام)</span>
-                          </button>
+                                toggleAction('disburse');
+                              }}
+                              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl shadow-md flex items-center gap-2 transition cursor-pointer active:scale-95"
+                            >
+                              <CheckCircle2 className="h-4 w-4" />
+                              <span>📥 تأكيد الاستلام والتوريد في الخزينة (تم الاستلام)</span>
+                            </button>
+                          )}
 
-                          <button
-                            type="button"
-                            onClick={() => setActiveAction(activeAction === 'reject' ? 'none' : 'reject')}
-                            className="px-3.5 py-2.5 bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold text-xs rounded-xl transition cursor-pointer"
-                          >
-                            <XCircle className="h-4 w-4" />
-                            <span>رفض التوريد ✕</span>
-                          </button>
+                          {canReject && (
+                            <button
+                              type="button"
+                              onClick={() => toggleAction('reject')}
+                              className="px-3.5 py-2.5 bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold text-xs rounded-xl transition cursor-pointer flex items-center gap-1.5"
+                            >
+                              <XCircle className="h-4 w-4" />
+                              <span>رفض التوريد ✕</span>
+                            </button>
+                          )}
                         </div>
                       </div>
 
                       {/* Disburse Drawer for Income Receipt Confirmation */}
-                      {activeAction === 'disburse' && (
+                      {activeAction === 'disburse' && canDisburse && (
                         <form onSubmit={handleDisburse} className="mt-4 p-4 bg-white rounded-2xl border-2 border-emerald-300 space-y-4 animate-in fade-in duration-150">
                           <div className="flex items-center justify-between pb-2 border-emerald-100 border-b">
                             <span className="font-bold text-emerald-950 text-xs flex items-center gap-1.5">
@@ -1709,6 +1934,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                             <button
                               type="button"
                               onClick={() => setActiveAction('none')}
+                              aria-label="إغلاق"
                               className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
                             >
                               <X className="h-4 w-4" />
@@ -1716,54 +1942,13 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                           </div>
 
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                            <div>
-                              <label className="block font-bold text-slate-700 mb-1">
-                                الكارت / الحساب المودع فيه المبلغ (+ IN) *
-                              </label>
-                              <select
-                                value={disburseAccountId}
-                                onChange={(e) => {
-                                  setDisburseAccountId(e.target.value);
-                                  const acc = paymentAccounts.find(a => a.id === e.target.value);
-                                  if (acc) {
-                                    setDisburseBankName(`${acc.name} (${acc.accountIdentifier})`);
-                                    if (acc.type === 'instapay') setDisburseMethod('instapay');
-                                    else if (acc.type === 'wallet') setDisburseMethod('digital_wallet');
-                                    else if (acc.type === 'bank') setDisburseMethod('bank_transfer');
-                                    else if (acc.type === 'cash') setDisburseMethod('cash');
-                                  }
-                                }}
-                                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold"
-                              >
-                                {paymentAccounts.map(acc => (
-                                  <option key={acc.id} value={acc.id}>
-                                    {acc.name} — ({acc.accountIdentifier}) — الرصيد: {Number(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency}
-                                  </option>
-                                ))}
-                              </select>
-                              {(() => {
-                                const acc = paymentAccounts.find(a => a.id === disburseAccountId) || paymentAccounts[0];
-                                const parentBank = resolveParentBankAccount(acc);
-                                if (!parentBank) return null;
-                                return (
-                                  <div className="mt-2 p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 text-xs flex items-start gap-2">
-                                    <Landmark className="h-4 w-4 text-blue-600 shrink-0 mt-0.5" />
-                                    <div>
-                                      <span className="font-bold block">إيداع بنكي مزدوج تلقائي:</span>
-                                      <span className="text-[11px] text-blue-800 leading-relaxed">
-                                        حساب ({acc?.name}) مربوط بالحساب البنكي (<strong>{parentBank.name}</strong>). سيتم إضافة التوريد تلقائياً في هذا الحساب وفي الحساب البنكي الرئيسي معاً.
-                                      </span>
-                                    </div>
-                                  </div>
-                                );
-                              })()}
-                            </div>
+                            {renderDisburseAccountField(activeRequest)}
 
                             <div>
                               <label className="block font-bold text-slate-700 mb-1">طريقة الاستلام والتوريد *</label>
                               <select
                                 value={disburseMethod}
-                                onChange={(e: any) => setDisburseMethod(e.target.value)}
+                                onChange={(e) => setDisburseMethod(e.target.value as PaymentMethod)}
                                 className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold"
                               >
                                 <option value="instapay">انستاباي (InstaPay)</option>
@@ -1806,9 +1991,13 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                             </div>
                           </div>
 
-                          <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                          {inlineError && (
+                            <p role="alert" className="text-[11px] font-bold text-rose-700">⚠️ {inlineError}</p>
+                          )}
+
+                          <div className="flex items-center justify-between gap-2 flex-wrap pt-2 border-t border-slate-100">
                             <span className="text-xs font-bold text-emerald-800">
-                              سيتم زيادة رصيد الكارت المختار فوراً بمبلغ (+{activeRequest.amount.toLocaleString()} {activeRequest.currency})
+                              سيتم زيادة رصيد الكارت المختار فوراً بمبلغ (+{fmtMoney(activeRequest.amount)} {activeRequest.currency})
                             </span>
                             <div className="flex items-center gap-2">
                               <button
@@ -1820,8 +2009,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                               </button>
                               <button
                                 type="submit"
-                                disabled={disbursing}
-                                className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl shadow-md transition cursor-pointer flex items-center gap-2"
+                                disabled={disbursing || !activeDisburseAccount}
+                                className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs rounded-xl shadow-md transition cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                               >
                                 <CheckCircle2 className="h-4 w-4" />
                                 <span>{disbursing ? 'جاري التأكيد وإيداع المبلغ...' : '✓ تأكيد الاستلام والتوريد في الرصيد الآن'}</span>
@@ -1832,17 +2021,24 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                       )}
 
                       {/* Reject Form */}
-                      {activeAction === 'reject' && (
+                      {activeAction === 'reject' && canReject && (
                         <div className="mt-3 p-4 bg-rose-50 rounded-xl border border-rose-200 space-y-3 animate-in fade-in duration-150">
                           <h5 className="font-bold text-rose-950 text-xs">تأكيد رفض طلب التوريد:</h5>
                           <input
                             type="text"
                             required
                             value={rejectionReason}
-                            onChange={(e) => setRejectionReason(e.target.value)}
+                            onChange={(e) => {
+                              setRejectionReason(e.target.value);
+                              if (inlineError) setInlineError(null);
+                            }}
                             placeholder="اكتب سبب رفض التوريد بوضوح..."
-                            className="w-full p-2.5 bg-white border border-rose-200 rounded-xl text-xs outline-none"
+                            aria-invalid={Boolean(inlineError)}
+                            className={`w-full p-2.5 bg-white border rounded-xl text-xs outline-none ${inlineError ? 'border-rose-500 ring-2 ring-rose-500/20' : 'border-rose-200'}`}
                           />
+                          {inlineError && (
+                            <p role="alert" className="text-[11px] font-bold text-rose-700">⚠️ {inlineError}</p>
+                          )}
                           <div className="flex justify-end gap-2">
                             <button
                               type="button"
@@ -1855,54 +2051,62 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                               type="button"
                               onClick={handleReject}
                               disabled={actionGuard.isPending(`reject:${activeRequest.id}`)}
-                              className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer"
+                              className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer disabled:opacity-60"
                             >
-                              تأكيد الرفض
+                              {actionGuard.isPending(`reject:${activeRequest.id}`) ? 'جاري الرفض...' : 'تأكيد الرفض'}
                             </button>
                           </div>
                         </div>
                       )}
                     </div>
+                    )
                   ) : (
+                  (canApprove || canClarify || canReject) && (
                   <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <span className="text-xs font-bold text-slate-700">اتخاذ إجراء مالي أو إداري على هذا الطلب:</span>
-                      
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setActiveAction(activeAction === 'approve' ? 'none' : 'approve')}
-                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-                        >
-                          <CheckCircle2 className="h-4 w-4" />
-                          <span>اعتماد الطلب ✓</span>
-                        </button>
 
-                        <button
-                          type="button"
-                          onClick={() => setActiveAction(activeAction === 'clarify' ? 'none' : 'clarify')}
-                          className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-                        >
-                          <HelpCircle className="h-4 w-4" />
-                          <span>طلب توضيح ⚠️</span>
-                        </button>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {canApprove && (
+                          <button
+                            type="button"
+                            onClick={() => toggleAction('approve')}
+                            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <CheckCircle2 className="h-4 w-4" />
+                            <span>اعتماد الطلب ✓</span>
+                          </button>
+                        )}
 
-                        <button
-                          type="button"
-                          onClick={() => setActiveAction(activeAction === 'reject' ? 'none' : 'reject')}
-                          className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
-                        >
-                          <XCircle className="h-4 w-4" />
-                          <span>رفض ✕</span>
-                        </button>
+                        {canClarify && (
+                          <button
+                            type="button"
+                            onClick={() => toggleAction('clarify')}
+                            className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <HelpCircle className="h-4 w-4" />
+                            <span>طلب توضيح ⚠️</span>
+                          </button>
+                        )}
+
+                        {canReject && (
+                          <button
+                            type="button"
+                            onClick={() => toggleAction('reject')}
+                            className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <XCircle className="h-4 w-4" />
+                            <span>رفض ✕</span>
+                          </button>
+                        )}
                       </div>
                     </div>
 
                     {/* Approve Form */}
-                    {activeAction === 'approve' && (
+                    {activeAction === 'approve' && canApprove && (
                       <div className="mt-3 p-4 bg-emerald-50 rounded-xl border border-emerald-200 space-y-3 animate-in fade-in duration-150">
                         <h5 className="font-bold text-emerald-950 text-xs">
-                          تأكيد اعتماد الطلب بمبلغ {activeRequest.amount.toLocaleString()} {activeRequest.currency}
+                          تأكيد اعتماد الطلب بمبلغ {fmtMoney(activeRequest.amount)} {activeRequest.currency}
                         </h5>
                         <input
                           type="text"
@@ -1923,25 +2127,32 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                             type="button"
                             onClick={handleApprove}
                             disabled={actionGuard.isPending(`approve:${activeRequest.id}`)}
-                            className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer"
+                            className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer disabled:opacity-60"
                           >
-                            تأكيد الاعتماد المالي
+                            {actionGuard.isPending(`approve:${activeRequest.id}`) ? 'جاري الاعتماد...' : 'تأكيد الاعتماد المالي'}
                           </button>
                         </div>
                       </div>
                     )}
 
                     {/* Clarify Form */}
-                    {activeAction === 'clarify' && (
+                    {activeAction === 'clarify' && canClarify && (
                       <div className="mt-3 p-4 bg-amber-50 rounded-xl border border-amber-200 space-y-3 animate-in fade-in duration-150">
                         <h5 className="font-bold text-amber-950 text-xs">طلب مستندات أو استفسار من طالب الصرف:</h5>
                         <textarea
                           rows={2}
                           value={clarificationQuestion}
-                          onChange={(e) => setClarificationQuestion(e.target.value)}
+                          onChange={(e) => {
+                            setClarificationQuestion(e.target.value);
+                            if (inlineError) setInlineError(null);
+                          }}
                           placeholder="اكتب استفسارك بدقة للموظف هنا..."
-                          className="w-full p-2.5 bg-white border border-amber-200 rounded-xl text-xs outline-none"
+                          aria-invalid={Boolean(inlineError)}
+                          className={`w-full p-2.5 bg-white border rounded-xl text-xs outline-none ${inlineError ? 'border-rose-500 ring-2 ring-rose-500/20' : 'border-amber-200'}`}
                         />
+                        {inlineError && (
+                          <p role="alert" className="text-[11px] font-bold text-rose-700">⚠️ {inlineError}</p>
+                        )}
                         <div className="flex justify-end gap-2">
                           <button
                             type="button"
@@ -1954,26 +2165,33 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                             type="button"
                             onClick={handleClarify}
                             disabled={actionGuard.isPending(`clarify:${activeRequest.id}`)}
-                            className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer"
+                            className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer disabled:opacity-60"
                           >
-                            إرسال الاستفسار
+                            {actionGuard.isPending(`clarify:${activeRequest.id}`) ? 'جاري الإرسال...' : 'إرسال الاستفسار'}
                           </button>
                         </div>
                       </div>
                     )}
 
                     {/* Reject Form */}
-                    {activeAction === 'reject' && (
+                    {activeAction === 'reject' && canReject && (
                       <div className="mt-3 p-4 bg-rose-50 rounded-xl border border-rose-200 space-y-3 animate-in fade-in duration-150">
                         <h5 className="font-bold text-rose-950 text-xs">تأكيد رفض طلب الصرف:</h5>
                         <input
                           type="text"
                           required
                           value={rejectionReason}
-                          onChange={(e) => setRejectionReason(e.target.value)}
+                          onChange={(e) => {
+                            setRejectionReason(e.target.value);
+                            if (inlineError) setInlineError(null);
+                          }}
                           placeholder="اكتب سبب الرفض بوضوح للموظف..."
-                          className="w-full p-2.5 bg-white border border-rose-200 rounded-xl text-xs outline-none"
+                          aria-invalid={Boolean(inlineError)}
+                          className={`w-full p-2.5 bg-white border rounded-xl text-xs outline-none ${inlineError ? 'border-rose-500 ring-2 ring-rose-500/20' : 'border-rose-200'}`}
                         />
+                        {inlineError && (
+                          <p role="alert" className="text-[11px] font-bold text-rose-700">⚠️ {inlineError}</p>
+                        )}
                         <div className="flex justify-end gap-2">
                           <button
                             type="button"
@@ -1986,36 +2204,37 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                             type="button"
                             onClick={handleReject}
                             disabled={actionGuard.isPending(`reject:${activeRequest.id}`)}
-                            className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer"
+                            className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-xs cursor-pointer disabled:opacity-60"
                           >
-                            تأكيد الرفض
+                            {actionGuard.isPending(`reject:${activeRequest.id}`) ? 'جاري الرفض...' : 'تأكيد الرفض'}
                           </button>
                         </div>
                       </div>
                     )}
                   </div>
+                  )
                 )
               )}
 
-                {/* 3. Both Finance & Admin: When Request is Approved -> Prominent Disbursement Action */}
-                {activeRequest.status === 'approved' && (
+                {/* 2. Approved → disbursement (finance & admins, permissions.ts: disburseRequests) */}
+                {activeRequest.status === 'approved' && canDisburse && (
                   <div className="p-5 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-2xl space-y-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
-                      <div>
+                      <div className="min-w-0">
                         <span className="font-extrabold text-blue-950 text-sm flex items-center gap-1.5">
-                          <CheckCircle2 className="h-4 w-4 text-blue-600" />
-                          <span>الطلب معتمد ومصرح بصرفه بمبلغ ({activeRequest.amount.toLocaleString()} {activeRequest.currency})</span>
+                          <CheckCircle2 className="h-4 w-4 text-blue-600 shrink-0" />
+                          <span>الطلب معتمد ومصرح بصرفه بمبلغ ({fmtMoney(activeRequest.amount)} {activeRequest.currency})</span>
                         </span>
                         <p className="text-xs text-blue-700 mt-0.5">
-                          {activeRequest.requestType === 'income' 
-                            ? 'طلب التوريد معتمد وجاهز لتأكيد إيداع واستلام المبلغ في حساب وخزينة الشركة.' 
+                          {activeRequest.requestType === 'income'
+                            ? 'طلب التوريد معتمد وجاهز لتأكيد إيداع واستلام المبلغ في حساب وخزينة الشركة.'
                             : 'جاهز الآن للتحويل المصرفي إلى حساب المستفيد الموضح أعلاه.'}
                         </p>
                       </div>
 
                       <button
                         type="button"
-                        onClick={() => setActiveAction(activeAction === 'disburse' ? 'none' : 'disburse')}
+                        onClick={() => toggleAction('disburse')}
                         className={`px-5 py-2.5 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-2 transition cursor-pointer ${
                           activeRequest.requestType === 'income'
                             ? 'bg-emerald-600 hover:bg-emerald-700'
@@ -2024,8 +2243,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                       >
                         <CreditCard className="h-4 w-4" />
                         <span>
-                          {activeRequest.requestType === 'income' 
-                            ? '📥 استلام وتأكيد التوريد في الخزينة الآن' 
+                          {activeRequest.requestType === 'income'
+                            ? '📥 استلام وتأكيد التوريد في الخزينة الآن'
                             : '💸 تنفيذ الصرف والتحويل المالي الآن'}
                         </span>
                       </button>
@@ -2036,13 +2255,14 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                       <form onSubmit={handleDisburse} className="mt-4 p-4 bg-white rounded-2xl border border-blue-200 space-y-4 animate-in fade-in duration-150">
                         <div className="flex items-center justify-between pb-2 border-b border-slate-100">
                           <span className="font-bold text-slate-800 text-xs">
-                            {activeRequest.requestType === 'income' 
-                              ? '📥 بيانات استلام وتوريد المبلغ في الخزينة/الحساب:' 
+                            {activeRequest.requestType === 'income'
+                              ? '📥 بيانات استلام وتوريد المبلغ في الخزينة/الحساب:'
                               : '💸 بيانات تنفيذ العملية والتحويل المصرفي:'}
                           </span>
                           <button
                             type="button"
                             onClick={() => setActiveAction('none')}
+                            aria-label="إغلاق"
                             className="text-slate-400 hover:text-slate-600 p-1"
                           >
                             <X className="h-4 w-4" />
@@ -2051,72 +2271,21 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                           {/* Payment Account / Vault */}
-                          <div>
-                            <label className="block font-bold text-slate-700 mb-1">
-                              {activeRequest.requestType === 'income' 
-                                ? 'خزينة / حساب الاستلام المودع فيه (+ IN) *' 
-                                : 'خزينة / حساب الصرف المحول منه (- OUT) *'}
-                            </label>
-                            <select
-                              value={disburseAccountId}
-                              onChange={(e) => {
-                                setDisburseAccountId(e.target.value);
-                                const acc = paymentAccounts.find(a => a.id === e.target.value);
-                                if (acc) {
-                                  setDisburseBankName(`${acc.name} (${acc.accountIdentifier})`);
-                                  if (acc.type === 'instapay') setDisburseMethod('instapay');
-                                  else if (acc.type === 'wallet') setDisburseMethod('digital_wallet');
-                                  else if (acc.type === 'bank') setDisburseMethod('bank_transfer');
-                                  else if (acc.type === 'cash') setDisburseMethod('cash');
-                                }
-                              }}
-                              className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold"
-                            >
-                              {paymentAccounts.length > 0 ? (
-                                paymentAccounts.map(acc => (
-                                  <option key={acc.id} value={acc.id}>
-                                    {acc.name} — {acc.type === 'bank' ? 'حساب بنكي' : acc.type === 'instapay' ? 'انستاباي' : 'خزينة'} ({acc.accountIdentifier}) — الرصيد: {Number(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency}
-                                  </option>
-                                ))
-                              ) : (
-                                <>
-                                  <option value="">انستاباي / الحساب المصرفي الرئيسي</option>
-                                  <option value="">بنك مصر — الحساب الجاري</option>
-                                  <option value="">البنك الأهلي المصري — حساب المصروفات</option>
-                                  <option value="">الخزينة النقدية الرئيسية (Cash Desk)</option>
-                                </>
-                              )}
-                            </select>
-                            {(() => {
-                              const acc = paymentAccounts.find(a => a.id === disburseAccountId) || paymentAccounts[0];
-                              const parentBank = resolveParentBankAccount(acc);
-                              if (!parentBank) return null;
-                              return (
-                                <div className="mt-2 p-2.5 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 text-xs flex items-start gap-2">
-                                  <Landmark className="h-4 w-4 text-blue-600 shrink-0 mt-0.5" />
-                                  <div>
-                                    <span className="font-bold block">خصم بنكي مزدوج تلقائي:</span>
-                                    <span className="text-[11px] text-blue-800 leading-relaxed">
-                                      حساب ({acc?.name}) مربوط بالحساب البنكي (<strong>{parentBank.name}</strong>). سيتم خصم مبلغ الصرف تلقائياً من هذا الحساب ومن الحساب البنكي الرئيسي معاً.
-                                    </span>
-                                  </div>
-                                </div>
-                              );
-                            })()}
-                          </div>
+                          {renderDisburseAccountField(activeRequest)}
 
                           {/* Payment Method */}
                           <div>
                             <label className="block font-bold text-slate-700 mb-1">وسيلة التحويل المنفذة *</label>
                             <select
                               value={disburseMethod}
-                              onChange={(e: any) => setDisburseMethod(e.target.value)}
+                              onChange={(e) => setDisburseMethod(e.target.value as PaymentMethod)}
                               className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold"
                             >
                               <option value="instapay">انستاباي (InstaPay)</option>
                               <option value="bank_transfer">تحويل بنكي فوري (IBAN)</option>
                               <option value="digital_wallet">محفظة إلكترونية (فودافون كاش / اتصالات / أورانج)</option>
                               <option value="cash">نقداً من الخزينة</option>
+                              <option value="cheque">شيك مصرفي</option>
                             </select>
                           </div>
 
@@ -2156,6 +2325,10 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                           </div>
                         </div>
 
+                        {inlineError && inlineError !== activeDisburseShortfall && (
+                          <p role="alert" className="text-[11px] font-bold text-rose-700">⚠️ {inlineError}</p>
+                        )}
+
                         <div className="flex items-center justify-end gap-2 pt-2">
                           <button
                             type="button"
@@ -2166,17 +2339,18 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                           </button>
                           <button
                             type="submit"
-                            disabled={disbursing}
-                            className={`px-6 py-2.5 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 flex items-center gap-2 ${
+                            disabled={disbursing || !activeDisburseAccount || Boolean(activeDisburseShortfall)}
+                            title={activeDisburseShortfall || undefined}
+                            className={`px-6 py-2.5 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${
                               activeRequest.requestType === 'income'
                                 ? 'bg-emerald-600 hover:bg-emerald-700'
                                 : 'bg-blue-600 hover:bg-blue-700'
                             }`}
                           >
-                            {disbursing 
-                              ? 'جاري الحفظ والتنفيذ...' 
-                              : (activeRequest.requestType === 'income' 
-                                  ? '📥 تأكيد إيداع واستلام المبلغ في الخزينة (+ IN)' 
+                            {disbursing
+                              ? 'جاري الحفظ والتنفيذ...'
+                              : (activeRequest.requestType === 'income'
+                                  ? '📥 تأكيد إيداع واستلام المبلغ في الخزينة (+ IN)'
                                   : '💸 تأكيد تحويل وصرف المبلغ من الخزينة (- OUT)')}
                           </button>
                         </div>
@@ -2222,7 +2396,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
               <div className="text-sm sm:text-base font-black flex items-center gap-2 flex-wrap">
                 <span>تم تحديد {selectedApprovedIds.length} طلبات معتمدة</span>
                 <span className="text-emerald-400 font-extrabold bg-emerald-950/60 px-2.5 py-0.5 rounded-lg border border-emerald-500/30">
-                  بإجمالي {selectedBatchSum.toLocaleString()} {currency}
+                  بإجمالي {fmtMoney(selectedBatchSum)} {currency}
                 </span>
               </div>
               <p className="text-xs text-slate-300 mt-0.5">
@@ -2295,7 +2469,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 <div>
                   <span className="text-[11px] font-bold text-slate-600 block">إجمالي مبالغ الصرف المطلوب:</span>
                   <div className="text-2xl font-black text-indigo-950 mt-0.5">
-                    {selectedBatchSum.toLocaleString()} <span className="text-sm font-bold text-indigo-700">{currency}</span>
+                    {fmtMoney(selectedBatchSum)} <span className="text-sm font-bold text-indigo-700">{currency}</span>
                   </div>
                 </div>
                 <div className="text-left bg-white/80 backdrop-blur-xs px-3.5 py-2 rounded-xl border border-indigo-100 text-xs">
@@ -2309,40 +2483,38 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 <label className="block font-bold text-slate-700 mb-1">
                   خزينة / حساب الصرف المحول منه (- OUT) *
                 </label>
-                <select
-                  required
-                  value={batchAccountId}
-                  onChange={(e) => setBatchAccountId(e.target.value)}
-                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-800 text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                >
-                  {paymentAccounts.length > 0 ? (
-                    paymentAccounts.map(acc => {
-                      const bal = Number(acc.currentBalance ?? acc.balance ?? 0);
-                      return (
-                        <option key={acc.id} value={acc.id}>
-                          {acc.name} ({acc.accountIdentifier}) — الرصيد: {bal.toLocaleString()} {acc.currency}
-                        </option>
-                      );
-                    })
-                  ) : (
-                    <option value="">الحساب المصرفي الرئيسي</option>
-                  )}
-                </select>
+                {batchAccounts.length === 0 ? (
+                  <div role="alert" className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-[11px] font-bold">
+                    لا يوجد حساب خزينة نشط بعملة الطلبات المحددة. يرجى إضافة حساب أو تفعيله من شاشة الخزينة أولاً.
+                  </div>
+                ) : (
+                  <select
+                    required
+                    value={batchAccount?.id || ''}
+                    onChange={(e) => setBatchAccountId(e.target.value)}
+                    className={`w-full p-2.5 bg-slate-50 border rounded-xl font-bold text-slate-800 text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 ${batchShortfall ? 'border-rose-400' : 'border-slate-200'}`}
+                  >
+                    {batchAccounts.map(acc => (
+                      <option key={acc.id} value={acc.id}>
+                        {acc.name} — {accountTypeLabel(acc.type)} ({acc.accountIdentifier}) — الرصيد: {fmtMoney(accountBalance(acc))} {currencyCode(acc.currency)}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {batchCurrencies.size > 1 && (
+                  <div className="mt-1.5 p-2 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-[11px] font-bold flex items-center gap-1.5">
+                    <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                    <span>الطلبات المحددة بعملات مختلفة ({Array.from(batchCurrencies).join('، ')}): يُصرف من الحساب فقط ما يطابق عملته، ويُرفض الباقي. يُفضل تحديد طلبات بعملة واحدة.</span>
+                  </div>
+                )}
+                {batchShortfall && (
+                  <div role="alert" className="mt-1.5 p-2 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-[11px] font-bold flex items-start gap-1.5">
+                    <AlertCircle className="h-3.5 w-3.5 text-rose-600 shrink-0 mt-0.5" />
+                    <span>{batchShortfall} (إجمالي الدفعة {fmtMoney(batchOutSum)})</span>
+                  </div>
+                )}
                 {(() => {
-                  const currentAcc = paymentAccounts.find(a => a.id === batchAccountId);
-                  const bal = Number(currentAcc?.currentBalance ?? currentAcc?.balance ?? 0);
-                  if (currentAcc && bal < selectedBatchSum) {
-                    return (
-                      <div className="mt-1.5 p-2 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-[11px] font-bold flex items-center gap-1.5">
-                        <AlertCircle className="h-3.5 w-3.5 text-rose-600 shrink-0" />
-                        <span>تنبيه: رصيد الحساب المختار ({bal.toLocaleString()}) أقل من إجمالي مبلغ الدفعة ({selectedBatchSum.toLocaleString()}).</span>
-                      </div>
-                    );
-                  }
-                  return null;
-                })()}
-                {(() => {
-                  const currentAcc = paymentAccounts.find(a => a.id === batchAccountId);
+                  const currentAcc = batchAccount;
                   const parentBank = resolveParentBankAccount(currentAcc);
                   if (!parentBank) return null;
                   return (
@@ -2373,6 +2545,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                     <option value="bank_transfer">تحويل بنكي فوري (IBAN)</option>
                     <option value="digital_wallet">محفظة إلكترونية</option>
                     <option value="cash">نقداً من الخزينة</option>
+                    <option value="cheque">شيك مصرفي</option>
                   </select>
                 </div>
 
@@ -2433,7 +2606,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                       </div>
                       <div className="text-left shrink-0">
                         <span className="font-bold text-emerald-700 text-xs">
-                          {req.amount.toLocaleString()} {req.currency}
+                          {fmtMoney(req.amount)} {req.currency}
                         </span>
                       </div>
                     </div>
@@ -2453,7 +2626,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={isBatchDisbursing || selectedBatchRequests.length === 0}
+                  disabled={isBatchDisbursing || selectedBatchRequests.length === 0 || !batchAccount || Boolean(batchShortfall)}
                   className="px-6 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer disabled:opacity-50 flex items-center gap-2 active:scale-95"
                 >
                   <Zap className="h-4 w-4 fill-white" />
@@ -2500,13 +2673,10 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
             {/* QR Code Container */}
             <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 inline-block mx-auto mb-4 relative shadow-inner">
               <div className="p-3 bg-white rounded-xl shadow-xs border border-slate-100">
-                <img
-                  src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=10&data=${encodeURIComponent(
-                    qrModalRequest.paymentAccountDetails || qrModalRequest.requestNumber
-                  )}`}
-                  alt="Payment QR Code"
-                  className="w-48 h-48 sm:w-52 sm:h-52 mx-auto object-contain"
-                  loading="lazy"
+                {/* Drawn in the browser: the account data is never sent to an outside QR service. */}
+                <PaymentQrCode
+                  key={qrModalRequest.paymentAccountDetails || qrModalRequest.requestNumber}
+                  value={qrModalRequest.paymentAccountDetails || qrModalRequest.requestNumber}
                 />
               </div>
               <div className="mt-2.5 flex items-center justify-center gap-1.5 text-[11px] font-bold text-slate-600">
@@ -2517,27 +2687,25 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
             {/* Payment Details Box */}
             <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200/80 text-right text-xs space-y-2 mb-4">
-              <div className="flex items-center justify-between">
-                <span className="text-slate-500">المستفيد:</span>
-                <span className="font-bold text-slate-800">{qrModalRequest.requesterName}</span>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500 shrink-0">المستفيد:</span>
+                <span className="font-bold text-slate-800 break-words text-left">{qrModalRequest.beneficiaryName || qrModalRequest.requesterName}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-slate-500">المبلغ المطلوب:</span>
                 <span className="font-black text-emerald-700 text-sm">
-                  {qrModalRequest.amount.toLocaleString()} {qrModalRequest.currency}
+                  {fmtMoney(qrModalRequest.amount)} {qrModalRequest.currency}
                 </span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-slate-500">وسيلة الصرف:</span>
                 <span className="font-bold text-slate-800">
-                  {qrModalRequest.preferredPaymentMethod === 'instapay' ? 'انستاباي (InstaPay)' :
-                   qrModalRequest.preferredPaymentMethod === 'digital_wallet' ? 'محفظة إلكترونية' :
-                   qrModalRequest.preferredPaymentMethod === 'bank_transfer' ? 'تحويل بنكي (IBAN)' : 'نقداً'}
+                  {paymentMethodLabel(resolveRequestPaymentMethod(qrModalRequest))}
                 </span>
               </div>
-              <div className="pt-2 border-t border-slate-200 flex items-center justify-between">
-                <span className="text-slate-500">بيانات الحساب / المعرف:</span>
-                <span className="font-mono font-bold text-slate-900 select-all">
+              <div className="pt-2 border-t border-slate-200 flex items-center justify-between gap-2">
+                <span className="text-slate-500 shrink-0">بيانات الحساب / المعرف:</span>
+                <span className="font-mono font-bold text-slate-900 select-all break-all text-left">
                   {qrModalRequest.paymentAccountDetails || '—'}
                 </span>
               </div>
@@ -2555,7 +2723,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 className="flex items-center justify-center gap-1.5 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer shadow-xs active:scale-95"
               >
                 <Copy className="h-4 w-4" />
-                <span>{copiedText && (!copiedItemId || copiedItemId === qrModalRequest.id) ? 'تم النسخ بنجاح ✓' : 'نسخ البيانات'}</span>
+                <span>{copiedOk(qrModalRequest.id) ? 'تم النسخ بنجاح ✓' : copyFailed(qrModalRequest.id) ? 'تعذر النسخ — انسخ يدوياً' : 'نسخ البيانات'}</span>
               </button>
 
               <button

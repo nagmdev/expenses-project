@@ -6,15 +6,47 @@ import {
   KeyRound, 
   Eye, 
   EyeOff, 
-  ShieldCheck, 
-  Building2, 
-  AlertCircle, 
+  ShieldCheck,
+  AlertCircle,
   CheckCircle2, 
   Loader2,
   Wallet
 } from 'lucide-react';
 
 import { isValidEmail } from '../utils/validation';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
+
+/**
+ * Sign-in errors the user can fix (wrong password, unknown e-mail, too many attempts,
+ * no connection) get a clear Arabic message and are NOT logged as errors: they are
+ * expected outcomes, not bugs. Anything else is logged once for diagnosis.
+ */
+const EXPECTED_AUTH_ERRORS: Record<string, string> = {
+  'auth/invalid-credential': 'البريد الإلكتروني أو كلمة المرور غير صحيحة. يرجى التحقق وإعادة المحاولة.',
+  'auth/invalid-login-credentials': 'البريد الإلكتروني أو كلمة المرور غير صحيحة. يرجى التحقق وإعادة المحاولة.',
+  'auth/wrong-password': 'البريد الإلكتروني أو كلمة المرور غير صحيحة. يرجى التحقق وإعادة المحاولة.',
+  'auth/user-not-found': 'البريد الإلكتروني أو كلمة المرور غير صحيحة. يرجى التحقق وإعادة المحاولة.',
+  'auth/missing-password': 'يرجى إدخال كلمة المرور.',
+  'auth/invalid-email': 'صيغة البريد الإلكتروني غير صالحة.',
+  'auth/missing-email': 'يرجى إدخال البريد الإلكتروني.',
+  'auth/user-disabled': 'تم إيقاف هذا الحساب. يرجى التواصل مع مدير شركتك.',
+  'auth/too-many-requests': 'تم تقييد المحاولات مؤقتاً بسبب تكرار المحاولات الخاطئة. يرجى الانتظار بضع دقائق ثم إعادة المحاولة، أو استخدم «نسيت كلمة المرور؟».',
+  'auth/network-request-failed': 'تعذر الاتصال بخادم تسجيل الدخول. تحقق من اتصالك بالإنترنت ثم أعد المحاولة.',
+  'auth/popup-blocked': 'منع المتصفح نافذة تسجيل الدخول عبر Google. اسمح بالنوافذ المنبثقة لهذا الموقع ثم أعد المحاولة.',
+  'auth/unauthorized-domain': 'تسجيل الدخول عبر Google غير مفعّل لهذا النطاق. تواصل مع مسؤول المنصة.',
+};
+
+/** Closing the Google popup is the user's choice, not an error. */
+const SILENT_AUTH_ERRORS = new Set(['auth/popup-closed-by-user', 'auth/cancelled-popup-request', 'auth/user-cancelled']);
+
+const authErrorMessage = (err: unknown, fallback: string): string | null => {
+  const code = String((err as { code?: unknown } | null)?.code || '');
+  if (SILENT_AUTH_ERRORS.has(code)) return null;
+  const known = EXPECTED_AUTH_ERRORS[code];
+  if (known) return known;
+  console.warn('[Auth] unexpected sign-in error:', code || err);
+  return fallback;
+};
 
 export const LoginPage: React.FC = () => {
   const { loginWithEmail, signInWithGoogle, resetPassword } = useApp();
@@ -32,6 +64,9 @@ export const LoginPage: React.FC = () => {
   const [resetLoading, setResetLoading] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
 
+  // Esc closes the "forgot password" dialog.
+  useEscapeToClose(isResetModalOpen, () => setIsResetModalOpen(false));
+
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = email.trim().toLowerCase();
@@ -47,20 +82,8 @@ export const LoginPage: React.FC = () => {
 
     try {
       await loginWithEmail(cleanEmail, password);
-    } catch (err: any) {
-      console.error('[Login Error]', err);
-      const code = err?.code || '';
-      if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
-        setError('البريد الإلكتروني أو كلمة المرور غير صحيحة. يرجى التحقق وإعادة المحاولة.');
-      } else if (code === 'auth/invalid-email') {
-        setError('صيغة البريد الإلكتروني غير صالحة.');
-      } else if (code === 'auth/user-disabled') {
-        setError('تم إيقاف هذا الحساب. يرجى التواصل مع مدير شركتك.');
-      } else if (code === 'auth/too-many-requests') {
-        setError('تم تقييد المحاولات مؤقتاً بسبب تكرار المحاولات الخاطئة. يرجى الانتظار بضع دقائق.');
-      } else {
-        setError(err?.message || 'تعذر تسجيل الدخول، يرجى المحاولة مرة أخرى.');
-      }
+    } catch (err: unknown) {
+      setError(authErrorMessage(err, 'تعذر تسجيل الدخول حالياً، يرجى المحاولة مرة أخرى بعد لحظات.'));
     } finally {
       setIsLoading(false);
     }
@@ -71,11 +94,8 @@ export const LoginPage: React.FC = () => {
     setIsLoading(true);
     try {
       await signInWithGoogle();
-    } catch (err: any) {
-      if (err?.code !== 'auth/popup-closed-by-user') {
-        console.error('[Google Login Error]', err);
-        setError('تعذر تسجيل الدخول عبر Google. يرجى التحقق من اتصالك والمحاولة مجدداً.');
-      }
+    } catch (err: unknown) {
+      setError(authErrorMessage(err, 'تعذر تسجيل الدخول عبر Google. يرجى التحقق من اتصالك والمحاولة مجدداً.'));
     } finally {
       setIsLoading(false);
     }
@@ -97,13 +117,11 @@ export const LoginPage: React.FC = () => {
     try {
       await resetPassword(cleanEmail);
       setResetSuccess(true);
-    } catch (err: any) {
-      console.error('[Reset Password Error]', err);
-      if (err?.code === 'auth/user-not-found') {
-        setResetError('لم يتم العثور على حساب مسجل بهذا البريد الإلكتروني.');
-      } else {
-        setResetError('تعذر إرسال رابط إعادة التعيين. تأكد من صحة البريد والمحاولة ثانية.');
-      }
+    } catch (err: unknown) {
+      const code = String((err as { code?: unknown } | null)?.code || '');
+      setResetError(code === 'auth/user-not-found'
+        ? 'لم يتم العثور على حساب مسجل بهذا البريد الإلكتروني.'
+        : authErrorMessage(err, 'تعذر إرسال رابط إعادة التعيين. تأكد من صحة البريد والمحاولة ثانية.'));
     } finally {
       setResetLoading(false);
     }
@@ -197,6 +215,7 @@ export const LoginPage: React.FC = () => {
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
                   className="absolute left-3 top-3 text-slate-500 hover:text-slate-300 transition cursor-pointer"
+                  aria-label={showPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
                 >
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
@@ -267,9 +286,9 @@ export const LoginPage: React.FC = () => {
 
       {/* Forgot Password Modal */}
       {isResetModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-xs p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-xs p-4" role="dialog" aria-modal="true" aria-labelledby="reset-password-title">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-sm w-full p-6 shadow-2xl text-xs text-slate-200">
-            <h3 className="font-bold text-base text-white mb-2">استعادة كلمة المرور</h3>
+            <h3 id="reset-password-title" className="font-bold text-base text-white mb-2">استعادة كلمة المرور</h3>
             <p className="text-slate-400 mb-4 leading-relaxed">
               أدخل بريدك الإلكتروني وسنرسل لك رابطاً رسمياً وآمناً من Firebase لتعيين كلمة مرور جديدة.
             </p>

@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
-  X, 
-  CreditCard,
+  X,
   Building2,
   AlertCircle,
   Layers,
@@ -26,6 +25,8 @@ import {
 } from 'lucide-react';
 import { processAndUploadInvoice } from '../utils/fileUpload';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { isArchivedOrg } from '../domain/common';
 import { InvoiceViewerModal } from './InvoiceViewerModal';
 import { 
   PaymentMethod, 
@@ -36,13 +37,68 @@ import {
   ExpenseRequest,
   RequestAttachment 
 } from '../types';
-import { 
-  sanitizeAmount, 
-  sanitizeDigitalWallet, 
-  sanitizeIBAN, 
-  sanitizeInstaPay, 
-  handleNumericKeyDown 
+import {
+  sanitizeAmount,
+  sanitizeDigitalWallet,
+  sanitizeIBAN,
+  sanitizeInstaPay,
+  handleNumericKeyDown,
+  ibanError,
+  walletNumberError,
+  beneficiaryNameError,
+  instapayAddressError
 } from '../utils/validation';
+import { resolveRequestPaymentMethod, normalizePaymentMethod, extractIban, fmtMoney, accountBalance, currencyCode } from '../utils/requestUi';
+
+/** Largest attachment accepted by the form (the same number the upload hint shows). */
+const MAX_UPLOAD_MB = 15;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+const FILE_TOO_LARGE = `حجم الملف كبير جداً، يرجى اختيار ملف أقل من ${MAX_UPLOAD_MB} ميجابايت`;
+
+/**
+ * Normalises text for keyword matching: lower case, Arabic letter variants unified
+ * (أ/إ/آ → ا, ة → ه, ى → ي) and diacritics removed.
+ */
+const normalizeForMatch = (s: string) =>
+  (s || '')
+    .toLowerCase()
+    .replace(/[ً-ْ]/g, '')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي');
+
+/** A keyword hit: Latin keywords must match a whole word ("we" is not "wedding"). */
+const keywordHits = (text: string, keyword: string) => {
+  const t = normalizeForMatch(text);
+  const k = normalizeForMatch(keyword).trim();
+  if (!k) return false;
+  if (/^[a-z0-9 ]+$/.test(k)) {
+    return new RegExp(`(^|[^a-z0-9])${k.replace(/ /g, '\\s*')}([^a-z0-9]|$)`).test(t);
+  }
+  return t.includes(k);
+};
+
+/**
+ * The service a quick template means: the one whose name (worth more) or code /
+ * description matches most of the template's keywords, Arabic or English.
+ */
+function matchServiceForTemplate(services: ServiceCategory[], keywords: string[]): ServiceCategory | undefined {
+  let best: ServiceCategory | undefined;
+  let bestScore = 0;
+  for (const s of services) {
+    let score = 0;
+    for (const k of keywords) {
+      if (keywordHits(s.name, k)) score += 3;
+      else if (keywordHits(`${s.code || ''} ${s.serviceNature || ''}`, k)) score += 2;
+      else if (keywordHits(s.description || '', k)) score += 1;
+    }
+    if (score > bestScore) {
+      best = s;
+      bestScore = score;
+    }
+  }
+  return best;
+}
 
 interface NewRequestModalProps {
   isOpen: boolean;
@@ -52,7 +108,7 @@ interface NewRequestModalProps {
 
 export type IncomeShape = 'instapay' | 'wallet' | 'bank' | 'cash';
 
-export const INCOME_PAYMENT_SHAPES = [
+const INCOME_PAYMENT_SHAPES = [
   {
     id: 'instapay' as IncomeShape,
     title: 'إنستاباي',
@@ -177,49 +233,49 @@ const EXPENSE_QUICK_TEMPLATES = [
     label: '✈️ استخراج تأشيرة',
     title: 'طلب سداد رسوم استخراج تأشيرة',
     description: 'سداد تكاليف ورسوم استخراج تأشيرة سفر رسمية ومستندات المسافر',
-    keywords: ['تأشيرة', 'فيزا', 'سفر', 'جواز', 'عمرة', 'تأشيرات', 'visa'],
+    keywords: ['تأشيرة', 'فيزا', 'جواز', 'عمرة', 'تأشيرات', 'visa', 'visas', 'passport', 'umrah'],
     templateType: 'visa' as const,
   },
   {
     label: '📅 سداد قسط شهري',
     title: 'سداد القسط الشهري للأجهزة والمعدات',
     description: 'سداد القسط الشهري المستحق لماكينات وأجهزة المقر التشغيلية',
-    keywords: ['قسط', 'أقساط', 'سداد', 'جهاز', 'ماكينة', 'أجهزة'],
+    keywords: ['قسط', 'أقساط', 'جهاز', 'ماكينة', 'أجهزة', 'installment', 'installments', 'instalment', 'lease', 'leasing'],
     templateType: 'installment' as const,
   },
   {
     label: '⚡ شحن محفظة مندوب',
     title: 'شحن رصيد محفظة للمندوب / مأمورية',
     description: 'شحن رصيد محفظة إلكترونية للمندوب لتغطية مصاريف المأمورية والانتقالات',
-    keywords: ['مندوب', 'محفظة', 'مأمورية', 'سفر', 'انتقالات', 'عهدة'],
+    keywords: ['مندوب', 'محفظة', 'مأمورية', 'شحن', 'wallet', 'top up', 'topup', 'mission', 'courier'],
     templateType: 'wallet_topup' as const,
   },
   {
     label: '⚡ شحن كارت كهرباء',
     title: 'شحن كارت كهرباء المقر',
     description: 'شحن كارت عداد الكهرباء الدوري للمقر',
-    keywords: ['كهرباء', 'طاقة', 'عداد', 'مرافق'],
+    keywords: ['كهرباء', 'طاقة', 'عداد', 'مرافق', 'electricity', 'electric', 'power', 'meter', 'utility', 'utilities'],
     templateType: null,
   },
   {
     label: '⚡ فواتير إنترنت وهاتف',
     title: 'سداد فاتورة الإنترنت الشهرية',
     description: 'سداد فاتورة واشتراك الإنترنت والاتصالات للأعمال',
-    keywords: ['إنترنت', 'انترنت', 'اتصالات', 'هاتف', 'شبكات', 'سحابية'],
+    keywords: ['إنترنت', 'انترنت', 'اتصالات', 'هاتف', 'شبكات', 'راوتر', 'internet', 'we', 'telecom', 'phone', 'mobile', 'landline', 'adsl', 'vdsl', 'fiber', 'wifi', 'broadband', 'vodafone', 'etisalat', 'orange'],
     templateType: null,
   },
   {
     label: '⚡ بوفيه ومستلزمات مقر',
     title: 'شراء مستلزمات بوفيه وضيافة',
     description: 'شراء مستلزمات بوفيه وضيافة ومستلزمات نظافة دورية للمقر',
-    keywords: ['بوفيه', 'ضيافة', 'مستلزمات', 'أدوات مكتبية', 'نثريات', 'تشغيل'],
+    keywords: ['بوفيه', 'ضيافة', 'مستلزمات', 'أدوات مكتبية', 'نثريات', 'نظافة', 'catering', 'buffet', 'hospitality', 'pantry', 'supplies', 'cleaning', 'kitchen'],
     templateType: null,
   },
   {
     label: '⚡ وقود وانتقالات',
     title: 'بدل وقود ومصروفات انتقالات مأمورية',
     description: 'سداد فواتير وقود وبنزين ومصروفات انتقالات مأمورية رسمية',
-    keywords: ['وقود', 'بنزين', 'انتقالات', 'سفر', 'سيارات', 'مهمة'],
+    keywords: ['وقود', 'بنزين', 'سولار', 'انتقالات', 'سيارات', 'مهمة', 'fuel', 'petrol', 'gasoline', 'diesel', 'transport', 'transportation', 'car', 'cars', 'uber', 'taxi'],
     templateType: null,
   },
 ];
@@ -282,11 +338,17 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const orgList = useMemo(() => {
     return (allOrganizations && allOrganizations.length > 0) ? allOrganizations : organizations;
   }, [allOrganizations, organizations]);
+  // Companies offered for the request: active ones only (an archived one takes no new records);
+  // an edited request keeps its own company listed.
+  const creatableOrgs = useMemo(
+    () => orgList.filter(o => !isArchivedOrg(o) || o.id === editingRequest?.orgId),
+    [orgList, editingRequest?.orgId]
+  );
 
   const [selectedOrgId, setSelectedOrgId] = useState<string>(() => {
     if (activeOrgId && activeOrgId !== 'all') return activeOrgId;
     if (activeOrg?.id) return activeOrg.id;
-    return orgList[0]?.id || '';
+    return creatableOrgs[0]?.id || '';
   });
 
   useEffect(() => {
@@ -294,20 +356,25 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       setSelectedOrgId(activeOrgId);
     } else if (activeOrg?.id) {
       setSelectedOrgId(activeOrg.id);
-    } else if (orgList.length > 0 && !selectedOrgId) {
-      setSelectedOrgId(orgList[0].id);
+    } else if (creatableOrgs.length > 0 && !selectedOrgId) {
+      setSelectedOrgId(creatableOrgs[0].id);
     }
-  }, [activeOrgId, activeOrg, orgList, selectedOrgId]);
+  }, [activeOrgId, activeOrg, creatableOrgs, selectedOrgId]);
 
   const currentOrg = useMemo(() => {
     return orgList.find(o => o.id === selectedOrgId) || activeOrg || orgList[0];
   }, [orgList, selectedOrgId, activeOrg]);
 
+  // A deactivated service / provider (one that old requests still point to) is never
+  // offered for a new request; an edited request keeps the one it already has.
+  const keptServiceId = editingRequest?.serviceCategoryId;
+  const keptProviderId = editingRequest?.providerId;
   const sourceServices = (allServices && allServices.length > 0) ? allServices : services;
   const availableServices = useMemo(() => {
-    if (!selectedOrgId) return sourceServices;
-    return sourceServices.filter(s => isServiceMatchingOrg(s, selectedOrgId));
-  }, [sourceServices, selectedOrgId]);
+    const usable = sourceServices.filter(s => s.active !== false || s.id === keptServiceId);
+    if (!selectedOrgId) return usable;
+    return usable.filter(s => isServiceMatchingOrg(s, selectedOrgId));
+  }, [sourceServices, selectedOrgId, keptServiceId]);
 
   // Guaranteed fallback service so no organization is ever blocked
   const FALLBACK_SERVICE: ServiceCategory = useMemo(() => ({
@@ -334,15 +401,16 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
   const sourceProviders = (allProviders && allProviders.length > 0) ? allProviders : providers;
   const availableProviders = useMemo(() => {
-    if (!selectedOrgId) return sourceProviders;
-    return sourceProviders.filter(p => {
+    const usable = sourceProviders.filter(p => p.active !== false || p.id === keptProviderId);
+    if (!selectedOrgId) return usable;
+    return usable.filter(p => {
       const pAny = p as any;
       if (pAny.orgIds && Array.isArray(pAny.orgIds)) {
         return pAny.orgIds.includes(selectedOrgId);
       }
       return p.orgId === selectedOrgId || !p.orgId;
     });
-  }, [sourceProviders, selectedOrgId]);
+  }, [sourceProviders, selectedOrgId, keptProviderId]);
 
   // Guaranteed fallback provider so purchases (like office groceries) are never blocked
   const FALLBACK_PROVIDER = useMemo(() => ({
@@ -410,9 +478,9 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [amount, setAmount] = useState('');
   const [currency, setCurrency] = useState(currentOrg?.currency || activeOrg?.currency || 'EGP');
   const [urgency, setUrgency] = useState<'low' | 'medium' | 'high'>('medium');
-  const [preferredPaymentMethod, setPreferredPaymentMethod] = useState<PaymentMethod>(
-    (currentUser.preferredPaymentMethod as PaymentMethod) || 'instapay'
-  );
+  // The profile's preferred payout method ('wallet' is the legacy code of the e-wallet).
+  const profileDefaultMethod: PaymentMethod = normalizePaymentMethod(currentUser.preferredPaymentMethod) || 'instapay';
+  const [preferredPaymentMethod, setPreferredPaymentMethod] = useState<PaymentMethod>(profileDefaultMethod);
   const [paymentAccountDetails, setPaymentAccountDetails] = useState('');
   const [beneficiaryName, setBeneficiaryName] = useState('');
   const [activeTemplateType, setActiveTemplateType] = useState<'visa' | 'installment' | 'wallet_topup' | null>(null);
@@ -447,14 +515,20 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [isUploadingWalletTransfer, setIsUploadingWalletTransfer] = useState<boolean>(false);
   const walletFileInputRef = useRef<HTMLInputElement>(null);
 
+  // Whether the user changed anything since the form opened (Esc then asks before discarding).
+  const [touched, setTouched] = useState(false);
+  const markTouched = () => setTouched(true);
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 15 * 1024 * 1024) {
-      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 15 ميجابايت');
+    if (file.size > MAX_UPLOAD_BYTES) {
+      alert(FILE_TOO_LARGE);
+      e.target.value = '';
       return;
     }
+    markTouched();
 
     setIsUploadingInvoice(true);
     try {
@@ -473,10 +547,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 15 * 1024 * 1024) {
-      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 15 ميجابايت');
+    if (file.size > MAX_UPLOAD_BYTES) {
+      alert(FILE_TOO_LARGE);
+      e.target.value = '';
       return;
     }
+    markTouched();
 
     setIsUploadingVisaDoc(true);
     try {
@@ -495,10 +571,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 15 * 1024 * 1024) {
-      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 15 ميجابايت');
+    if (file.size > MAX_UPLOAD_BYTES) {
+      alert(FILE_TOO_LARGE);
+      e.target.value = '';
       return;
     }
+    markTouched();
 
     setIsUploadingInstallmentTransfer(true);
     try {
@@ -517,10 +595,12 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 15 * 1024 * 1024) {
-      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 15 ميجابايت');
+    if (file.size > MAX_UPLOAD_BYTES) {
+      alert(FILE_TOO_LARGE);
+      e.target.value = '';
       return;
     }
+    markTouched();
 
     setIsUploadingWalletTransfer(true);
     try {
@@ -577,9 +657,9 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         setIsCustomDescription(true);
         setCustomDescription(editingRequest.description || '');
 
-        if (editingRequest.preferredPaymentMethod) {
-          setPreferredPaymentMethod(editingRequest.preferredPaymentMethod);
-        }
+        // The same method the list / detail screens show for this request (older records
+        // have none stored), so saving an edit never switches it silently.
+        setPreferredPaymentMethod(resolveRequestPaymentMethod(editingRequest));
         setPaymentAccountDetails(editingRequest.paymentAccountDetails || '');
         setBeneficiaryName(editingRequest.beneficiaryName || '');
 
@@ -600,7 +680,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         setInstallmentDeviceDescription(editingRequest.installmentDeviceDescription || '');
         setWalletTransferAttachment(editingRequest.walletTransferAttachment || null);
       } else {
-        const defaultMethod = (currentUser.preferredPaymentMethod as PaymentMethod) || 'instapay';
+        const defaultMethod = profileDefaultMethod;
         setPreferredPaymentMethod(defaultMethod);
         const detail = getProfilePayoutDetail(defaultMethod);
         if (detail) {
@@ -618,6 +698,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         setInstallmentDeviceDescription(INSTALLMENT_DEVICE_PRESETS[0].description);
         setWalletTransferAttachment(null);
       }
+      setTouched(false);
     }
     // Runs only when the form is (re)opened or switches to another request. Real-time
     // snapshots create new object identities on every change; depending on the objects
@@ -632,13 +713,15 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
   // Validation & Error Handling States
   const [formError, setFormError] = useState<string | null>(null);
-  const [fieldHighlight, setFieldHighlight] = useState<'amount' | 'title' | 'paymentDetails' | null>(null);
+  const [fieldHighlight, setFieldHighlight] = useState<'amount' | 'title' | 'paymentDetails' | 'beneficiary' | null>(null);
 
   // Element Refs for Auto-Scrolling and Auto-Focus
   const amountInputRef = useRef<HTMLInputElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const paymentInputRef = useRef<HTMLInputElement>(null);
+  const beneficiaryInputRef = useRef<HTMLInputElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const dialogRootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (currentOrg?.currency) {
@@ -707,23 +790,57 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     } else {
       setSelectedTitlePreset(EXPENSE_TITLE_TEMPLATES[0]);
       setSelectedJustPreset(EXPENSE_JUSTIFICATION_TEMPLATES[0]);
-      const defaultMethod = (currentUser.preferredPaymentMethod as PaymentMethod) || 'instapay';
+      const defaultMethod = profileDefaultMethod;
       setPreferredPaymentMethod(defaultMethod);
       setPaymentAccountDetails(getProfilePayoutDetail(defaultMethod));
     }
   };
 
-  // Close on Escape key press for accessibility
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        handleClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen]);
+  const handleClose = () => {
+    setRequestType('expense');
+    setSelectedIncomeShape('instapay');
+    setIsCustomTitle(false);
+    setIsCustomJustification(false);
+    setIsCustomDescription(false);
+    setSelectedTitlePreset(EXPENSE_TITLE_TEMPLATES[0]);
+    setSelectedJustPreset(EXPENSE_JUSTIFICATION_TEMPLATES[0]);
+    setSelectedDescPreset(EXPENSE_DESCRIPTION_TEMPLATES[0]);
+    setCustomTitle('');
+    setCustomJustification('');
+    setCustomDescription('');
+    setAmount('');
+    setItemsDetail('');
+    setTargetAccountId('');
+    setPaymentAccountDetails('');
+    setBeneficiaryName('');
+    setActiveTemplateType(null);
+    setIsPrepaidByRequester(false);
+    setInvoiceNumber('');
+    setInvoiceDate('');
+    setInvoiceAttachment(null);
+    setVisaDocumentAttachment(null);
+    setInstallmentTransferAttachment(null);
+    setInstallmentDeviceType(INSTALLMENT_DEVICE_PRESETS[0].name);
+    setInstallmentDeviceDescription(INSTALLMENT_DEVICE_PRESETS[0].description);
+    setWalletTransferAttachment(null);
+    setPreviewModalUrl(null);
+    setFormError(null);
+    setFieldHighlight(null);
+    setTouched(false);
+    onClose();
+  };
+
+  // Esc closes this form only when it is the top-most dialog (an attachment preview
+  // opened from it closes first), and never discards what the user typed without asking.
+  const handleEscape = () => {
+    if (submitGuard.pending) return;
+    const hasNewAttachment =
+      !isEditMode && Boolean(invoiceAttachment || visaDocumentAttachment || installmentTransferAttachment || walletTransferAttachment);
+    const hasUnsavedInput = touched || hasNewAttachment;
+    if (hasUnsavedInput && !window.confirm('إغلاق النموذج؟ ستُفقد البيانات والمرفقات التي أدخلتها ولم تُحفظ بعد.')) return;
+    handleClose();
+  };
+  useEscapeToClose(isOpen, handleEscape, dialogRootRef);
 
   if (!isOpen) return null;
 
@@ -755,8 +872,10 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       setSelectedProviderId(srv.vendorId);
     }
 
-    if (srv.defaultPaymentMethod) {
+    if (srv.defaultPaymentMethod && srv.defaultPaymentMethod !== preferredPaymentMethod) {
       setPreferredPaymentMethod(srv.defaultPaymentMethod);
+      // The payout details belong to the method: fill the new method's details from the profile.
+      setPaymentAccountDetails(getProfilePayoutDetail(srv.defaultPaymentMethod));
     }
 
     if (srv.defaultAccountId && availableAccounts.some(a => a.id === srv.defaultAccountId)) {
@@ -773,12 +892,10 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setFormError(null);
     setFieldHighlight(null);
     setActiveTemplateType(tpl.templateType || null);
+    markTouched();
 
-    const matched = effectiveServices.find(s => {
-      const sName = s.name.toLowerCase();
-      const sDesc = (s.description || '').toLowerCase();
-      return tpl.keywords.some(k => sName.includes(k.toLowerCase()) || sDesc.includes(k.toLowerCase()));
-    });
+    // Services are often named in English ("WE Internet"), so the keywords are both.
+    const matched = matchServiceForTemplate(effectiveServices, tpl.keywords);
 
     if (matched) {
       setSelectedServiceId(matched.id);
@@ -796,38 +913,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }, 100);
   };
 
-  const handleClose = () => {
-    setRequestType('expense');
-    setSelectedIncomeShape('instapay');
-    setIsCustomTitle(false);
-    setIsCustomJustification(false);
-    setIsCustomDescription(false);
-    setSelectedTitlePreset(EXPENSE_TITLE_TEMPLATES[0]);
-    setSelectedJustPreset(EXPENSE_JUSTIFICATION_TEMPLATES[0]);
-    setSelectedDescPreset(EXPENSE_DESCRIPTION_TEMPLATES[0]);
-    setCustomTitle('');
-    setCustomJustification('');
-    setCustomDescription('');
-    setAmount('');
-    setItemsDetail('');
-    setTargetAccountId('');
-    setPaymentAccountDetails('');
-    setBeneficiaryName('');
-    setActiveTemplateType(null);
-    setIsPrepaidByRequester(false);
-    setInvoiceNumber('');
-    setInvoiceDate('');
-    setInvoiceAttachment(null);
-    setVisaDocumentAttachment(null);
-    setInstallmentTransferAttachment(null);
-    setInstallmentDeviceType('ماكينة قهوة اسبرسو');
-    setInstallmentDeviceDescription('');
-    setWalletTransferAttachment(null);
-    setPreviewModalUrl(null);
-    setFormError(null);
-    setFieldHighlight(null);
-    onClose();
-  };
 
   const selectedServiceName = (effectiveServices.find(s => s.id === selectedServiceId)?.name || '').toLowerCase();
   const currentTitleLower = (isCustomTitle ? customTitle : selectedTitlePreset).toLowerCase();
@@ -858,6 +943,44 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
   const isAnyUploadInProgress =
     isUploadingInvoice || isUploadingVisaDoc || isUploadingInstallmentTransfer || isUploadingWalletTransfer;
+
+  // Payout details of an expense request: the format the chosen method needs, and the
+  // beneficiary's registered name for InstaPay (the field is required, marked *).
+  const payoutProblem = (): { message: string; field: 'paymentDetails' | 'beneficiary' } | null => {
+    const details = paymentAccountDetails.trim();
+    switch (preferredPaymentMethod) {
+      case 'cash':
+        return null;
+      case 'instapay': {
+        const addressError = instapayAddressError(details);
+        if (addressError) return { message: addressError, field: 'paymentDetails' };
+        const nameError = beneficiaryNameError(beneficiaryName);
+        return nameError ? { message: nameError, field: 'beneficiary' } : null;
+      }
+      case 'digital_wallet':
+      case 'wallet': {
+        const walletError = walletNumberError(details);
+        return walletError ? { message: walletError, field: 'paymentDetails' } : null;
+      }
+      case 'bank_transfer': {
+        const error = ibanError(extractIban(details));
+        return error ? { message: error, field: 'paymentDetails' } : null;
+      }
+      default:
+        return details ? null : { message: '⚠️ يرجى إدخال بيانات جهة الاستلام للمستفيد', field: 'paymentDetails' };
+    }
+  };
+
+  const checkPayoutDetails = (): boolean => {
+    const problem = payoutProblem();
+    if (!problem) return true;
+    setFormError(problem.message);
+    setFieldHighlight(problem.field);
+    const target = problem.field === 'beneficiary' ? beneficiaryInputRef.current : paymentInputRef.current;
+    target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target?.focus();
+    return false;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -894,19 +1017,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         return;
       }
 
-      if (requestType === 'expense' && preferredPaymentMethod !== 'cash' && !paymentAccountDetails.trim()) {
-        setFormError(
-          preferredPaymentMethod === 'instapay'
-            ? '⚠️ يرجى إدخال عنوان إنستاباي أو رقم الهاتف للمستفيد'
-            : preferredPaymentMethod === 'digital_wallet'
-            ? '⚠️ يرجى إدخال رقم المحفظة الإلكترونية للمستفيد'
-            : '⚠️ يرجى إدخال رقم الحساب البنكي / الآيبان للمستفيد'
-        );
-        setFieldHighlight('paymentDetails');
-        paymentInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        paymentInputRef.current?.focus();
-        return;
-      }
+      // Same payout checks as a new request (address / IBAN / wallet format, beneficiary name).
+      if (requestType === 'expense' && !checkPayoutDetails()) return;
 
       const selectedService = effectiveServices.find(s => s.id === selectedServiceId) || effectiveServices[0];
       const serviceId = selectedService?.id || editingRequest.serviceCategoryId;
@@ -933,7 +1045,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           await updateRequest(editingRequest.id, {
             title: activeTitle,
             description: requestType === 'income'
-              ? `طلب توريد مالي بقيمة ${Number(amount).toLocaleString()} ${currency}`
+              ? `طلب توريد مالي بقيمة ${fmtMoney(amount)} ${currency}`
               : (effectiveDescription.trim() || editingRequest.description),
             justification: requestType === 'income'
               ? 'إيداع وتوريد مالي مباشر'
@@ -999,7 +1111,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         try {
           await createRequest({
             title: titleText,
-            description: `طلب توريد مالي بقيمة ${Number(amount).toLocaleString()} ${currency} عبر ${shapeObj.title}`,
+            description: `طلب توريد مالي بقيمة ${fmtMoney(amount)} ${currency} عبر ${shapeObj.title}`,
             justification: 'إيداع وتوريد مالي مباشر لحساب وخزينة الشركة',
             amount: Number(amount),
             currency: currency || currentOrg?.currency || 'EGP',
@@ -1053,20 +1165,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       return;
     }
 
-    // Validation 3: Payment details
-    if (preferredPaymentMethod !== 'cash' && !paymentAccountDetails.trim()) {
-      setFormError(
-        preferredPaymentMethod === 'instapay'
-          ? '⚠️ يرجى إدخال عنوان إنستاباي أو رقم الهاتف للمستفيد'
-          : preferredPaymentMethod === 'digital_wallet'
-          ? '⚠️ يرجى إدخال رقم المحفظة الإلكترونية للمستفيد'
-          : '⚠️ يرجى إدخال رقم الحساب البنكي / الآيبان للمستفيد'
-      );
-      setFieldHighlight('paymentDetails');
-      paymentInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      paymentInputRef.current?.focus();
-      return;
-    }
+    // Validation 3: Payment details (format) and the InstaPay beneficiary name
+    if (!checkPayoutDetails()) return;
 
     // Resolve Service (with safe fallbacks so no submission is ever blocked)
     const selectedService = effectiveServices.find(s => s.id === selectedServiceId) || effectiveServices[0];
@@ -1084,7 +1184,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       const currentSpent = Number(selectedService.spentAmount || 0);
       const remaining = Number(selectedService.budgetLimit) - currentSpent;
       if (numericAmount > remaining) {
-        setFormError(`⚠️ الميزانية المتبقية لبند (${selectedService.name}): ${remaining.toLocaleString()} ${currency || 'EGP'}، ولا تكفي لتغطية مبلغ الطلب (${numericAmount.toLocaleString()}). يرجى تعديل المبلغ أو مراجعة الإدارة.`);
+        setFormError(`⚠️ الميزانية المتبقية لبند (${selectedService.name}): ${fmtMoney(remaining)} ${currency || 'EGP'}، ولا تكفي لتغطية مبلغ الطلب (${fmtMoney(numericAmount)}). يرجى تعديل المبلغ أو مراجعة الإدارة.`);
         setFieldHighlight('amount');
         amountInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         return;
@@ -1145,6 +1245,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
   return (
     <div 
+      ref={dialogRootRef}
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto"
       role="dialog"
       aria-modal="true"
@@ -1203,7 +1304,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         </div>
 
         {/* Form Container */}
-        <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        <form onSubmit={handleSubmit} onChange={markTouched} className="flex-1 flex flex-col min-h-0 overflow-hidden">
           
           {/* Scrollable Form Body */}
           <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-5 sm:p-7 space-y-5 text-xs">
@@ -1253,7 +1354,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                   onChange={(e) => setSelectedOrgId(e.target.value)}
                   className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900 text-xs"
                 >
-                  {orgList.map((org) => (
+                  {creatableOrgs.map((org) => (
                     <option key={org.id} value={org.id}>
                       {org.name} ({org.code}) - العملة: {org.currency}
                     </option>
@@ -1426,7 +1527,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                               <div className="text-left">
                                 <div className="text-[10px] text-slate-400 font-medium">الرصيد الحالي</div>
                                 <div className="text-xs font-black text-emerald-700">
-                                  {Number(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency}
+                                  {fmtMoney(accountBalance(acc))} {currencyCode(acc.currency)}
                                 </div>
                               </div>
                             </div>
@@ -1581,7 +1682,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         <button
                           key={u.id}
                           type="button"
-                          onClick={() => setUrgency(u.id as any)}
+                          onClick={() => { setUrgency(u.id as any); markTouched(); }}
                           className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer text-center ${
                             urgency === u.id
                               ? 'bg-white text-slate-900 border-2 border-teal-600 shadow-xs ring-2 ring-teal-500/10'
@@ -1733,7 +1834,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         type="button"
                         role="switch"
                         aria-checked={isPrepaidByRequester}
-                        onClick={() => setIsPrepaidByRequester(!isPrepaidByRequester)}
+                        onClick={() => { setIsPrepaidByRequester(!isPrepaidByRequester); markTouched(); }}
                         className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                           isPrepaidByRequester ? 'bg-teal-600' : 'bg-slate-300'
                         }`}
@@ -1802,7 +1903,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         <Paperclip className="h-3.5 w-3.5 text-teal-600" />
                         <span>مرفق الفاتورة أو إيصال السداد</span>
                       </label>
-                      <span className="text-[10px] text-slate-400 font-medium">بحد أقصى 10 ميجابايت (JPG, PNG, PDF)</span>
+                      <span className="text-[10px] text-slate-400 font-medium">بحد أقصى {MAX_UPLOAD_MB} ميجابايت (JPG, PNG, PDF)</span>
                     </div>
 
                     <input
@@ -1902,7 +2003,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                           <button
                             type="button"
-                            onClick={() => setInvoiceAttachment(null)}
+                            onClick={() => { setInvoiceAttachment(null); markTouched(); }}
                             className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
                             title="حذف هذا المرفق"
                           >
@@ -2008,7 +2109,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                             <button
                               type="button"
-                              onClick={() => setVisaDocumentAttachment(null)}
+                              onClick={() => { setVisaDocumentAttachment(null); markTouched(); }}
                               className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
                               title="حذف مستند التأشيرة"
                             >
@@ -2119,7 +2220,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                             <button
                               type="button"
-                              onClick={() => setInstallmentTransferAttachment(null)}
+                              onClick={() => { setInstallmentTransferAttachment(null); markTouched(); }}
                               className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
                               title="حذف سكرين القسط"
                             >
@@ -2226,7 +2327,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                             <button
                               type="button"
-                              onClick={() => setWalletTransferAttachment(null)}
+                              onClick={() => { setWalletTransferAttachment(null); markTouched(); }}
                               className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
                               title="حذف سكرين المحفظة"
                             >
@@ -2293,6 +2394,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       <option value="bank_transfer">تحويل بنكي فوري (IBAN)</option>
                       <option value="digital_wallet">محفظة إلكترونية (فودافون كاش / اتصالات / أورانج)</option>
                       <option value="cash">نقداً من الخزينة</option>
+                      {preferredPaymentMethod === 'cheque' && <option value="cheque">شيك مصرفي</option>}
                     </select>
                   </div>
 
@@ -2344,11 +2446,22 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                           </span>
                         </div>
                         <input
+                          ref={beneficiaryInputRef}
                           type="text"
                           value={beneficiaryName}
-                          onChange={(e) => setBeneficiaryName(e.target.value)}
+                          onChange={(e) => {
+                            setBeneficiaryName(e.target.value);
+                            if (formError) setFormError(null);
+                            if (fieldHighlight === 'beneficiary') setFieldHighlight(null);
+                          }}
                           placeholder="مثال: أحمد محمد عبد الرحمن علي"
-                          className="w-full p-3 bg-white border border-slate-200 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 rounded-xl font-bold text-xs text-slate-900 shadow-2xs"
+                          aria-required="true"
+                          aria-invalid={fieldHighlight === 'beneficiary'}
+                          className={`w-full p-3 bg-white border rounded-xl font-bold text-xs text-slate-900 shadow-2xs transition-all ${
+                            fieldHighlight === 'beneficiary'
+                              ? 'border-rose-500 ring-2 ring-rose-500/20'
+                              : 'border-slate-200 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10'
+                          }`}
                         />
                       </div>
                     </div>
@@ -2663,7 +2776,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
               <div className="text-right">
                 <span className="text-[10px] text-slate-400 font-bold block">إجمالي مبلغ الطلب</span>
                 <span className="text-base sm:text-lg font-black text-slate-900 flex items-center gap-1">
-                  <span>{amount ? Number(amount).toLocaleString('ar-EG', { maximumFractionDigits: 2 }) : '0.00'}</span>
+                  <span>{amount ? fmtMoney(amount) : '0.00'}</span>
                   <span className="text-xs font-bold text-teal-700">{currency}</span>
                 </span>
               </div>

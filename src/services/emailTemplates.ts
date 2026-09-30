@@ -1,6 +1,13 @@
 import type { EmailEventType, EmailNotificationSettings, ExpenseRequest, Organization } from '../types';
 
 // Pure, dependency-free email templates (safe to import from domain code and tests).
+
+/** Local time as YYYY-MM-DD HH:mm with Western digits (like every time the app displays). */
+const localDateTime = (d: Date) => {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
 export const DEFAULT_EMAIL_SETTINGS: EmailNotificationSettings = {
   enabled: true,
   notifyOnNewRequest: true,
@@ -53,7 +60,8 @@ export function generateEmailContent(
   const req = details.request;
   const orgName = escapeHtml(details.org?.name || 'الشركة');
   const reqNumber = escapeHtml(req?.requestNumber || 'طلب صرف');
-  const amountStr = req ? `${req.amount.toLocaleString()} ${escapeHtml(req.currency)}` : '';
+  // Western digits whatever the sender's browser locale (the whole app shows 1,250.5, never ١٬٢٥٠).
+  const amountStr = req ? `${Number(req.amount || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} ${escapeHtml(req.currency)}` : '';
 
   let subject = '';
   let badgeTitle = '';
@@ -132,7 +140,7 @@ export function generateEmailContent(
       badgeColor = '#7c3aed';
       badgeBg = '#f5f3ff';
       messageIntro = escapeHtml(details.customMessage || `هذه رسالة اختبارية لتأكيد عمل محرك الإشعارات البريدية وتوافقه مع منصة مصروفي وFirebase بنجاح تام.`);
-      highlightNote = `تم إرسال هذا البريد التجريبي في: ${new Date().toLocaleString('ar-EG')}`;
+      highlightNote = `تم إرسال هذا البريد التجريبي في: ${localDateTime(new Date())}`;
       break;
   }
 

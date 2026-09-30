@@ -3,37 +3,46 @@ import { useApp, type MultiOrgSkip } from '../context/AppContext';
 import { ServiceProvider, isServiceMatchingOrg } from '../types';
 import { normalizeKeyValue } from '../domain/common';
 import { OrgMultiSelect } from './OrgMultiSelect';
-import { 
-  Building, 
+import {
+  Building,
   Building2,
-  Plus, 
-  Phone, 
+  Plus,
+  Phone,
   Mail,
   Star,
-  Edit3, 
-  Trash2, 
-  X, 
+  Edit3,
+  Trash2,
+  X,
   Search,
   AlertCircle,
+  AlertTriangle,
+  Loader2,
+  RotateCcw,
 } from 'lucide-react';
 
-import { 
-  sanitizePhone, 
-  sanitizeTaxOrCR, 
-  sanitizeIBAN, 
+import {
+  sanitizePhone,
+  sanitizeTaxOrCR,
+  sanitizeIBAN,
   handleNumericKeyDown
 } from '../utils/validation';
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import { can } from '../utils/permissions';
+
+/** A deactivated record stays for history (policy: providers in use are never hard-deleted). */
+const isDeactivated = (entity: object) => (entity as { active?: unknown }).active === false;
 
 export const VendorsManagement: React.FC = () => {
-  const { 
-    providers, 
+  const {
+    providers,
     allProviders,
-    services, 
+    services,
     allServices,
-    activeOrgId, 
-    activeOrg, 
-    organizations, 
+    allRequests,
+    allVisaRequests,
+    activeOrgId,
+    activeOrg,
+    organizations,
     allOrganizations,
     currentRole,
     addProviderToOrgs,
@@ -45,6 +54,19 @@ export const VendorsManagement: React.FC = () => {
   const orgList = isSuperAdmin ? allOrganizations : organizations;
   const targetProviders = isSuperAdmin ? allProviders : providers;
   const targetServices = isSuperAdmin ? allServices : services;
+  // Actions are shown only to the roles the domain and the rules accept (src/utils/permissions.ts).
+  const canCreate = can(currentRole, 'createProviders');
+  const canEdit = can(currentRole, 'editProviders');
+  const canDelete = can(currentRole, 'deleteProviders');
+
+  // A provider used by a request or a visa (or already paid) is deactivated instead of deleted:
+  // the context decides and reports it; this preview (same lists) only words the confirmation.
+  const providerUsage = (prov: ServiceProvider) => {
+    const requestCount = allRequests.filter(r => r.providerId === prov.id).length;
+    const visaCount = allVisaRequests.filter(v => v.serviceProviderId === prov.id).length;
+    const paid = Number(prov.totalPaid || 0) !== 0;
+    return { requests: requestCount, visas: visaCount, paid, inUse: requestCount + visaCount > 0 || paid };
+  };
   // A new provider can only be attached to companies that are still active.
   const creatableOrgs = useMemo(
     () => orgList.filter(o => !o.archived && o.status !== 'archived'),
@@ -61,7 +83,10 @@ export const VendorsManagement: React.FC = () => {
   const providerActions = useKeyedSubmitGuard();
   const [search, setSearch] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<{ message: string; tone: 'success' | 'warning' } | null>(null);
+  const [feedback, setFeedback] = useState<{ message: string; tone: 'success' | 'warning' | 'error' } | null>(null);
+  // Delete asks for confirmation first; an in-use provider is deactivated instead.
+  const [deletingProvider, setDeletingProvider] = useState<ServiceProvider | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!feedback) return;
@@ -87,10 +112,13 @@ export const VendorsManagement: React.FC = () => {
 
   const orgProviders = targetProviders.filter(p => selectedOrgFilter === 'all' || p.orgId === selectedOrgFilter);
 
-  const filteredProviders = orgProviders.filter(p => 
-    p.name.toLowerCase().includes(search.toLowerCase()) ||
-    (p.contactPerson && p.contactPerson.toLowerCase().includes(search.toLowerCase())) ||
-    (p.phone && p.phone.includes(search))
+  const searchQuery = search.trim().toLowerCase();
+  const filteredProviders = !searchQuery ? orgProviders : orgProviders.filter(p =>
+    (p.name || '').toLowerCase().includes(searchQuery) ||
+    (p.contactPerson && p.contactPerson.toLowerCase().includes(searchQuery)) ||
+    (p.phone && p.phone.includes(searchQuery)) ||
+    (p.email && p.email.toLowerCase().includes(searchQuery)) ||
+    (p.taxNumber && p.taxNumber.includes(searchQuery))
   );
 
   const orgLabel = (orgId: string) => {
@@ -119,7 +147,11 @@ export const VendorsManagement: React.FC = () => {
 
   // Services offered in the checklist: those of the provider's company (edit) or of ANY selected company (create).
   const serviceOrgIds = editingProvider ? [editingProvider.orgId] : effectiveOrgIds;
-  const availableServices = targetServices.filter(s => serviceOrgIds.some(orgId => isServiceMatchingOrg(s, orgId)));
+  // A deactivated service is not offered for new links (a link the provider already has stays listed).
+  const linkedServiceIds = editingProvider?.serviceCategoryIds || [];
+  const availableServices = targetServices.filter(s =>
+    serviceOrgIds.some(orgId => isServiceMatchingOrg(s, orgId)) && (!isDeactivated(s) || linkedServiceIds.includes(s.id))
+  );
 
   const handleOrgSelectionChange = (orgIds: string[]) => {
     setSelectedOrgIds(orgIds);
@@ -132,6 +164,7 @@ export const VendorsManagement: React.FC = () => {
   };
 
   const handleOpenAdd = () => {
+    if (!canCreate) return;
     setEditingProvider(null);
     setName('');
     setContactPerson('');
@@ -151,8 +184,8 @@ export const VendorsManagement: React.FC = () => {
       ? creatableOrgs[0].id
       : '';
     setSelectedOrgIds(defaultOrg ? [defaultOrg] : []);
-    const initialOrgServices = defaultOrg ? targetServices.filter(s => isServiceMatchingOrg(s, defaultOrg)) : [];
-    setSelectedServices(initialOrgServices.length > 0 ? [initialOrgServices[0].id] : []);
+    // No service is pre-selected: a new provider is linked only to the services the user picks.
+    setSelectedServices([]);
     setRating(5.0);
     setNotes('');
     setFormError(null);
@@ -161,6 +194,7 @@ export const VendorsManagement: React.FC = () => {
   };
 
   const handleOpenEdit = (prov: ServiceProvider) => {
+    if (!canEdit) return;
     setEditingProvider(prov);
     setName(prov.name);
     setContactPerson(prov.contactPerson || '');
@@ -236,6 +270,7 @@ export const VendorsManagement: React.FC = () => {
             serviceCategoryNames: matchedServiceNames,
           });
           setIsModalOpen(false);
+          setFeedback({ message: `تم حفظ تعديلات المورد "${trimmedName}".`, tone: 'success' });
           return;
         }
 
@@ -255,6 +290,46 @@ export const VendorsManagement: React.FC = () => {
       }
     });
   };
+
+  const openDeleteDialog = (prov: ServiceProvider) => {
+    if (!canDelete) return;
+    setDeleteError(null);
+    setDeletingProvider(prov);
+  };
+
+  const handleConfirmDelete = async () => {
+    const target = deletingProvider;
+    if (!target || !canDelete) return;
+    setDeleteError(null);
+    await providerActions.run(`delete:${target.id}`, async () => {
+      try {
+        // The context deactivates (never deletes) a provider in use and says which happened.
+        const removal = await deleteProvider(target.id);
+        setDeletingProvider(null);
+        setFeedback(removal === 'deactivated'
+          ? { message: `المورد "${target.name}" مرتبط بطلبات صرف أو تأشيرات أو مدفوعات سابقة، لذلك تم تعطيله بدلاً من حذفه ويبقى في السجلات السابقة.`, tone: 'warning' }
+          : { message: `تم حذف المورد "${target.name}" نهائياً.`, tone: 'success' });
+      } catch (err: any) {
+        setDeleteError(err?.message || 'تعذر حذف المورد');
+      }
+    });
+  };
+
+  const handleReactivate = async (prov: ServiceProvider) => {
+    if (!canEdit || !canDelete) return; // reactivation undoes the admin's deactivation
+    await providerActions.run(`reactivate:${prov.id}`, async () => {
+      try {
+        await updateProvider({ ...prov, active: true });
+        setFeedback({ message: `تمت إعادة تفعيل المورد "${prov.name}".`, tone: 'success' });
+      } catch (err: any) {
+        setFeedback({ message: err?.message || 'تعذر إعادة تفعيل المورد', tone: 'error' });
+      }
+    });
+  };
+
+  const deletingUsage = deletingProvider ? providerUsage(deletingProvider) : null;
+  const deletingInUse = Boolean(deletingUsage?.inUse);
+  const isDeletePending = Boolean(deletingProvider) && providerActions.isPending(`delete:${deletingProvider!.id}`);
 
   return (
     <div className="space-y-6 pb-12">
@@ -290,23 +365,29 @@ export const VendorsManagement: React.FC = () => {
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={handleOpenAdd}
-            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto"
-          >
-            <Plus className="h-4 w-4" />
-            <span>إضافة مقدم خدمة جديد</span>
-          </button>
+          {canCreate && (
+            <button
+              type="button"
+              onClick={handleOpenAdd}
+              className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-xs transition cursor-pointer self-start sm:self-auto"
+            >
+              <Plus className="h-4 w-4" />
+              <span>إضافة مقدم خدمة جديد</span>
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Save Feedback (added companies / skipped companies) */}
+      {/* Save / delete feedback (added companies / skipped companies / deactivated) */}
       {feedback && (
         <div
           role="status"
           className={`p-3.5 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 animate-in fade-in duration-150 ${
-            feedback.tone === 'warning' ? 'bg-amber-50 border border-amber-200 text-amber-900' : 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+            feedback.tone === 'error'
+              ? 'bg-rose-50 border border-rose-200 text-rose-800'
+              : feedback.tone === 'warning'
+              ? 'bg-amber-50 border border-amber-200 text-amber-900'
+              : 'bg-emerald-50 border border-emerald-200 text-emerald-800'
           }`}
         >
           <span>{feedback.message}</span>
@@ -324,8 +405,18 @@ export const VendorsManagement: React.FC = () => {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="بحث باسم الشركة، الشخص المسؤول، أو رقم الهاتف..."
-          className="w-full pl-3 pr-9 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+          className="w-full pl-8 pr-9 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
         />
+        {search && (
+          <button
+            type="button"
+            onClick={() => setSearch('')}
+            className="absolute left-2.5 top-2 p-0.5 text-slate-400 hover:text-slate-600 cursor-pointer"
+            title="مسح البحث"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
 
       {/* Vendors Grid */}
@@ -333,11 +424,14 @@ export const VendorsManagement: React.FC = () => {
         {filteredProviders.map((prov) => {
           const parentOrg = orgList.find(o => o.id === prov.orgId);
           const currency = parentOrg?.currency || activeOrg?.currency || 'EGP';
+          const deactivated = isDeactivated(prov);
 
           return (
-            <div 
-              key={prov.id} 
-              className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between"
+            <div
+              key={prov.id}
+              className={`bg-white rounded-2xl border p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between ${
+                deactivated ? 'border-slate-200 opacity-75' : 'border-slate-200/80'
+              }`}
             >
               <div>
                 <div className="flex items-start justify-between gap-2">
@@ -346,7 +440,12 @@ export const VendorsManagement: React.FC = () => {
                       <Building className="h-5 w-5" />
                     </div>
                     <div>
-                      <h3 className="font-bold text-slate-900 text-sm">{prov.name}</h3>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <h3 className="font-bold text-slate-900 text-sm">{prov.name}</h3>
+                        {deactivated && (
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200">معطل</span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-1 text-[11px] text-amber-500 font-bold mt-0.5">
                         <Star className="h-3 w-3 fill-amber-400 text-amber-400" />
                         <span>{prov.rating}</span>
@@ -355,29 +454,38 @@ export const VendorsManagement: React.FC = () => {
                   </div>
 
                   <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => handleOpenEdit(prov)}
-                      className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition"
-                      title="تعديل المورد"
-                    >
-                      <Edit3 className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => providerActions.run(`delete:${prov.id}`, async () => {
-                        try {
-                          await deleteProvider(prov.id);
-                        } catch (err: any) {
-                          alert(err?.message || 'تعذر تنفيذ العملية');
-                        }
-                      })}
-                      disabled={providerActions.isPending(`delete:${prov.id}`)}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
-                      title="حذف المورد"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    {canEdit && canDelete && deactivated && (
+                      <button
+                        type="button"
+                        onClick={() => handleReactivate(prov)}
+                        disabled={providerActions.isPending(`reactivate:${prov.id}`)}
+                        className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition disabled:opacity-50"
+                        title="إعادة تفعيل المورد"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {canEdit && (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEdit(prov)}
+                        className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition"
+                        title="تعديل المورد"
+                      >
+                        <Edit3 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {canDelete && !deactivated && (
+                      <button
+                        type="button"
+                        onClick={() => openDeleteDialog(prov)}
+                        disabled={providerActions.isPending(`delete:${prov.id}`)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition disabled:opacity-50"
+                        title="حذف المورد"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -447,28 +555,104 @@ export const VendorsManagement: React.FC = () => {
               <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
                 <span className="text-slate-400">إجمالي المبالغ المصروفة:</span>
                 <span className="font-black text-emerald-700">
-                  {prov.totalPaid.toLocaleString()} {currency}
+                  {Number(prov.totalPaid || 0).toLocaleString('en-US')} {currency}
                 </span>
               </div>
             </div>
           );
         })}
-        {filteredProviders.length === 0 && (
+        {filteredProviders.length === 0 && orgProviders.length > 0 && (
+          // Providers exist, the search just matches none of them.
           <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center">
-            <Building className="h-10 w-10 text-slate-300 mx-auto mb-2" />
-            <h3 className="font-bold text-slate-800 text-sm">لا يوجد موردون أو مقدمو خدمات مسجلين</h3>
-            <p className="text-xs text-slate-400 mt-1 mb-4">أضف مقدمي الخدمات والشركات المتعامل معها وحساباتهم البنكية لتسهيل أوامر الصرف</p>
+            <Search className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+            <h3 className="font-bold text-slate-800 text-sm">لا توجد نتائج مطابقة للبحث "{search.trim()}"</h3>
+            <p className="text-xs text-slate-400 mt-1 mb-4">جرّب كلمة أخرى أو ابحث بالاسم أو رقم الهاتف أو الرقم الضريبي.</p>
             <button
               type="button"
-              onClick={handleOpenAdd}
-              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+              onClick={() => setSearch('')}
+              className="inline-flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
             >
-              <Plus className="h-4 w-4" />
-              <span>إضافة أول مقدم خدمة الآن</span>
+              <X className="h-4 w-4" />
+              <span>مسح البحث</span>
             </button>
           </div>
         )}
+        {orgProviders.length === 0 && (
+          <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+            <Building className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+            <h3 className="font-bold text-slate-800 text-sm">لا يوجد موردون أو مقدمو خدمات مسجلين</h3>
+            {canCreate ? (
+              <>
+                <p className="text-xs text-slate-400 mt-1 mb-4">أضف مقدمي الخدمات والشركات المتعامل معها وحساباتهم البنكية لتسهيل أوامر الصرف</p>
+                <button
+                  type="button"
+                  onClick={handleOpenAdd}
+                  className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>إضافة أول مقدم خدمة الآن</span>
+                </button>
+              </>
+            ) : (
+              <p className="text-xs text-slate-400 mt-1">يضيف مدير الشركة أو مدخل البيانات الموردين المعتمدين.</p>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* Delete confirmation (an in-use provider is deactivated, never hard-deleted) */}
+      {deletingProvider && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
+          <div role="dialog" aria-modal="true" className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 text-center">
+            <div className={`h-12 w-12 rounded-2xl flex items-center justify-center mx-auto mb-3 ${deletingInUse ? 'bg-amber-100 text-amber-600' : 'bg-rose-100 text-rose-600'}`}>
+              {deletingInUse ? <AlertTriangle className="h-6 w-6" /> : <Trash2 className="h-6 w-6" />}
+            </div>
+            <h3 className="font-bold text-slate-900 text-sm">{deletingInUse ? 'تعطيل المورد' : 'حذف المورد'}</h3>
+            <p className="text-xs text-slate-500 mt-2 leading-relaxed">
+              {deletingInUse ? (
+                <>
+                  المورد <strong>"{deletingProvider.name}"</strong> مرتبط بـ{' '}
+                  {[
+                    deletingUsage!.requests > 0 ? `${deletingUsage!.requests} طلب صرف` : '',
+                    deletingUsage!.visas > 0 ? `${deletingUsage!.visas} طلب تأشيرة` : '',
+                    deletingUsage!.paid ? 'مدفوعات مسجلة' : '',
+                  ].filter(Boolean).join(' و')}
+                  ، لذلك لن يُحذف نهائياً بل سيتم تعطيله ويبقى في السجلات السابقة.
+                </>
+              ) : (
+                <>هل أنت متأكد من حذف المورد <strong>"{deletingProvider.name}"</strong> نهائياً؟ لا يمكن التراجع عن هذا الإجراء.</>
+              )}
+            </p>
+            {deleteError && (
+              <div role="alert" className="mt-3 p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-start gap-2 text-right">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{deleteError}</span>
+              </div>
+            )}
+            <div className="flex justify-center gap-2 mt-5">
+              <button
+                type="button"
+                onClick={() => setDeletingProvider(null)}
+                disabled={isDeletePending}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl cursor-pointer disabled:opacity-50"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                disabled={isDeletePending}
+                className={`px-5 py-2 text-white font-bold text-xs rounded-xl shadow-xs cursor-pointer flex items-center gap-1.5 disabled:opacity-60 ${
+                  deletingInUse ? 'bg-amber-600 hover:bg-amber-700' : 'bg-rose-600 hover:bg-rose-700'
+                }`}
+              >
+                {isDeletePending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>{isDeletePending ? 'جارٍ التنفيذ...' : deletingInUse ? 'نعم، تعطيل المورد' : 'نعم، حذف'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add/Edit Modal */}
       {isModalOpen && (

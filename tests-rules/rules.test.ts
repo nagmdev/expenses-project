@@ -12,12 +12,34 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { collection, doc, getDoc, getDocs, setDoc, updateDoc, type Firestore } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where, type Firestore } from 'firebase/firestore';
 import { createFirestoreStore } from '../src/domain/firestoreStore';
-import { createExpenseRequest, transitionExpenseRequest } from '../src/domain/requests';
-import { createPaymentAccount, detachLegacyWallet, returnCustodyRemainders, settleCustodyItem, transferBetweenAccounts } from '../src/domain/treasury';
+import { createExpenseRequest, disburseExpenseRequest, transitionExpenseRequest } from '../src/domain/requests';
+import {
+  adjustAccountBalance,
+  createPaymentAccount,
+  deletePaymentAccount,
+  detachLegacyWallet,
+  returnCustodyRemainders,
+  settleCustodyItem,
+  transferBetweenAccounts,
+} from '../src/domain/treasury';
 import { restoreRecord, readLegacySnapshot } from '../src/domain/legacyRecovery';
-import { createEntityInOrgs, createMemberInOrgs, pendingUserIdForEmail } from '../src/domain/directory';
+import {
+  createEntity,
+  createEntityInOrgs,
+  createMemberInOrgs,
+  deleteEntity,
+  movePayoutToProfile,
+  pendingUserIdForEmail,
+  removeMember,
+  syncOwnMembership,
+  updateEntity,
+  updateMemberRecord,
+} from '../src/domain/directory';
+import { createVisaRequest, deleteVisaRequest } from '../src/domain/visa';
+import { legacyUniqueKeyDocId, uniqueKeyDocId } from '../src/domain/common';
+import { migrateLegacyUniqueKeys } from '../src/domain/directory';
 import type { ServiceProvider } from '../src/types';
 import { DEFAULT_EMAIL_SETTINGS } from '../src/services/emailTemplates';
 import type { Actor } from '../src/domain/common';
@@ -375,5 +397,268 @@ describe('legacy local-data recovery', () => {
   it('restoring never overwrites an existing document', async () => {
     const res = await restoreRecord(createFirestoreStore(db(OWNER)), asOwner(), rec('srv-1'), 'browser');
     expect(res.outcome).toBe('exists');
+  });
+});
+
+// ===========================================================================
+// Policies of the 2026-09-30 end-to-end fixes
+// ===========================================================================
+const CAIRO_EMP = { uid: 'uidCairoEmp00000000000001', email: 'emp@other.test' };
+const CAIRO_FIN = { uid: 'uidCairoFin00000000000001', email: 'fin@other.test' };
+const STRANGER = { uid: 'uidStranger00000000000001', email: 'nobody@nowhere.test' };
+const DE = { uid: 'uidDataEntry000000000000001', email: 'de@acme.test' };
+const opKey = (n: number) => `key-9${String(n).padStart(7, '0')}`;
+const readDoc = async (collectionName: string, id: string) => {
+  let data: Record<string, any> | undefined;
+  await env.withSecurityRulesDisabled(async ctx => {
+    data = (await getDoc(doc(ctx.firestore(), collectionName, id))).data();
+  });
+  return data;
+};
+const seed = (fn: (f: Firestore) => Promise<unknown>) => env.withSecurityRulesDisabled(ctx => fn(ctx.firestore() as unknown as Firestore));
+
+describe('services shared with several companies (orgIds)', () => {
+  beforeEach(() =>
+    seed(async f => {
+      await setDoc(doc(f, 'users', CAIRO_EMP.uid), { orgId: OTHER_ORG, role: 'employee', active: true });
+      await setDoc(doc(f, 'members', `${CAIRO_EMP.uid}_${OTHER_ORG}`), { orgId: OTHER_ORG, userId: CAIRO_EMP.uid, userEmail: CAIRO_EMP.email, role: 'employee', active: true });
+      await setDoc(doc(f, 'users', CAIRO_FIN.uid), { orgId: OTHER_ORG, role: 'finance', active: true });
+      await setDoc(doc(f, 'members', `${CAIRO_FIN.uid}_${OTHER_ORG}`), { orgId: OTHER_ORG, userId: CAIRO_FIN.uid, userEmail: CAIRO_FIN.email, role: 'finance', active: true });
+      await setDoc(doc(f, 'services', 'srv-shared'), { orgId: ORG, orgIds: [ORG, OTHER_ORG], name: 'WE Internet', code: 'WE', spentAmount: 0 });
+      await setDoc(doc(f, 'services', 'srv-cairo'), { orgId: OTHER_ORG, name: 'Cairo only', code: 'CAI', spentAmount: 0 });
+    }),
+  );
+  const shared = (who: { uid: string; email: string }, orgId: string) => query(collection(db(who), 'services'), where('orgIds', 'array-contains', orgId));
+
+  it("a secondary company's members list and read the services shared with it (the app's second query)", async () => {
+    const snap = await assertSucceeds(getDocs(shared(CAIRO_EMP, OTHER_ORG)));
+    expect(snap.docs.map(d => d.id)).toEqual(['srv-shared']);
+    await assertSucceeds(getDocs(query(collection(db(CAIRO_EMP), 'services'), where('orgId', '==', OTHER_ORG))));
+    await assertSucceeds(getDoc(doc(db(CAIRO_EMP), 'services', 'srv-shared')));
+    // the owning company still sees it through its own query
+    await assertSucceeds(getDocs(query(collection(db(EMP), 'services'), where('orgId', '==', ORG))));
+  });
+
+  it('tenant isolation holds: not shared → not readable; another company’s list, strangers and suspended users get nothing', async () => {
+    await assertFails(getDoc(doc(db(CAIRO_EMP), 'services', 'srv-1')));
+    await assertFails(getDocs(shared(CAIRO_EMP, ORG)));
+    await assertFails(getDocs(query(collection(db(CAIRO_EMP), 'services'), where('orgId', '==', ORG))));
+    await assertFails(getDocs(collection(db(CAIRO_EMP), 'services')));
+    await assertFails(getDocs(shared(STRANGER, OTHER_ORG)));
+    await assertFails(getDoc(doc(db(STRANGER), 'services', 'srv-shared')));
+    await assertFails(getDoc(doc(db(EMP), 'services', 'srv-cairo')));
+    await seed(f => updateDoc(doc(f, 'users', CAIRO_EMP.uid), { active: false }));
+    await assertFails(getDocs(shared(CAIRO_EMP, OTHER_ORG)));
+  });
+
+  it("the secondary company's finance pays a request on a shared service (its spending grows) but cannot edit the service", async () => {
+    await seed(async f => {
+      await setDoc(doc(f, 'paymentAccounts', 'acc-cairo'), { orgId: OTHER_ORG, name: 'Cairo cash', type: 'cash', accountIdentifier: 'CASH-C', currency: 'EGP', active: true, balance: 5000, currentBalance: 5000, initialBalance: 5000, totalIn: 0, totalOut: 0 });
+      await setDoc(doc(f, 'requests', 'req-cairo'), {
+        orgId: OTHER_ORG, requestNumber: 'REQ-C', status: 'approved', amount: 1800, currency: 'EGP', title: 't', requestType: 'expense',
+        serviceCategoryId: 'srv-shared', providerId: '', requesterId: CAIRO_EMP.uid, requesterName: 'e', requesterEmail: CAIRO_EMP.email, timeline: [],
+      });
+    });
+    const res = await disburseExpenseRequest(createFirestoreStore(db(CAIRO_FIN)), actor(CAIRO_FIN, 'finance'), 'req-cairo',
+      { paymentMethod: 'cash', referenceNumber: 'TXN-1', accountId: 'acc-cairo' }, opKey(1), notify);
+    expect(res.changed).toBe(true);
+    expect((await readDoc('services', 'srv-shared'))!.spentAmount).toBe(1800);
+    expect((await readDoc('paymentAccounts', 'acc-cairo'))!.currentBalance).toBe(3200);
+
+    await assertFails(updateDoc(doc(db(CAIRO_FIN), 'services', 'srv-shared'), { name: 'Renamed' }));
+    await assertFails(updateDoc(doc(db(CAIRO_FIN), 'services', 'srv-shared'), { spentAmount: 0 }));
+    await assertFails(updateDoc(doc(db(CAIRO_EMP), 'services', 'srv-shared'), { spentAmount: 99_999 }));
+    // the domain refuses the edit at once (the actor works in the other company)
+    await expect(updateEntity(createFirestoreStore(db(CAIRO_FIN)), { ...actor(CAIRO_FIN, 'finance'), orgId: OTHER_ORG }, 'service', 'srv-shared', { name: 'x' },
+      () => ({ actionType: 'update', details: 'x' }), opKey(2))).rejects.toMatchObject({ code: 'forbidden' });
+  });
+
+  it('only the platform owner shares a service with other companies', async () => {
+    await assertFails(updateDoc(doc(db(ADMIN), 'services', 'srv-1'), { orgIds: [ORG, OTHER_ORG] }));
+    await assertFails(setDoc(doc(db(ADMIN), 'services', 'srv-new'), { orgId: ORG, orgIds: [ORG, OTHER_ORG], name: 'n', code: 'N' }));
+    await assertSucceeds(setDoc(doc(db(ADMIN), 'services', 'srv-own'), { orgId: ORG, orgIds: [ORG], name: 'n', code: 'N' }));
+    await assertSucceeds(updateDoc(doc(db(ADMIN), 'services', 'srv-shared'), { name: 'WE 2', orgIds: [ORG, OTHER_ORG] })); // unchanged list
+    await assertSucceeds(updateDoc(doc(db(OWNER), 'services', 'srv-1'), { orgIds: [ORG, OTHER_ORG] }));
+  });
+
+  it('services are added by admins only (data entry refused by the domain at once, and by the rules)', async () => {
+    await seed(async f => {
+      await setDoc(doc(f, 'users', DE.uid), { orgId: ORG, role: 'data_entry', active: true });
+      await setDoc(doc(f, 'members', `${DE.uid}_${ORG}`), { orgId: ORG, userId: DE.uid, userEmail: DE.email, role: 'data_entry', active: true });
+    });
+    const build = (id: string) => ({ id, orgId: ORG, name: 'DE service', code: 'DES', description: '', budgetLimit: 0, spentAmount: 0, color: '#000', iconName: 'x' });
+    await expect(createEntity(createFirestoreStore(db(DE)), actor(DE, 'data_entry'), 'service', build, () => 'x', opKey(3))).rejects.toMatchObject({ code: 'forbidden' });
+    await assertFails(createEntity(createFirestoreStore(db(DE)), actor(DE, 'org_admin'), 'service', build, () => 'x', opKey(4))); // forged role
+    await expect(updateEntity(createFirestoreStore(db(DE)), actor(DE, 'data_entry'), 'provider', 'any', { name: 'x' },
+      () => ({ actionType: 'update', details: 'x' }), opKey(5))).rejects.toMatchObject({ code: 'forbidden' });
+    const ok = await createEntity(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), 'service', build, () => 'x', opKey(6));
+    expect(ok.changed).toBe(true);
+    // an unused service is deleted, a used one deactivated (both pass the rules)
+    const removal = await deleteEntity(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), 'service', ok.value.id, 'delete', opKey(7));
+    expect(removal.removal).toBe('deleted');
+    await seed(f => updateDoc(doc(f, 'services', 'srv-1'), { spentAmount: 10 }));
+    expect((await deleteEntity(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), 'service', 'srv-1', 'delete', opKey(8))).removal).toBe('deactivated');
+    expect((await readDoc('services', 'srv-1'))!.active).toBe(false);
+  });
+});
+
+describe('uniqueness keys are readable in their own company only', () => {
+  const tantaKey = uniqueKeyDocId('member_email', ORG, EMP.email);
+  const cairoKey = uniqueKeyDocId('member_email', OTHER_ORG, CAIRO_EMP.email);
+  beforeEach(() =>
+    seed(async f => {
+      await setDoc(doc(f, 'users', CAIRO_EMP.uid), { orgId: OTHER_ORG, role: 'employee', active: true });
+      await setDoc(doc(f, 'uniqueKeys', tantaKey), { scope: 'member_email', orgId: ORG, value: EMP.email, entityCollection: 'members', entityId: `${EMP.uid}_${ORG}` });
+      await setDoc(doc(f, 'uniqueKeys', cairoKey), { scope: 'member_email', orgId: OTHER_ORG, value: CAIRO_EMP.email, entityCollection: 'members', entityId: `${CAIRO_EMP.uid}_${OTHER_ORG}` });
+    }),
+  );
+
+  it("another company's key (email, member id) is not disclosed; own company, missing keys and the owner are fine", async () => {
+    await assertFails(getDoc(doc(db(CAIRO_EMP), 'uniqueKeys', tantaKey)));
+    await assertFails(getDoc(doc(db(STRANGER), 'uniqueKeys', tantaKey)));
+    await assertSucceeds(getDoc(doc(db(CAIRO_EMP), 'uniqueKeys', cairoKey)));
+    await assertSucceeds(getDoc(doc(db(EMP), 'uniqueKeys', tantaKey)));
+    await assertSucceeds(getDoc(doc(db(EMP), 'uniqueKeys', uniqueKeyDocId('member_email', ORG, 'nobody@acme.test'))));
+    // An empty value (an old account without a number) ends the id with "__": still its company's.
+    await assertSucceeds(getDoc(doc(db(FIN), 'uniqueKeys', uniqueKeyDocId('account_identifier', ORG, ''))));
+    await assertSucceeds(getDoc(doc(db(OWNER), 'uniqueKeys', cairoKey)));
+  });
+
+  it("whether a key exists in another company cannot be probed: a missing one is refused just like an existing one", async () => {
+    const missing = uniqueKeyDocId('member_email', ORG, 'nobody@acme.test');
+    await assertFails(getDoc(doc(db(CAIRO_EMP), 'uniqueKeys', missing)));
+    await assertFails(getDoc(doc(db(STRANGER), 'uniqueKeys', missing)));
+    await assertFails(getDoc(doc(db(STRANGER), 'uniqueKeys', uniqueKeyDocId('org_code', '-', 'ACME'))));
+    // Old-format ids (company encoded): the platform owner only, present or missing.
+    await assertFails(getDoc(doc(db(EMP), 'uniqueKeys', legacyUniqueKeyDocId('member_email', ORG, 'nobody@acme.test'))));
+    await assertSucceeds(getDoc(doc(db(OWNER), 'uniqueKeys', legacyUniqueKeyDocId('member_email', ORG, 'nobody@acme.test'))));
+  });
+
+  it("a key can only be created under its own company's id", async () => {
+    const data = { scope: 'provider_name', orgId: ORG, value: 'vodafone', entityCollection: 'providers', entityId: 'prov-x' };
+    await assertSucceeds(setDoc(doc(db(ADMIN), 'uniqueKeys', uniqueKeyDocId('provider_name', ORG, 'Vodafone')), data));
+    // Squatting another company's value (claimed as this company's) is refused.
+    await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', uniqueKeyDocId('provider_name', OTHER_ORG, 'Vodafone')), data));
+    await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', uniqueKeyDocId('provider_name', OTHER_ORG, 'Vodafone')), { ...data, orgId: OTHER_ORG }));
+  });
+
+  it('the platform owner moves old-format keys to the current id (and nobody else can)', async () => {
+    const legacyId = legacyUniqueKeyDocId('member_email', ORG, EMP.email);
+    await seed(async f => {
+      await deleteDoc(doc(f, 'uniqueKeys', tantaKey));
+      await setDoc(doc(f, 'uniqueKeys', legacyId), { scope: 'member_email', orgId: ORG, value: EMP.email, entityCollection: 'members', entityId: `${EMP.uid}_${ORG}` });
+    });
+    const owners = [{ scope: 'member_email' as const, orgId: ORG, value: EMP.email, collection: 'members', id: `${EMP.uid}_${ORG}` }];
+    await expect(migrateLegacyUniqueKeys(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), owners)).rejects.toThrow();
+    const res = await migrateLegacyUniqueKeys(createFirestoreStore(db(OWNER)), actor(OWNER, 'super_admin'), owners);
+    expect(res).toEqual({ moved: 1, replaced: 0, skipped: 0 });
+    expect(await readDoc('uniqueKeys', legacyId)).toBeUndefined();
+    expect(await readDoc('uniqueKeys', tantaKey)).toMatchObject({ orgId: ORG, entityId: `${EMP.uid}_${ORG}` });
+  });
+});
+
+describe('treasury: no overdraft, and accounts with history are never deleted', () => {
+  beforeEach(() =>
+    seed(async f => {
+      const account = (id: string, fields: Record<string, unknown>) =>
+        setDoc(doc(f, 'paymentAccounts', id), { orgId: ORG, name: id, type: 'cash', accountIdentifier: id, currency: 'EGP', active: true, balance: 0, currentBalance: 0, initialBalance: 0, totalIn: 0, totalOut: 0, ...fields });
+      await account('acc-used', { balance: 500, currentBalance: 500, initialBalance: 500 });
+      await account('acc-moved', { totalIn: 300, totalOut: 300 });
+      await account('acc-empty', {});
+    }),
+  );
+
+  it('the rules refuse deleting an account with a balance or history; the domain refuses it at once', async () => {
+    await assertFails(deleteDoc(doc(db(ADMIN), 'paymentAccounts', 'acc-used')));
+    await assertFails(deleteDoc(doc(db(ADMIN), 'paymentAccounts', 'acc-moved')));
+    await assertFails(deleteDoc(doc(db(OWNER), 'paymentAccounts', 'acc-moved')));
+    await expect(deletePaymentAccount(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), 'acc-used', opKey(10))).rejects.toMatchObject({ code: 'account_has_history' });
+    await deletePaymentAccount(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), 'acc-empty', opKey(11));
+    expect(await readDoc('paymentAccounts', 'acc-empty')).toBeUndefined();
+  });
+
+  it('a withdrawal above the balance is refused before anything is written', async () => {
+    await expect(adjustAccountBalance(createFirestoreStore(db(FIN)), actor(FIN, 'finance'), { accountId: 'acc-used', type: 'out', amount: 50_000, description: 'x' }, opKey(12)))
+      .rejects.toMatchObject({ code: 'insufficient_funds' });
+    expect((await readDoc('paymentAccounts', 'acc-used'))!.currentBalance).toBe(500);
+    await adjustAccountBalance(createFirestoreStore(db(FIN)), actor(FIN, 'finance'), { accountId: 'acc-used', type: 'out', amount: 500, description: 'x' }, opKey(13));
+    expect((await readDoc('paymentAccounts', 'acc-used'))!.currentBalance).toBe(0);
+  });
+});
+
+describe("memberships: the owner's and one's own are protected; payout details stay out", () => {
+  const OWNER_MEM = `${OWNER.uid}_${ORG}`;
+  const ADMIN_MEM = `${ADMIN.uid}_${ORG}`;
+  const EMP_MEM = `${EMP.uid}_${ORG}`;
+  const payout = { instapay: 'sara@instapay', wallet: '01012345678', bankName: 'بنك', iban: 'EG000000000000000000000E2E01', walletProvider: 'فودافون كاش' };
+  beforeEach(() =>
+    seed(f => setDoc(doc(f, 'members', OWNER_MEM), { orgId: ORG, userId: OWNER.uid, userEmail: OWNER.email, userName: 'محمود', role: 'org_admin', active: true })),
+  );
+
+  it("an org admin can neither delete, suspend nor re-role the platform owner's membership or their own; a name edit is fine", async () => {
+    for (const id of [OWNER_MEM, ADMIN_MEM]) {
+      await assertFails(deleteDoc(doc(db(ADMIN), 'members', id)));
+      await assertFails(updateDoc(doc(db(ADMIN), 'members', id), { active: false }));
+      await assertFails(updateDoc(doc(db(ADMIN), 'members', id), { role: 'employee' }));
+      await assertFails(updateDoc(doc(db(ADMIN), 'members', id), { userEmail: 'other@acme.test' }));
+      await assertSucceeds(updateDoc(doc(db(ADMIN), 'members', id), { userName: 'اسم جديد' }));
+    }
+    // the domain refuses at once; a modified client claiming super admin is stopped by the rules
+    await expect(removeMember(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), OWNER_MEM, [], opKey(20))).rejects.toMatchObject({ code: 'protected_member' });
+    await expect(updateMemberRecord(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), ADMIN_MEM, { role: 'finance' }, [], opKey(21))).rejects.toMatchObject({ code: 'protected_member' });
+    await assertFails(removeMember(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'super_admin'), OWNER_MEM, [], opKey(22)));
+    // other members stay manageable, and the owner can do everything
+    await removeMember(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), EMP_MEM, [EMP.uid], opKey(23));
+    expect(await readDoc('members', EMP_MEM)).toBeUndefined();
+    await updateMemberRecord(createFirestoreStore(db(OWNER)), actor(OWNER, 'super_admin'), ADMIN_MEM, { active: false }, [], opKey(24));
+    await removeMember(createFirestoreStore(db(OWNER)), actor(OWNER, 'super_admin'), OWNER_MEM, [], opKey(25));
+    expect(await readDoc('members', OWNER_MEM)).toBeUndefined();
+  });
+
+  it('payout details can be neither written into a membership by its owner nor by an admin (create or update)', async () => {
+    await assertFails(updateDoc(doc(db(EMP), 'members', EMP_MEM), { iban: 'EG1' }));
+    await assertSucceeds(updateDoc(doc(db(EMP), 'members', EMP_MEM), { userName: 'سارة', phone: '0100' }));
+    await assertFails(updateDoc(doc(db(ADMIN), 'members', EMP_MEM), { instapay: 'x@instapay' }));
+    await assertFails(setDoc(doc(db(ADMIN), 'members', `newUser_${ORG}`), { orgId: ORG, userId: 'newUser', role: 'employee', userEmail: 'n@acme.test', iban: 'EG1' }));
+    // the profile is where they belong
+    await assertSucceeds(setDoc(doc(db(EMP), 'users', EMP.uid), payout, { merge: true }));
+  });
+
+  it("a user's profile save removes payout details an older version copied into their membership", async () => {
+    await seed(f => updateDoc(doc(f, 'members', EMP_MEM), payout));
+    const res = await syncOwnMembership(createFirestoreStore(db(EMP)), actor(EMP, 'employee'), EMP_MEM, { userName: 'سارة', phone: '0111' });
+    expect(res.changed).toBe(true);
+    const mem = (await readDoc('members', EMP_MEM))!;
+    expect(mem).toMatchObject({ userName: 'سارة', phone: '0111', role: 'employee', orgId: ORG, userId: EMP.uid });
+    for (const f of Object.keys(payout)) expect(f in mem).toBe(false);
+  });
+
+  it("an admin's clean-up moves them into the person's profile and out of the membership (both pass the rules)", async () => {
+    await seed(async f => {
+      await updateDoc(doc(f, 'members', EMP_MEM), payout);
+      await updateDoc(doc(f, 'users', EMP.uid), { iban: 'EG-PROFILE' });
+    });
+    const res = await movePayoutToProfile(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), EMP_MEM);
+    expect(res.value).toBe('moved');
+    expect(await readDoc('users', EMP.uid)).toMatchObject({ ...payout, iban: 'EG-PROFILE' });
+    const mem = (await readDoc('members', EMP_MEM))!;
+    for (const f of Object.keys(payout)) expect(f in mem).toBe(false);
+    // an employee cannot run it (refused by the domain), nor clean up someone else's membership
+    await expect(movePayoutToProfile(createFirestoreStore(db(EMP)), actor(EMP, 'employee'), ADMIN_MEM)).rejects.toMatchObject({ code: 'forbidden' });
+  });
+});
+
+describe('visa requests: only company admins delete', () => {
+  it("the requester's own pending visa: refused by the domain at once, and by the rules for a forged role", async () => {
+    const store = createFirestoreStore(db(EMP));
+    const visa = await createVisaRequest(store, actor(EMP, 'employee'), {
+      orgId: ORG, requestDate: '2026-09-30', travelerName: 'T', passportNumber: 'P', destinationCountry: 'SA', hasTraveledBefore: false,
+      expectedTravelDate: '2026-12-01', visaType: 'tourist', serviceProviderId: 'p', serviceProviderName: 'P', assignedApprover: '',
+      totalAmount: 100, currency: 'EGP', paymentMode: 'full', requesterId: EMP.uid, requesterName: 'e',
+    }, opKey(30));
+    await expect(deleteVisaRequest(store, actor(EMP, 'employee'), visa.value.id, opKey(31))).rejects.toMatchObject({ code: 'forbidden' });
+    await assertFails(deleteVisaRequest(store, actor(EMP, 'org_admin'), visa.value.id, opKey(32)));
+    await deleteVisaRequest(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), visa.value.id, opKey(33));
+    expect(await readDoc('visaRequests', visa.value.id)).toBeUndefined();
   });
 });

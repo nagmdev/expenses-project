@@ -1,12 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { PaymentMethod } from '../types';
+import { canOpenTab } from '../utils/permissions';
+import { copyTextToClipboard } from '../utils/requestUi';
+import { useSubmitGuard } from '../hooks/useSubmitGuard';
+import {
+  ibanError,
+  walletNumberError,
+  sanitizeDigitsOnly,
+  sanitizeIBAN,
+  sanitizeInstaPay,
+  sanitizePhone,
+  handleNumericKeyDown,
+} from '../utils/validation';
 import { 
   User as UserIcon, 
   Mail, 
-  Phone, 
   Building2, 
-  Briefcase, 
   ShieldCheck, 
   CreditCard, 
   Smartphone, 
@@ -17,9 +27,16 @@ import {
   AlertCircle, 
   Sparkles,
   ArrowRight,
-  Send,
   Building
 } from 'lucide-react';
+
+// An InstaPay payment address (name@instapay) or the Egyptian mobile number registered on it.
+const INSTAPAY_RE = /^[a-z0-9._-]{2,}@instapay$/i;
+const EG_MOBILE_RE = /^01[0125]\d{8}$/;
+
+/** The four choices of this page; 'digital_wallet' (same method, newer name) shows as the wallet choice. */
+const profileMethod = (method?: PaymentMethod | null): PaymentMethod =>
+  method === 'digital_wallet' ? 'wallet' : method === 'cheque' || !method ? 'instapay' : method;
 
 export const ProfileManagement: React.FC = () => {
   const { 
@@ -38,7 +55,7 @@ export const ProfileManagement: React.FC = () => {
 
   // Payout Details Form State
   const [preferredMethod, setPreferredMethod] = useState<PaymentMethod>(
-    currentUser.preferredPaymentMethod || 'instapay'
+    profileMethod(currentUser.preferredPaymentMethod)
   );
   const [instapay, setInstapay] = useState(currentUser.instapay || '');
   const [wallet, setWallet] = useState(currentUser.wallet || '');
@@ -52,68 +69,103 @@ export const ProfileManagement: React.FC = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
 
   // UI States
-  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const saveGuard = useSubmitGuard();
+  const isSavingProfile = saveGuard.pending;
   const [isChangingPass, setIsChangingPass] = useState(false);
   const [profileFeedback, setProfileFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [passFeedback, setPassFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [copyState, setCopyState] = useState<{ key: string; ok: boolean } | null>(null);
 
-  // Sync state if currentUser changes
-  useEffect(() => {
+  // Reload the form when the SAVED profile changes (after a save, or an update from another
+  // device) - adjusted during render, and never because of an unrelated re-render while typing.
+  const savedProfileKey = JSON.stringify([
+    currentUser.id, currentUser.name, currentUser.phone, currentUser.preferredPaymentMethod, currentUser.instapay,
+    currentUser.wallet, currentUser.walletProvider, currentUser.bankName, currentUser.iban,
+  ]);
+  const [syncedProfileKey, setSyncedProfileKey] = useState(savedProfileKey);
+  if (savedProfileKey !== syncedProfileKey) {
+    setSyncedProfileKey(savedProfileKey);
     setName(currentUser.name || '');
     setPhone(currentUser.phone || '');
     if (currentUser.preferredPaymentMethod) {
-      setPreferredMethod(currentUser.preferredPaymentMethod);
+      setPreferredMethod(profileMethod(currentUser.preferredPaymentMethod));
     }
     setInstapay(currentUser.instapay || '');
     setWallet(currentUser.wallet || '');
     setWalletProvider(currentUser.walletProvider || 'فودافون كاش');
     setBankName(currentUser.bankName || '');
     setIban(currentUser.iban || '');
-  }, [currentUser]);
+  }
 
-  const handleCopy = (text: string, key: string) => {
+  // Never shows "copied" when the browser refused the clipboard write.
+  const handleCopy = async (text: string, key: string) => {
     if (!text) return;
-    navigator.clipboard.writeText(text);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 2500);
+    const ok = await copyTextToClipboard(text);
+    setCopyState({ key, ok });
+    setTimeout(() => setCopyState(null), 2500);
   };
 
-  const handleSaveProfile = async (e: React.FormEvent) => {
+  /** Arabic error for the first invalid payout / contact field, or null. Empty fields are allowed. */
+  const validateProfile = (): string | null => {
+    if (!name.trim()) return 'يرجى إدخال اسمك بالكامل.';
+    const ipa = instapay.trim();
+    if (ipa && !INSTAPAY_RE.test(ipa) && !EG_MOBILE_RE.test(ipa)) {
+      return '⚠️ عنوان إنستاباي غير صحيح: اكتب العنوان بالشكل name@instapay أو رقم الهاتف المسجل بإنستاباي (11 رقماً يبدأ بـ 01).';
+    }
+    if (wallet.trim()) {
+      const walletError = walletNumberError(wallet);
+      if (walletError) return walletError;
+      if (wallet.trim().length !== 11) return '⚠️ رقم المحفظة غير صحيح: يجب أن يتكون من 11 رقماً (مثال: 01012345678).';
+    }
+    if (iban.trim()) {
+      const bankError = ibanError(iban);
+      if (bankError) return bankError;
+    }
+    const phoneDigits = phone.replace(/\D/g, '');
+    if (phone.trim() && (phoneDigits.length < 8 || phoneDigits.length > 15)) {
+      return '⚠️ رقم الهاتف غير صحيح: اكتب رقم الهاتف كاملاً بالأرقام فقط.';
+    }
+    return null;
+  };
+
+  const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) {
-      setProfileFeedback({ type: 'error', message: 'يرجى إدخال اسمك بالكامل.' });
+    const invalid = validateProfile();
+    if (invalid) {
+      setProfileFeedback({ type: 'error', message: invalid });
       return;
     }
 
-    setIsSavingProfile(true);
-    setProfileFeedback(null);
+    void saveGuard.run(async () => {
+      setProfileFeedback(null);
+      try {
+        const res = await updateUserProfileInfo({
+          name: name.trim(),
+          phone: phone.trim(),
+          instapay: instapay.trim(),
+          wallet: wallet.trim(),
+          walletProvider: walletProvider.trim(),
+          bankName: bankName.trim(),
+          iban: sanitizeIBAN(iban),
+          preferredPaymentMethod: preferredMethod,
+        });
 
-    const res = await updateUserProfileInfo({
-      name: name.trim(),
-      phone: phone.trim(),
-      instapay: instapay.trim(),
-      wallet: wallet.trim(),
-      walletProvider: walletProvider.trim(),
-      bankName: bankName.trim(),
-      iban: iban.trim(),
-      preferredPaymentMethod: preferredMethod,
+        if (res.success) {
+          setProfileFeedback({
+            type: 'success',
+            message: 'تم حفظ وتحديث بيانات الملف الشخصي والاستحقاق المالي بنجاح! سيتم استخدامها تلقائياً عند تقديم أي طلب صرف.'
+          });
+          setTimeout(() => setProfileFeedback(null), 6000);
+        } else {
+          setProfileFeedback({
+            type: 'error',
+            message: res.error || 'تعذر حفظ البيانات. يرجى المحاولة مرة أخرى.'
+          });
+        }
+      } catch {
+        setProfileFeedback({ type: 'error', message: 'تعذر حفظ البيانات. تحقق من الاتصال ثم أعد المحاولة.' });
+      }
     });
-
-    setIsSavingProfile(false);
-
-    if (res.success) {
-      setProfileFeedback({
-        type: 'success',
-        message: 'تم حفظ وتحديث بيانات الملف الشخصي والاستحقاق المالي بنجاح! سيتم استخدامها تلقائياً عند تقديم أي طلب صرف.'
-      });
-      setTimeout(() => setProfileFeedback(null), 6000);
-    } else {
-      setProfileFeedback({
-        type: 'error',
-        message: res.error || 'تعذر حفظ البيانات. يرجى المحاولة مرة أخرى.'
-      });
-    }
   };
 
   const handleChangePassword = async (e: React.FormEvent) => {
@@ -134,8 +186,14 @@ export const ProfileManagement: React.FC = () => {
     setIsChangingPass(true);
     setPassFeedback(null);
 
-    const res = await changeCurrentUserPassword(currentPassword, newPassword);
-    setIsChangingPass(false);
+    let res: { success: boolean; error?: string };
+    try {
+      res = await changeCurrentUserPassword(currentPassword, newPassword);
+    } catch {
+      res = { success: false };
+    } finally {
+      setIsChangingPass(false);
+    }
 
     if (res.success) {
       setPassFeedback({ type: 'success', message: 'تم تغيير كلمة المرور بنجاح! احتفظ بها في مكان آمن.' });
@@ -172,6 +230,7 @@ export const ProfileManagement: React.FC = () => {
         return {
           title: 'إنستاباي (InstaPay IPA)',
           val: instapay || 'لم يتم تسجيل عنوان إنستاباي بعد',
+          copyable: Boolean(instapay.trim()),
           icon: <Smartphone className="h-5 w-5 text-purple-400" />,
           color: 'from-purple-900 to-indigo-950',
           badge: 'IPA / لحظي'
@@ -180,6 +239,7 @@ export const ProfileManagement: React.FC = () => {
         return {
           title: `محفظة إلكترونية (${walletProvider})`,
           val: wallet || 'لم يتم تسجيل رقم المحفظة بعد',
+          copyable: Boolean(wallet.trim()),
           icon: <Smartphone className="h-5 w-5 text-amber-400" />,
           color: 'from-amber-900 to-stone-900',
           badge: 'كاش موبايل'
@@ -187,7 +247,8 @@ export const ProfileManagement: React.FC = () => {
       case 'bank_transfer':
         return {
           title: `تحويل مصرفي (${bankName || 'بنك'})`,
-          val: iban || 'لم يتم تسجيل رقم الحساب أو الآيبان بعد',
+          val: iban || 'لم يتم تسجيل رقم الآيبان بعد',
+          copyable: Boolean(iban.trim()),
           icon: <Building className="h-5 w-5 text-emerald-400" />,
           color: 'from-emerald-900 to-slate-900',
           badge: 'IBAN بنكي'
@@ -196,6 +257,7 @@ export const ProfileManagement: React.FC = () => {
         return {
           title: 'صرف نقدي من الخزينة',
           val: 'استلام نقدية من أمين الخزينة مباشرة',
+          copyable: false,
           icon: <CreditCard className="h-5 w-5 text-slate-400" />,
           color: 'from-slate-800 to-slate-950',
           badge: 'كاش يدوي'
@@ -235,7 +297,7 @@ export const ProfileManagement: React.FC = () => {
         <div className="flex items-center gap-2 self-start md:self-center">
           <button
             type="button"
-            onClick={() => setActiveTab(currentRole === 'employee' ? 'my-requests' : 'requests')}
+            onClick={() => setActiveTab(canOpenTab(currentRole, 'requests') ? 'requests' : 'my-requests')}
             className="flex items-center gap-1.5 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer"
           >
             <ArrowRight className="h-4 w-4" />
@@ -275,17 +337,23 @@ export const ProfileManagement: React.FC = () => {
                 <div className="text-[10px] text-white/70 mb-1">بيانات الاستلام المالي المسجلة:</div>
                 <div className="text-sm font-mono font-bold tracking-wide break-all text-white bg-black/25 p-2 rounded-xl border border-white/10 flex items-center justify-between gap-2">
                   <span className="truncate">{payoutDisplay.val}</span>
-                  {payoutDisplay.val && !payoutDisplay.val.includes('لم يتم') && (
+                  {payoutDisplay.copyable && (
                     <button
                       type="button"
-                      onClick={() => handleCopy(payoutDisplay.val, 'card-val')}
+                      onClick={() => { void handleCopy(payoutDisplay.val, 'card-val'); }}
                       className="p-1 hover:bg-white/20 rounded-md transition text-white/80 hover:text-white shrink-0 cursor-pointer"
                       title="نسخ الحساب"
+                      aria-label="نسخ الحساب"
                     >
-                      {copiedKey === 'card-val' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                      {copyState?.key === 'card-val' && copyState.ok ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
                     </button>
                   )}
                 </div>
+                {copyState?.key === 'card-val' && (
+                  <div role="status" className={`text-[10px] font-bold mt-1 ${copyState.ok ? 'text-emerald-300' : 'text-rose-200'}`}>
+                    {copyState.ok ? 'تم نسخ الحساب' : 'تعذر النسخ تلقائياً — حدد الرقم وانسخه يدوياً'}
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center justify-between text-xs text-white/80 pt-2 border-t border-white/15">
@@ -295,7 +363,7 @@ export const ProfileManagement: React.FC = () => {
                 </div>
                 <div className="text-left" dir="ltr">
                   <div className="text-[9px] text-white/60">COMPANY</div>
-                  <div className="font-semibold text-[11px] text-white/90 truncate max-w-[100px]">{activeOrg?.name || 'TIE Apps'}</div>
+                  <div className="font-semibold text-[11px] text-white/90 truncate max-w-[100px]">{activeOrg?.name || '—'}</div>
                 </div>
               </div>
             </div>
@@ -424,7 +492,7 @@ export const ProfileManagement: React.FC = () => {
                       type="text"
                       dir="ltr"
                       value={instapay}
-                      onChange={e => setInstapay(e.target.value)}
+                      onChange={e => setInstapay(sanitizeInstaPay(e.target.value))}
                       placeholder="مثال: name@instapay أو 01117333908"
                       className="w-full px-3.5 py-2.5 bg-white border border-purple-200 rounded-xl text-xs text-left focus:outline-hidden focus:ring-2 focus:ring-purple-500 font-mono"
                     />
@@ -451,9 +519,11 @@ export const ProfileManagement: React.FC = () => {
                     <input
                       type="tel"
                       dir="ltr"
+                      inputMode="numeric"
                       maxLength={11}
                       value={wallet}
-                      onChange={e => setWallet(e.target.value.replace(/\D/g, ''))}
+                      onKeyDown={e => handleNumericKeyDown(e, false)}
+                      onChange={e => setWallet(sanitizeDigitsOnly(e.target.value, 11))}
                       placeholder="01012345678"
                       className="w-full px-3.5 py-2.5 bg-white border border-amber-200 rounded-xl text-xs text-left focus:outline-hidden focus:ring-2 focus:ring-amber-500 font-mono"
                     />
@@ -506,14 +576,14 @@ export const ProfileManagement: React.FC = () => {
 
                   <div>
                     <label className="block text-xs font-medium text-slate-700 mb-1">
-                      رقم الحساب أو الآيبان الدولي (IBAN):
+                      رقم الآيبان (IBAN):
                     </label>
                     <input
                       type="text"
                       dir="ltr"
                       value={iban}
-                      onChange={e => setIban(e.target.value)}
-                      placeholder="EG000000000000000000000000"
+                      onChange={e => setIban(sanitizeIBAN(e.target.value))}
+                      placeholder="EG380019000500000000263180002"
                       className="w-full px-3.5 py-2.5 bg-white border border-emerald-200 rounded-xl text-xs text-left focus:outline-hidden focus:ring-2 focus:ring-emerald-500 font-mono"
                     />
                   </div>
@@ -549,7 +619,7 @@ export const ProfileManagement: React.FC = () => {
                       type="tel"
                       dir="ltr"
                       value={phone}
-                      onChange={e => setPhone(e.target.value)}
+                      onChange={e => setPhone(sanitizePhone(e.target.value))}
                       placeholder="01117333908"
                       className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-left focus:outline-hidden focus:ring-2 focus:ring-emerald-500 font-mono"
                     />

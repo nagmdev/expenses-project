@@ -88,6 +88,50 @@ service cloud.firestore {
       return isSuperAdmin() || (isAuthenticated() && hasOrgRole(orgId, ['finance', 'org_admin']));
     }
 
+    // A record another company shares with the caller's company (a service's orgIds, set by
+    // the platform owner only). The caller's company is the one of their active profile, so a
+    // query where('orgIds', 'array-contains', <that company>) can be proven against this.
+    function inSharedOrgViaProfile(orgIds) {
+      return isAuthenticated() && exists(profilePath()) &&
+        get(profilePath()).data.get('active', true) != false &&
+        get(profilePath()).data.get('orgId', '') is string &&
+        get(profilePath()).data.get('orgId', '') != '' &&
+        get(profilePath()).data.get('orgId', '') in orgIds;
+    }
+
+    function hasSharedOrgRole(orgIds, roles) {
+      return inSharedOrgViaProfile(orgIds) && get(profilePath()).data.get('role', null) in roles;
+    }
+
+    // Payout details (bank, IBAN, InstaPay, wallet) belong in users/{uid} only: members/*
+    // can be listed by every member of the company.
+    function payoutKeys() {
+      return ['instapay', 'wallet', 'walletProvider', 'bankName', 'iban'];
+    }
+
+    // None may be added to or changed in a membership (removing ones an older version copied is fine).
+    function noPayoutAddedOrChanged() {
+      return !request.resource.data.diff(resource.data).addedKeys().hasAny(payoutKeys()) &&
+        !request.resource.data.diff(resource.data).changedKeys().hasAny(payoutKeys());
+    }
+
+    // The fields that decide what a membership grants, and to whom (grantsMembership trusts them).
+    function grantFields() {
+      return ['role', 'orgId', 'userId', 'userEmail', 'active'];
+    }
+
+    // The platform owner's membership, and the caller's own: an org admin can neither delete
+    // them nor change what they grant. Only a super admin can (src/domain/directory.ts ->
+    // membershipProtection).
+    function isProtectedMembership(m) {
+      return m.get('userId', null) == request.auth.uid || (
+        m.get('userEmail', null) is string && (
+          m.userEmail.lower() in builtInSuperAdmins() ||
+          (hasVerifiedEmail() && m.userEmail.lower() == verifiedEmail())
+        )
+      );
+    }
+
     // members/{memberId} records that an admin of orgId gave the caller `role` there:
     // same org and role, not suspended, and addressed either to the caller's UID or to
     // the caller's verified email (members invited by email before their first
@@ -223,29 +267,54 @@ service cloud.firestore {
       // The id is always <userId>_<orgId> (the rules look memberships up by that id).
       allow create: if isSuperAdmin() || (isOrgAdmin(request.resource.data.orgId) &&
         request.resource.data.role != 'super_admin' &&
-        memberId == request.resource.data.userId + '_' + request.resource.data.orgId);
+        memberId == request.resource.data.userId + '_' + request.resource.data.orgId &&
+        !request.resource.data.keys().hasAny(payoutKeys()));
       allow update: if isSuperAdmin() || (
         isOrgAdmin(resource.data.orgId) &&
         request.resource.data.role != 'super_admin' &&
-        request.resource.data.orgId == resource.data.orgId
+        request.resource.data.orgId == resource.data.orgId &&
+        noPayoutAddedOrChanged() &&
+        // The owner's and the admin's own membership: name / contact only, never role or status.
+        (!isProtectedMembership(resource.data) ||
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(grantFields()))
       ) || (
-        // Self-service edits of contact / payout details only. Who the membership
-        // belongs to (userId, userEmail) and what it grants (role, orgId, active) are
-        // admin-only: grantsMembership() trusts these fields.
+        // Self-service edits of contact details only. Who the membership belongs to
+        // (userId, userEmail) and what it grants (role, orgId, active) are admin-only:
+        // grantsMembership() trusts these fields. Payout details go to users/{uid}.
         isAuthenticated() && resource.data.userId == request.auth.uid &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'orgId', 'userId', 'userEmail', 'active'])
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(grantFields()) &&
+        noPayoutAddedOrChanged()
       );
-      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+      allow delete: if isSuperAdmin() || (isOrgAdmin(resource.data.orgId) && !isProtectedMembership(resource.data));
     }
 
     // =========================================================================
     // 5. SERVICES & CATEGORIES
     // =========================================================================
     match /services/{serviceId} {
-      allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(resource.data.orgId));
-      allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
-      allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && orgUnchanged());
+      // Sharing a service with other companies (orgIds) is the platform owner's call: company
+      // staff name no company but their own, and keep an existing list as it is.
+      function sharingOwnOnly() {
+        return request.resource.data.get('orgIds', []).size() == 0 ||
+          request.resource.data.get('orgIds', []) == [request.resource.data.orgId];
+      }
+      function sharingUnchangedOrOwn() {
+        return request.resource.data.get('orgIds', null) == resource.data.get('orgIds', null) || sharingOwnOnly();
+      }
+
+      // Readable in its own company and in every company it is shared with.
+      allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(resource.data.orgId) ||
+        inSharedOrgViaProfile(resource.data.get('orgIds', [])));
+      allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId) ||
+        inSharedOrgViaProfile(resource.data.get('orgIds', [])));
+      allow create: if isSuperAdmin() || (isOrgAdmin(request.resource.data.orgId) && sharingOwnOnly());
+      allow update: if isSuperAdmin() ||
+        ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && orgUnchanged() && sharingUnchangedOrOwn()) ||
+        // Finance of a company the service is shared with: paying a request adds to its
+        // spending (disburseExpenseRequest) - nothing else, and never downwards.
+        (hasSharedOrgRole(resource.data.get('orgIds', []), ['finance', 'org_admin']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['spentAmount', 'updatedAt']) &&
+          request.resource.data.get('spentAmount', 0) >= resource.data.get('spentAmount', 0));
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
 
@@ -353,11 +422,20 @@ service cloud.firestore {
     // 9. PAYMENT ACCOUNTS & TREASURY VAULTS
     // =========================================================================
     match /paymentAccounts/{accountId} {
+      // An account with a balance or any history (opening balance, money in or out) is part
+      // of the books: it can be deactivated, never deleted (domain: assertPaymentAccountDeletable).
+      function hasNoHistory() {
+        return resource.data.get('currentBalance', 0) in [0, null] &&
+          resource.data.get('balance', 0) in [0, null] &&
+          resource.data.get('initialBalance', 0) in [0, null] &&
+          resource.data.get('totalIn', 0) in [0, null] &&
+          resource.data.get('totalOut', 0) in [0, null];
+      }
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isFinance(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId));
       allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
       allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged());
-      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+      allow delete: if hasNoHistory() && (isSuperAdmin() || isOrgAdmin(resource.data.orgId));
     }
 
     // =========================================================================
@@ -458,9 +536,21 @@ service cloud.firestore {
     //     One document per unique value (account number, service code, member email…)
     // =========================================================================
     match /uniqueKeys/{keyId} {
-      allow get: if isAuthenticated();
+      // The id is <scope>__<company id>__<value> (src/domain/common.ts → uniqueKeyDocId).
+      function keyOrgId() {
+        return keyId.split('__')[1];
+      }
+      function inKeyCompany() {
+        return keyId.split('__').size() >= 2 && keyOrgId() != '-' && isOrgMember(keyOrgId());
+      }
+      // A key names a record of its company (e.g. a member's email and id). Readable by that
+      // company's members only, whether it exists or not: an answer that differed between a
+      // missing and an existing key would tell anyone which emails, providers or account
+      // numbers another company has. Company-less keys (org codes) and keys in the old id
+      // format (company id encoded) are read by the platform owner only.
+      allow get: if isAuthenticated() && (isSuperAdmin() || inKeyCompany());
       allow create: if isAuthenticated() && request.resource.data.entityId is string && (
-        isSuperAdmin() || (request.resource.data.orgId != '-' && isOrgMember(request.resource.data.orgId))
+        isSuperAdmin() || (request.resource.data.orgId != '-' && request.resource.data.orgId == keyOrgId() && inKeyCompany())
       );
       allow update: if false;
       allow delete: if isAuthenticated() && (

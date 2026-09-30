@@ -252,7 +252,7 @@ export const LegacyDataRecovery: React.FC = () => {
           <div className="flex items-center gap-2">
             <DatabaseBackup className="h-4 w-4 text-amber-600 shrink-0" />
             <span className="font-semibold">
-              وُجدت {localCount.toLocaleString()} سجل من النسخة القديمة محفوظة على هذا المتصفح. بعضها قد لا يكون وصل لقاعدة البيانات (خصوصاً طلبات التأشيرات) — راجعها واسترجع الناقص.
+              وُجدت {localCount.toLocaleString('en-US')} سجل من النسخة القديمة محفوظة على هذا المتصفح. بعضها قد لا يكون وصل لقاعدة البيانات (خصوصاً طلبات التأشيرات) — راجعها واسترجع الناقص.
             </span>
           </div>
           <div className="flex items-center gap-2 shrink-0">

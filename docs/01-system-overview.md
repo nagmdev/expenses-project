@@ -35,7 +35,8 @@
 flowchart TD
     subgraph Client["واجهة المستخدم (React + Tailwind RTL)"]
         Header["الشريط العلوي (Header)\n- اختيار المؤسسة\n- مبدل الأدوار"]
-        Navbar["شريط التبويبات (Navbar)"]
+        Sidebar["القائمة الجانبية (Sidebar)
+- الصفحات حسب TAB_ACCESS"]
         ViewDashboard["لوحة التحليلات (Dashboard)"]
         ViewRequests["سجل الطلبات (Requests List)"]
         ViewTracker["شاشة الموظف (Requester Tracker)"]
@@ -51,7 +52,7 @@ flowchart TD
     end
 
     Header --> AppState
-    Navbar --> AppState
+    Sidebar --> AppState
     ViewDashboard --> AppState
     ViewRequests --> AppState
     ViewTracker --> AppState

@@ -1,86 +1,104 @@
 import React, { useState, useMemo, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
-  VisaRequest, 
-  VisaPaymentRecord, 
-  VisaType, 
+  VisaRequest,
+  VisaType,
   VisaStatus, 
   VISA_TYPE_LABELS, 
   VISA_STATUS_LABELS,
   PaymentMethod,
   SUPPORTED_CURRENCIES
 } from '../types';
-import { compressImage } from '../utils/fileUpload';
+import { compressImage, formatFileSize } from '../utils/fileUpload';
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
-import { newId } from '../utils/ids';
 import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
+import { can } from '../utils/permissions';
+import { isArchivedOrg } from '../domain/common';
+import {
+  accountTypeLabel,
+  accountTypeToPaymentMethod,
+  currencyCode,
+  fmtMoney,
+  formatLocalDate,
+  formatLocalDateTime,
+  paymentMethodLabel,
+  spendableBalance,
+} from '../utils/requestUi';
 import { 
-  Plane, 
-  Plus, 
-  Search, 
-  Filter, 
-  CheckCircle2, 
-  XCircle, 
-  Clock, 
-  AlertTriangle, 
-  CreditCard, 
-  FileText, 
-  UploadCloud, 
-  Trash2, 
-  Eye, 
-  User as UserIcon, 
-  Building2, 
-  Calendar, 
-  Wallet, 
-  Lock, 
-  ShieldCheck, 
-  X, 
-  ArrowLeft,
-  ChevronDown,
+  Plane,
+  Plus,
+  Search,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  AlertTriangle,
+  CreditCard,
+  UploadCloud,
+  Trash2,
+  Eye,
+  User as UserIcon,
+  Building2,
+  Wallet,
+  Lock,
+  ShieldCheck,
+  X,
   Paperclip,
   Check,
-  Receipt,
   FileCheck2,
   DollarSign
 } from 'lucide-react';
 
+// Who decides a visa request: the company's managers (permissions.ts decideVisas), never a fixed person.
+const VISA_APPROVER_LABEL = 'مدير الشركة / المسؤول المالي';
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+/** Today's date in the viewer's local time (YYYY-MM-DD, Western digits); toISOString() gave the UTC day. */
+const localToday = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+};
+
+type CurrencyTotals = { currency: string; cost: number; paid: number; remaining: number; awaiting: number };
+
 export const VisaManagement: React.FC = () => {
-  const { 
-    visaRequests, 
-    createVisaRequest, 
-    updateVisaRequest, 
-    approveVisaRequest, 
-    rejectVisaRequest, 
-    addVisaPayment, 
+  const {
+    visaRequests,
+    createVisaRequest,
+    approveVisaRequest,
+    rejectVisaRequest,
+    addVisaPayment,
     deleteVisaRequest,
     providers,
     allProviders,
     paymentAccounts,
     allPaymentAccounts,
+    resolveParentBankAccount,
     currentUser,
     currentRole,
     effectiveOrgId,
+    activeOrg,
     organizations
   } = useApp();
   const isSuperAdmin = currentRole === 'super_admin';
+  // A new visa request goes only to a company that is still active (an archived one takes no new records).
+  const creatableOrgs = useMemo(() => organizations.filter(o => !isArchivedOrg(o)), [organizations]);
 
-  // Modal states
+  // Every action is shown only to the roles the domain / firestore.rules accept (src/utils/permissions.ts)
+  const canDecide = can(currentRole, 'decideVisas');
+  const canManagePayments = can(currentRole, 'payVisas');
+  const canDeleteVisas = can(currentRole, 'deleteVisas');
+
+  // Modal states. The open visa is always shown from the LIVE list (a payment, decision or
+  // delete by anyone shows at once); a just-made decision is overlaid until the list catches up.
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [selectedVisa, setSelectedVisa] = useState<VisaRequest | null>(null);
+  const [selectedVisaId, setSelectedVisaId] = useState<string | null>(null);
+  const [optimisticVisa, setOptimisticVisa] = useState<{ visa: VisaRequest; baseUpdatedAt: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Search & Filter state
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedTypeFilter, setSelectedTypeFilter] = useState<string>('all');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<string>('all');
-
-  // User Permissions
-  const isPrivilegedUser = currentRole === 'org_admin' || currentRole === 'finance' || currentRole === 'super_admin';
-  const canApprove = isPrivilegedUser || Boolean(
-    currentUser?.name && 
-    selectedVisa?.assignedApprover && 
-    currentUser.name.trim().toLowerCase().includes(selectedVisa.assignedApprover.trim().toLowerCase())
-  );
-  const canManagePayments = isPrivilegedUser;
 
   // Form State for New Visa Request
   const [travelerName, setTravelerName] = useState('');
@@ -110,9 +128,10 @@ export const VisaManagement: React.FC = () => {
   // Detail Modal Action states
   const [rejectionReason, setRejectionReason] = useState('');
   const [isRejecting, setIsRejecting] = useState(false);
+  const [decisionError, setDecisionError] = useState('');
   const [isAddingPayment, setIsAddingPayment] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState<number | ''>('');
-  const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split('T')[0]);
+  const [paymentDate, setPaymentDate] = useState(localToday);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('bank_transfer');
   const [paymentAccountId, setPaymentAccountId] = useState('');
   const [receiptReference, setReceiptReference] = useState('');
@@ -124,24 +143,12 @@ export const VisaManagement: React.FC = () => {
 
   // Providers of the company the new request belongs to. Filtering by effectiveOrgId
   // emptied this list in "all companies" mode (no provider has orgId 'all').
+  // A deactivated provider (in use, so kept instead of deleted) is not offered for a new visa.
   const availableProviders = useMemo(() => {
     if (!formOrgId) return [];
     const source = isSuperAdmin ? allProviders : providers;
-    return source.filter(p => p.orgId === formOrgId || !p.orgId);
+    return source.filter(p => (p.orgId === formOrgId || !p.orgId) && p.active !== false);
   }, [isSuperAdmin, allProviders, providers, formOrgId]);
-
-  // Accounts of the open visa's own company (the domain refuses cross-company payments).
-  const availableAccounts = useMemo(() => {
-    const visaOrgId = selectedVisa?.orgId;
-    const source = isSuperAdmin ? allPaymentAccounts : paymentAccounts;
-    return source.filter(a => !visaOrgId || a.orgId === visaOrgId);
-  }, [isSuperAdmin, allPaymentAccounts, paymentAccounts, selectedVisa?.orgId]);
-
-  // An account picked for one visa must not carry over to another (possibly another company's) visa.
-  const openVisa = (visa: VisaRequest) => {
-    if (visa.id !== selectedVisa?.id) setPaymentAccountId('');
-    setSelectedVisa(visa);
-  };
 
   // Strict deduplication guarantee for Visa Requests (by ID & Request Number)
   const cleanVisaRequests = useMemo(() => {
@@ -155,6 +162,72 @@ export const VisaManagement: React.FC = () => {
       return true;
     });
   }, [visaRequests]);
+
+  // The open visa: the live record, or the local copy of a decision just made while the
+  // live list still shows the version the decision was made on.
+  const liveSelectedVisa = selectedVisaId ? cleanVisaRequests.find(v => v.id === selectedVisaId) || null : null;
+  const selectedVisa: VisaRequest | null =
+    optimisticVisa &&
+    optimisticVisa.visa.id === selectedVisaId &&
+    (!liveSelectedVisa || (liveSelectedVisa.updatedAt || '') === optimisticVisa.baseUpdatedAt)
+      ? optimisticVisa.visa
+      : liveSelectedVisa;
+
+  // Accounts a visa payment may come from: active accounts of the visa's own company in the
+  // visa's currency (the domain refuses another company's account; mixing currencies would
+  // take a SAR amount out of an EGP balance).
+  const availableAccounts = useMemo(() => {
+    if (!selectedVisa) return [];
+    const source = isSuperAdmin ? allPaymentAccounts : paymentAccounts;
+    const visaCurrency = currencyCode(selectedVisa.currency);
+    return source.filter(a =>
+      a.orgId === selectedVisa.orgId &&
+      a.active !== false &&
+      currencyCode(a.currency) === visaCurrency
+    );
+  }, [isSuperAdmin, allPaymentAccounts, paymentAccounts, selectedVisa]);
+
+  // What the chosen account can pay now: no account (nor the bank behind an InstaPay channel) goes below zero
+  const paymentAccount = paymentAccountId ? availableAccounts.find(a => a.id === paymentAccountId) || null : null;
+  const paymentAccountBank = paymentAccount ? resolveParentBankAccount(paymentAccount) : null;
+  const paymentAvailable = spendableBalance(paymentAccount, paymentAccountBank);
+  const paymentAmountNum = Number(paymentAmount) || 0;
+  const paymentExceedsBalance = Boolean(paymentAccount) && paymentAmountNum > 0 && paymentAmountNum > paymentAvailable;
+  const insufficientPaymentMessage = () => {
+    if (!paymentAccount) return '';
+    const cur = currencyCode(paymentAccount.currency);
+    const limitedByBank = paymentAccountBank && spendableBalance(paymentAccountBank) < spendableBalance(paymentAccount);
+    return `رصيد الحساب "${paymentAccount.name}" غير كافٍ: المتاح ${fmtMoney(paymentAvailable)} ${cur}${
+      limitedByBank ? ` (محدود برصيد الحساب البنكي المرتبط "${paymentAccountBank?.name}")` : ''
+    } والمبلغ المطلوب ${fmtMoney(paymentAmountNum)} ${cur}. لا يُسمح بأن يصبح رصيد أي حساب بالسالب؛ قم بإيداع المبلغ في الحساب أولاً من صفحة الخزينة أو اختر حساباً آخر.`;
+  };
+
+  const resetPaymentForm = () => {
+    setIsAddingPayment(false);
+    setPaymentAmount('');
+    setPaymentDate(localToday());
+    setPaymentMethod('bank_transfer');
+    setPaymentAccountId('');
+    setReceiptReference('');
+    setPaymentNotes('');
+    setPaymentError('');
+  };
+
+  // A form started on one visa never carries over to another (possibly another company's) visa.
+  const openVisa = (visa: VisaRequest) => {
+    if (visa.id !== selectedVisaId) {
+      resetPaymentForm();
+      setIsRejecting(false);
+      setRejectionReason('');
+      setDecisionError('');
+    }
+    setOptimisticVisa(null);
+    setSelectedVisaId(visa.id);
+  };
+  const closeVisa = () => {
+    setSelectedVisaId(null);
+    setOptimisticVisa(null);
+  };
 
   // Filtered Visa Requests
   const filteredVisaRequests = useMemo(() => {
@@ -174,21 +247,34 @@ export const VisaManagement: React.FC = () => {
     });
   }, [cleanVisaRequests, searchTerm, selectedTypeFilter, selectedStatusFilter]);
 
-  // Overall Financial Metrics
+  // Overall Financial Metrics, per currency (a SAR and an EGP amount are never added under one label).
+  // Rejected visas cost nothing; only approved (partly) unpaid visas are payable. Pending visas
+  // are counted apart as "awaiting approval".
   const metrics = useMemo(() => {
     const totalCount = cleanVisaRequests.length;
-    const totalCost = cleanVisaRequests.reduce((sum, r) => sum + Number(r.totalAmount || 0), 0);
-    const totalPaid = cleanVisaRequests.reduce((sum, r) => sum + Number(r.paidAmount || 0), 0);
-    const totalRemaining = cleanVisaRequests.reduce((sum, r) => sum + Number(r.remainingBalance || 0), 0);
     const pendingCount = cleanVisaRequests.filter(r => r.status === 'pending').length;
+    const byCurrency = new Map<string, CurrencyTotals>();
+    cleanVisaRequests.forEach(r => {
+      if (r.status === 'rejected') return;
+      const cur = currencyCode(r.currency);
+      const row = byCurrency.get(cur) || { currency: cur, cost: 0, paid: 0, remaining: 0, awaiting: 0 };
+      row.cost += Number(r.totalAmount || 0);
+      row.paid += Number(r.paidAmount || 0);
+      if (r.status === 'approved' || r.status === 'partially_paid') row.remaining += Math.max(0, Number(r.remainingBalance || 0));
+      if (r.status === 'pending') row.awaiting += Number(r.totalAmount || 0);
+      byCurrency.set(cur, row);
+    });
+    // The company's own currency first, then the others alphabetically
+    const mainCurrency = currencyCode(activeOrg?.currency);
+    const totals = Array.from(byCurrency.values()).sort((a, b) =>
+      a.currency === mainCurrency ? -1 : b.currency === mainCurrency ? 1 : a.currency.localeCompare(b.currency)
+    );
+    if (totals.length === 0) totals.push({ currency: mainCurrency, cost: 0, paid: 0, remaining: 0, awaiting: 0 });
+    return { totalCount, pendingCount, totals };
+  }, [cleanVisaRequests, activeOrg?.currency]);
 
-    return { totalCount, totalCost, totalPaid, totalRemaining, pendingCount };
-  }, [visaRequests]);
-
-  // Today's date string formatted for comparisons (YYYY-MM-DD)
-  const todayStr = useMemo(() => {
-    return new Date().toISOString().split('T')[0];
-  }, []);
+  // Today's date string formatted for comparisons (YYYY-MM-DD, local day)
+  const todayStr = useMemo(() => localToday(), []);
 
   // Strict Passport validation: 6 to 12 alphanumeric characters, uppercase standard
   const validatePassport = (val: string): boolean => {
@@ -345,11 +431,12 @@ export const VisaManagement: React.FC = () => {
       return;
     }
 
+    setFormErrors({});
     await createGuard.run(async (idempotencyKey) => {
     try {
       const selectedProviderObj = availableProviders.find(p => p.id === serviceProviderId);
 
-      await createVisaRequest({
+      const created = await createVisaRequest({
         orgId: formOrgId,
         requestDate: new Date().toISOString(),
         travelerName: travelerName.trim(),
@@ -363,7 +450,8 @@ export const VisaManagement: React.FC = () => {
         visaAttachmentSize,
         serviceProviderId,
         serviceProviderName: selectedProviderObj?.name || 'مورد تأشيرات معتمد',
-        assignedApprover: 'محمود', // Explicitly assigned to Mahmoud
+        // No fixed person: any of the company's managers decides (the actual approver is recorded on the decision)
+        assignedApprover: VISA_APPROVER_LABEL,
         totalAmount: Number(totalAmount),
         initialPayment: Number(initialPayment),
         currency,
@@ -377,42 +465,79 @@ export const VisaManagement: React.FC = () => {
       createGuard.rotateKey();
       setIsCreateModalOpen(false);
       resetCreateForm();
+      setNotice(`تم تسجيل طلب التأشيرة ${created?.requestNumber ? `${created.requestNumber} ` : ''}للمسافر "${travelerName.trim()}" وإحالته إلى ${VISA_APPROVER_LABEL} للاعتماد.`);
     } catch (err: any) {
-      alert(`حدث خطأ أثناء حفظ الطلب: ${err?.message || 'تعذر الاتصال'}`);
+      setFormErrors({ submit: `حدث خطأ أثناء حفظ الطلب: ${err?.message || 'تعذر الاتصال'}` });
     }
     });
   };
 
-  // Approval Handlers
-  const handleApprove = async (visaId: string) => {
-    await visaActions.run(`approve:${visaId}`, async () => {
+  // Approval Handlers. The decision is recorded under the ACTING user's name (AppContext
+  // passes the signed-in user), never a fixed approver.
+  const handleApprove = async (visa: VisaRequest) => {
+    setDecisionError('');
+    await visaActions.run(`approve:${visa.id}`, async () => {
     try {
-      await approveVisaRequest(visaId, 'محمود');
-      if (selectedVisa && selectedVisa.id === visaId) {
-        setSelectedVisa(prev => prev ? { ...prev, status: prev.paidAmount > 0 ? 'partially_paid' : 'approved', approvedByName: 'محمود', approvedAt: new Date().toISOString() } : null);
-      }
+      await approveVisaRequest(visa.id);
+      setOptimisticVisa({
+        baseUpdatedAt: visa.updatedAt || '',
+        visa: {
+          ...visa,
+          status: visa.paidAmount >= visa.totalAmount && visa.totalAmount > 0 ? 'paid' : visa.paidAmount > 0 ? 'partially_paid' : 'approved',
+          approvedBy: currentUser.id,
+          approvedByName: currentUser.name,
+          approvedAt: new Date().toISOString(),
+          rejectionReason: undefined,
+        },
+      });
+      setNotice(`تم اعتماد طلب تأشيرة المسافر "${visa.travelerName}" (${visa.requestNumber}) بواسطة ${currentUser.name}.`);
     } catch (err: any) {
-      alert(`فشل اعتماد الطلب: ${err?.message || 'تعذر تنفيذ العملية'}`);
+      setDecisionError(`فشل اعتماد الطلب: ${err?.message || 'تعذر تنفيذ العملية'}`);
     }
     });
   };
 
-  const handleReject = async (visaId: string) => {
-    if (!rejectionReason.trim()) {
-      alert('يرجى ذكر سبب الرفض');
+  const handleReject = async (visa: VisaRequest) => {
+    const reason = rejectionReason.trim();
+    if (!reason) {
+      setDecisionError('يرجى كتابة سبب الرفض قبل التأكيد.');
       return;
     }
-    await visaActions.run(`reject:${visaId}`, async () => {
+    setDecisionError('');
+    await visaActions.run(`reject:${visa.id}`, async () => {
     try {
-      await rejectVisaRequest(visaId, rejectionReason.trim(), 'محمود');
+      await rejectVisaRequest(visa.id, reason);
       setIsRejecting(false);
       setRejectionReason('');
-      if (selectedVisa && selectedVisa.id === visaId) {
-        setSelectedVisa(prev => prev ? { ...prev, status: 'rejected', rejectionReason } : null);
-      }
+      setOptimisticVisa({
+        baseUpdatedAt: visa.updatedAt || '',
+        visa: {
+          ...visa,
+          status: 'rejected',
+          rejectionReason: reason,
+          approvedBy: currentUser.id,
+          approvedByName: currentUser.name,
+          approvedAt: new Date().toISOString(),
+        },
+      });
+      setNotice(`تم رفض طلب تأشيرة المسافر "${visa.travelerName}" (${visa.requestNumber}).`);
     } catch (err: any) {
-      alert(`فشل رفض الطلب: ${err?.message || 'تعذر تنفيذ العملية'}`);
+      setDecisionError(`فشل رفض الطلب: ${err?.message || 'تعذر تنفيذ العملية'}`);
     }
+    });
+  };
+
+  const handleDelete = async (visa: VisaRequest) => {
+    if (!window.confirm(`هل أنت متأكد من حذف طلب تأشيرة المسافر "${visa.travelerName}" (${visa.requestNumber}) نهائياً؟ لا يمكن التراجع عن هذا الإجراء.`)) return;
+    setDecisionError('');
+    await visaActions.run(`delete:${visa.id}`, async () => {
+      try {
+        await deleteVisaRequest(visa.id);
+        closeVisa();
+        setNotice(`تم حذف طلب تأشيرة المسافر "${visa.travelerName}" (${visa.requestNumber}).`);
+      } catch (err: any) {
+        setDecisionError(err?.message || 'تعذر حذف الطلب.');
+      }
     });
   };
 
@@ -429,60 +554,85 @@ export const VisaManagement: React.FC = () => {
     }
 
     if (numericAmount > selectedVisa.remainingBalance) {
-      setPaymentError(`المبلغ المدخل (${numericAmount.toLocaleString()}) يتجاوز الرصيد المتبقي المطلوب سداده (${selectedVisa.remainingBalance.toLocaleString()} ${selectedVisa.currency}).`);
+      setPaymentError(`المبلغ المدخل (${fmtMoney(numericAmount)}) يتجاوز الرصيد المتبقي المطلوب سداده (${fmtMoney(selectedVisa.remainingBalance)} ${selectedVisa.currency}).`);
       return;
     }
 
+    // No overdraft: the chosen account (and the bank behind an InstaPay channel) must cover the payment
+    if (paymentAccountId && !paymentAccount) {
+      setPaymentError('الحساب المختار غير متاح (معطل أو بعملة أخرى). اختر حساباً آخر.');
+      return;
+    }
+    if (paymentExceedsBalance) {
+      setPaymentError(insufficientPaymentMessage());
+      return;
+    }
+
+    const visa = selectedVisa;
+    const account = paymentAccount;
     await paymentGuard.run(async (idempotencyKey) => {
     try {
-      const selectedAcc = availableAccounts.find(a => a.id === paymentAccountId);
-      await addVisaPayment(selectedVisa.id, {
+      const stored: unknown = await addVisaPayment(visa.id, {
         amount: numericAmount,
-        currency: selectedVisa.currency,
+        currency: visa.currency,
         date: paymentDate,
         paymentMethod,
-        accountId: paymentAccountId || undefined,
-        accountName: selectedAcc?.name || undefined,
+        accountId: account?.id || undefined,
+        accountName: account?.name || undefined,
         receiptReference: receiptReference.trim() || undefined,
         notes: paymentNotes.trim() || undefined,
       }, { idempotencyKey });
       paymentGuard.rotateKey();
-
-      // Update local modal view
-      const newPaid = Number(selectedVisa.paidAmount || 0) + numericAmount;
-      const newRemaining = selectedVisa.totalAmount - newPaid;
-      setSelectedVisa(prev => prev ? {
-        ...prev,
-        paidAmount: newPaid,
-        remainingBalance: newRemaining,
-        status: newRemaining === 0 ? 'paid' : 'partially_paid',
-        payments: [
-          ...(prev.payments || []),
-          {
-            id: newId('vpay'),
-            visaRequestId: prev.id,
-            amount: numericAmount,
-            currency: prev.currency,
-            date: paymentDate,
-            paymentMethod,
-            accountName: selectedAcc?.name,
-            receiptReference: receiptReference.trim() || undefined,
-            recordedBy: currentUser.id,
-            recordedByName: currentUser.name,
-            recordedAt: new Date().toISOString(),
-          }
-        ]
-      } : null);
-
-      setIsAddingPayment(false);
-      setPaymentAmount('');
-      setReceiptReference('');
-      setPaymentNotes('');
+      // Show the record exactly as the server stored it (a retried payment returns the existing
+      // record, never a second copy) until the live list catches up.
+      if (stored && typeof stored === 'object' && (stored as VisaRequest).id === visa.id) {
+        setOptimisticVisa({ visa: stored as VisaRequest, baseUpdatedAt: visa.updatedAt || '' });
+      }
+      resetPaymentForm();
+      setNotice(
+        `تم تسجيل دفعة بقيمة ${fmtMoney(numericAmount)} ${visa.currency} لتأشيرة المسافر "${visa.travelerName}"` +
+          (account ? ` وخصمها من "${account.name}".` : '.')
+      );
     } catch (err: any) {
       setPaymentError(err?.message || 'فشل تسجيل الدفعة');
     }
     });
   };
+
+  // New request: the active company (or the only one); in "all companies" mode the super admin picks one.
+  const handleOpenCreate = () => {
+    resetCreateForm();
+    const orgId = effectiveOrgId && effectiveOrgId !== 'all' ? effectiveOrgId : (creatableOrgs.length === 1 ? creatableOrgs[0].id : '');
+    setFormOrgId(orgId);
+    setCurrency(currencyCode(organizations.find(o => o.id === orgId)?.currency || activeOrg?.currency));
+    createGuard.rotateKey();
+    setIsCreateModalOpen(true);
+  };
+
+  // A per-currency amount line for the KPI cards: the first currency big, any other one below it
+  const renderCurrencyAmounts = (
+    pick: (row: CurrencyTotals) => number,
+    mainClass: string,
+    unitClass: string,
+  ) => {
+    const [first, ...others] = metrics.totals;
+    return (
+      <>
+        <div className="mt-2 flex items-baseline gap-1">
+          <span className={`text-2xl font-black ${mainClass}`}>{fmtMoney(pick(first))}</span>
+          <span className={`text-xs font-semibold ${unitClass}`}>{first.currency}</span>
+        </div>
+        {others.map(row => (
+          <div key={row.currency} className="flex items-baseline gap-1">
+            <span className={`text-sm font-black ${mainClass}`}>+ {fmtMoney(pick(row))}</span>
+            <span className={`text-[10px] font-semibold ${unitClass}`}>{row.currency}</span>
+          </div>
+        ))}
+      </>
+    );
+  };
+
+  const awaitingTotals = metrics.totals.filter(row => row.awaiting > 0);
 
   return (
     <div className="space-y-6 text-right" dir="rtl">
@@ -495,31 +645,43 @@ export const VisaManagement: React.FC = () => {
           </div>
           <div>
             <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 tracking-tight">
-              {currentRole === 'employee' ? 'طلبات وإصدار التأشيرات' : 'إدارة طلبات وإصدار التأشيرات ومصروفاتها'}
+              {canDecide ? 'إدارة طلبات وإصدار التأشيرات ومصروفاتها' : 'طلبات وإصدار التأشيرات'}
             </h1>
             <p className="text-xs text-slate-500 font-medium mt-0.5">
-              {currentRole === 'employee' 
-                ? 'تقديم طلبات استخراج التأشيرات، رفع وثائق السفر، ومتابعة حالة الاعتماد والدفعات' 
-                : 'متابعة إصدار التأشيرات، الموردين المعتمدين، واعتماد الصرف وجدول الأقساط'}
+              {canDecide
+                ? 'متابعة إصدار التأشيرات، الموردين المعتمدين، واعتماد الصرف وجدول الأقساط'
+                : 'تقديم طلبات استخراج التأشيرات، رفع وثائق السفر، ومتابعة حالة الاعتماد والدفعات'}
             </p>
           </div>
         </div>
 
         <button
           type="button"
-          onClick={() => {
-            resetCreateForm();
-            // A specific active company is used as-is; in "all companies" mode the super admin picks one.
-            setFormOrgId(effectiveOrgId && effectiveOrgId !== 'all' ? effectiveOrgId : (organizations.length === 1 ? organizations[0].id : ''));
-            createGuard.rotateKey();
-            setIsCreateModalOpen(true);
-          }}
+          onClick={handleOpenCreate}
           className="bg-[#0d9488] hover:bg-[#0f766e] text-white px-5 py-2.5 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-xs transition cursor-pointer active:scale-98"
         >
           <Plus className="h-4 w-4 stroke-[2.5]" />
           <span>طلب تأشيرة جديد</span>
         </button>
       </div>
+
+      {/* Success feedback (new request, decision, payment, delete) */}
+      {notice && (
+        <div role="status" className="flex items-start justify-between gap-3 bg-emerald-50 border border-emerald-200 text-emerald-900 p-3.5 rounded-2xl text-xs font-bold shadow-2xs">
+          <div className="flex items-start gap-2">
+            <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+            <span className="leading-relaxed">{notice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            className="text-emerald-500 hover:text-emerald-800 p-1 hover:bg-emerald-100 rounded-lg transition cursor-pointer shrink-0"
+            title="إخفاء"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Metrics Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
@@ -551,11 +713,8 @@ export const VisaManagement: React.FC = () => {
               <DollarSign className="h-4 w-4" />
             </div>
           </div>
-          <div className="mt-2 flex items-baseline gap-1">
-            <span className="text-2xl font-black text-slate-900">{metrics.totalCost.toLocaleString()}</span>
-            <span className="text-xs text-slate-400 font-semibold">EGP</span>
-          </div>
-          <span className="text-[10px] text-slate-400 mt-1 block">إجمالي قيمة التأشيرات المطلوبة</span>
+          {renderCurrencyAmounts(row => row.cost, 'text-slate-900', 'text-slate-400')}
+          <span className="text-[10px] text-slate-400 mt-1 block">إجمالي قيمة التأشيرات المطلوبة (بدون المرفوضة)</span>
         </div>
 
         {/* Metric 3: Total Paid */}
@@ -566,10 +725,7 @@ export const VisaManagement: React.FC = () => {
               <CheckCircle2 className="h-4 w-4" />
             </div>
           </div>
-          <div className="mt-2 flex items-baseline gap-1">
-            <span className="text-2xl font-black text-emerald-700">{metrics.totalPaid.toLocaleString()}</span>
-            <span className="text-xs text-emerald-500 font-semibold">EGP</span>
-          </div>
+          {renderCurrencyAmounts(row => row.paid, 'text-emerald-700', 'text-emerald-500')}
           <span className="text-[10px] text-emerald-600 mt-1 block font-medium">سداد مكتمل أو دفعات جزئية</span>
         </div>
 
@@ -581,11 +737,13 @@ export const VisaManagement: React.FC = () => {
               <Clock className="h-4 w-4" />
             </div>
           </div>
-          <div className="mt-2 flex items-baseline gap-1">
-            <span className="text-2xl font-black text-rose-700">{metrics.totalRemaining.toLocaleString()}</span>
-            <span className="text-xs text-rose-500 font-semibold">EGP</span>
-          </div>
-          <span className="text-[10px] text-rose-600 mt-1 block font-medium">مستحقات معلقة على الطلبات المعتمدة</span>
+          {renderCurrencyAmounts(row => row.remaining, 'text-rose-700', 'text-rose-500')}
+          <span className="text-[10px] text-rose-600 mt-1 block font-medium">مستحقات معلقة على الطلبات المعتمدة فقط</span>
+          {awaitingTotals.length > 0 && (
+            <span className="text-[10px] text-amber-700 mt-0.5 block font-medium">
+              + بانتظار الاعتماد (غير مستحق بعد): {awaitingTotals.map(row => `${fmtMoney(row.awaiting)} ${row.currency}`).join(' + ')}
+            </span>
+          )}
         </div>
 
       </div>
@@ -611,9 +769,10 @@ export const VisaManagement: React.FC = () => {
             className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
           >
             <option value="all">جميع أنواع التأشيرات</option>
-            <option value="tourist">سياحية</option>
-            <option value="umrah_barcode">عمرة باركود</option>
-            <option value="external_umrah">عمرة خارجي</option>
+            {/* Every type the new-visa form offers (one list: VISA_TYPE_LABELS) */}
+            {(Object.keys(VISA_TYPE_LABELS) as VisaType[]).map(type => (
+              <option key={type} value={type}>{VISA_TYPE_LABELS[type]}</option>
+            ))}
           </select>
 
           {/* Status Filter */}
@@ -623,11 +782,9 @@ export const VisaManagement: React.FC = () => {
             className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
           >
             <option value="all">جميع الحالات</option>
-            <option value="pending">قيد الاعتماد</option>
-            <option value="approved">معتمد</option>
-            <option value="partially_paid">مسدد جزئياً</option>
-            <option value="paid">تم السداد بالكامل</option>
-            <option value="rejected">مرفوض</option>
+            {(Object.keys(VISA_STATUS_LABELS) as VisaStatus[]).map(status => (
+              <option key={status} value={status}>{VISA_STATUS_LABELS[status].label}</option>
+            ))}
           </select>
         </div>
       </div>
@@ -637,8 +794,17 @@ export const VisaManagement: React.FC = () => {
         {filteredVisaRequests.length === 0 ? (
           <div className="py-16 text-center text-slate-400">
             <Plane className="h-12 w-12 mx-auto text-slate-300 stroke-[1.2] mb-3" />
-            <p className="text-sm font-bold text-slate-600">لا توجد طلبات تأشيرات مطابقة</p>
-            <p className="text-xs text-slate-400 mt-1">ابدأ بإنشاء طلب تأشيرة جديد أو عدّل شروط التصفية</p>
+            {cleanVisaRequests.length > 0 ? (
+              <>
+                <p className="text-sm font-bold text-slate-600">لا نتائج مطابقة للبحث أو التصفية الحالية</p>
+                <p className="text-xs text-slate-400 mt-1">يوجد {cleanVisaRequests.length} طلب مسجل؛ عدّل كلمة البحث أو نوع التأشيرة أو الحالة.</p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-bold text-slate-600">لا توجد طلبات تأشيرات مسجلة بعد</p>
+                <p className="text-xs text-slate-400 mt-1">ابدأ بإنشاء طلب تأشيرة جديد</p>
+              </>
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -700,11 +866,11 @@ export const VisaManagement: React.FC = () => {
                       </td>
                       <td className="py-3 px-4">
                         <div className="font-bold text-slate-900">
-                          {req.totalAmount.toLocaleString()} {req.currency}
+                          {fmtMoney(req.totalAmount)} {req.currency}
                         </div>
                         {req.initialPayment !== undefined && req.initialPayment > 0 && (
                           <div className="text-[10px] text-teal-700 font-semibold mt-0.5">
-                            دفعة: {req.initialPayment.toLocaleString()} {req.currency}
+                            دفعة: {fmtMoney(req.initialPayment)} {req.currency}
                           </div>
                         )}
                       </td>
@@ -719,7 +885,10 @@ export const VisaManagement: React.FC = () => {
                           <span className="text-[10px] text-slate-500 font-mono">{progressPct}%</span>
                         </div>
                         <div className="text-[10px] text-slate-400 mt-0.5 font-mono">
-                          متبقي: {req.remainingBalance.toLocaleString()} {req.currency}
+                          {/* A rejected visa owes nothing */}
+                          {req.status === 'rejected'
+                            ? 'مرفوض — لا مستحقات'
+                            : `متبقي: ${fmtMoney(req.remainingBalance)} ${req.currency}${req.status === 'pending' ? ' (بعد الاعتماد)' : ''}`}
                         </div>
                       </td>
                       <td className="py-3 px-4">
@@ -881,12 +1050,9 @@ export const VisaManagement: React.FC = () => {
                       onChange={(e) => setVisaType(e.target.value as VisaType)}
                       className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none focus:border-teal-500"
                     >
-                      <option value="tourist">سياحية (Tourist)</option>
-                      <option value="umrah_barcode">عمرة باركود (Umrah Barcode)</option>
-                      <option value="external_umrah">عمرة خارجي (External Umrah)</option>
-                      <option value="work">عمل / إقامة (Work / Residence)</option>
-                      <option value="family_visit">زيارة عائلية / شخصية (Family Visit)</option>
-                      <option value="transit">ترانزيت / مرور (Transit)</option>
+                      {(Object.keys(VISA_TYPE_LABELS) as VisaType[]).map(type => (
+                        <option key={type} value={type}>{VISA_TYPE_LABELS[type]}</option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -979,7 +1145,7 @@ export const VisaManagement: React.FC = () => {
                         </div>
                         <div>
                           <span className="text-xs font-bold text-slate-900 block truncate max-w-[200px]">{visaAttachmentName}</span>
-                          <span className="text-[10px] text-slate-400">{(visaAttachmentSize / 1024).toFixed(1)} KB • جاهز للمراجعة</span>
+                          <span className="text-[10px] text-slate-400">{formatFileSize(visaAttachmentSize)} • جاهز للمراجعة</span>
                         </div>
                       </div>
                       <div className="flex items-center gap-1">
@@ -988,7 +1154,7 @@ export const VisaManagement: React.FC = () => {
                           onClick={() => setPreviewVisaDoc({
                             url: visaAttachmentUrl,
                             name: visaAttachmentName,
-                            size: `${(visaAttachmentSize / 1024).toFixed(1)} KB`,
+                            size: formatFileSize(visaAttachmentSize),
                             type: visaAttachmentName.toLowerCase().endsWith('.pdf') ? 'pdf' : 'jpg'
                           })}
                           className="text-teal-600 hover:text-teal-800 p-1.5 rounded-lg hover:bg-teal-50 transition cursor-pointer"
@@ -1034,7 +1200,7 @@ export const VisaManagement: React.FC = () => {
                       }`}
                     >
                       <option value="">-- اختر الشركة --</option>
-                      {organizations.map(o => (
+                      {creatableOrgs.map(o => (
                         <option key={o.id} value={o.id}>{o.name}</option>
                       ))}
                     </select>
@@ -1230,16 +1396,16 @@ export const VisaManagement: React.FC = () => {
                     <div className="mt-2 pt-2 border-t border-slate-100 grid grid-cols-3 gap-2 text-center text-[11px]">
                       <div className="bg-slate-50 p-2 rounded-lg">
                         <span className="text-slate-400 block text-[10px]">التكلفة الإجمالية</span>
-                        <strong className="text-slate-800">{Number(totalAmount).toLocaleString()} {currency}</strong>
+                        <strong className="text-slate-800">{fmtMoney(totalAmount)} {currency}</strong>
                       </div>
                       <div className="bg-teal-50 p-2 rounded-lg">
                         <span className="text-teal-700 block text-[10px]">دفعة السداد</span>
-                        <strong className="text-teal-900">{Number(initialPayment).toLocaleString()} {currency}</strong>
+                        <strong className="text-teal-900">{fmtMoney(initialPayment)} {currency}</strong>
                       </div>
                       <div className="bg-amber-50 p-2 rounded-lg">
                         <span className="text-amber-700 block text-[10px]">المتبقي بعد الدفعة</span>
                         <strong className="text-amber-900">
-                          {Math.max(0, Number(totalAmount) - Number(initialPayment)).toLocaleString()} {currency}
+                          {fmtMoney(Math.max(0, Number(totalAmount) - Number(initialPayment)))} {currency}
                         </strong>
                       </div>
                     </div>
@@ -1264,11 +1430,18 @@ export const VisaManagement: React.FC = () => {
                 <div className="p-3 bg-amber-50/60 rounded-xl border border-amber-200 text-amber-900 text-xs flex items-center gap-2">
                   <ShieldCheck className="h-4 w-4 text-amber-600 shrink-0" />
                   <span>
-                    الطلب سيحال فور تسجيله للمسؤول <strong>محمود (Mahmoud)</strong> للاعتماد المالي والإداري قبل فتح إمكانية تسجيل وتفريغ المدفوعات.
+                    يُحال الطلب فور تسجيله إلى <strong>{VISA_APPROVER_LABEL}</strong> للاعتماد المالي والإداري قبل فتح إمكانية تسجيل وتفريغ المدفوعات.
                   </span>
                 </div>
 
               </div>
+
+              {formErrors.submit && (
+                <div role="alert" className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-bold flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{formErrors.submit}</span>
+                </div>
+              )}
 
               {/* Submit / Cancel Buttons */}
               <div className="flex items-center justify-end gap-3 pt-2">
@@ -1329,7 +1502,7 @@ export const VisaManagement: React.FC = () => {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setSelectedVisa(null)}
+                  onClick={closeVisa}
                   className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-200/60 transition cursor-pointer"
                 >
                   <X className="h-5 w-5" />
@@ -1348,7 +1521,7 @@ export const VisaManagement: React.FC = () => {
                     <span>بيانات المسافر والرحلة (Traveler & Trip Info)</span>
                   </div>
                   <span className="text-[10px] text-slate-400 font-mono">
-                    تاريخ الطلب: {selectedVisa.requestDate ? new Date(selectedVisa.requestDate).toLocaleDateString('ar-EG') : 'غير محدد'}
+                    تاريخ الطلب: {selectedVisa.requestDate ? formatLocalDate(selectedVisa.requestDate) : 'غير محدد'}
                   </span>
                 </div>
 
@@ -1398,8 +1571,9 @@ export const VisaManagement: React.FC = () => {
                   <div className="p-3 bg-slate-50 rounded-xl border border-slate-200/70 flex items-center justify-between">
                     <div>
                       <span className="text-[10px] text-slate-400 font-bold block">مستند التأشيرة المرفق:</span>
-                      <span className="text-xs font-bold text-slate-900 truncate max-w-[160px] block">
-                        {selectedVisa.visaAttachmentName || 'مستند مرفق'}
+                      {/* "مستند مرفق" only when a file is really attached */}
+                      <span className={`text-xs font-bold truncate max-w-[160px] block ${selectedVisa.visaAttachmentUrl ? 'text-slate-900' : 'text-slate-400'}`}>
+                        {selectedVisa.visaAttachmentUrl ? (selectedVisa.visaAttachmentName || 'مستند مرفق') : 'لا يوجد مرفق'}
                       </span>
                     </div>
                     {selectedVisa.visaAttachmentUrl && (
@@ -1408,7 +1582,7 @@ export const VisaManagement: React.FC = () => {
                         onClick={() => setPreviewVisaDoc({
                           url: selectedVisa.visaAttachmentUrl!,
                           name: selectedVisa.visaAttachmentName || 'مستند_التأشيرة',
-                          size: selectedVisa.visaAttachmentSize ? `${(selectedVisa.visaAttachmentSize / 1024).toFixed(1)} KB` : undefined,
+                          size: selectedVisa.visaAttachmentSize ? formatFileSize(selectedVisa.visaAttachmentSize) : undefined,
                           type: selectedVisa.visaAttachmentName?.toLowerCase().endsWith('.pdf') ? 'pdf' : 'jpg'
                         })}
                         className="px-3 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-700 font-bold text-xs rounded-lg transition flex items-center gap-1 cursor-pointer"
@@ -1421,46 +1595,50 @@ export const VisaManagement: React.FC = () => {
                 </div>
               </div>
 
-              {/* CARD 3: Approval Status & Mahmoud's Approval Step */}
+              {/* CARD 3: Approval Status (any of the company's managers decides; the acting user is recorded) */}
               <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
-                <div className="text-xs font-black text-slate-800 pb-2 border-b border-slate-100 flex items-center justify-between">
+                <div className="text-xs font-black text-slate-800 pb-2 border-b border-slate-100 flex items-center justify-between gap-2 flex-wrap">
                   <div className="flex items-center gap-2">
                     <ShieldCheck className="h-4 w-4 text-teal-600" />
                     <span>حالة الاعتماد والموافقة الإدارية (Approval Workflow)</span>
                   </div>
                   <span className="text-[10px] text-slate-500 font-bold">
-                    المعتمد المحدد: <strong>{selectedVisa.assignedApprover || 'محمود'}</strong>
+                    جهة الاعتماد: <strong>{VISA_APPROVER_LABEL}</strong>
                   </span>
                 </div>
 
                 {/* Status Banner */}
                 {selectedVisa.status === 'pending' ? (
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between">
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between gap-2 flex-wrap">
                     <div className="flex items-center gap-2">
                       <Clock className="h-4 w-4 text-amber-600 shrink-0" />
                       <div>
                         <span className="text-xs font-bold text-amber-900 block">طلب التأشيرة قيد الاعتماد والمراجعة</span>
-                        <span className="text-[10px] text-amber-700">بانتظار موافقة <strong>محمود</strong> لتفعيل تسجيل الصرف المالي والدفعات.</span>
+                        <span className="text-[10px] text-amber-700">بانتظار موافقة <strong>{VISA_APPROVER_LABEL}</strong> لتفعيل تسجيل الصرف المالي والدفعات.</span>
                       </div>
                     </div>
-                    
-                    {/* Action buttons for Approver */}
-                    {canApprove ? (
+
+                    {/* Decide: only the roles the domain accepts (permissions.ts decideVisas) */}
+                    {canDecide ? (
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => handleApprove(selectedVisa.id)}
-                          disabled={visaActions.isPending(`approve:${selectedVisa.id}`)}
-                          className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-2xs transition flex items-center gap-1 cursor-pointer"
+                          onClick={() => handleApprove(selectedVisa)}
+                          disabled={visaActions.isPending(`approve:${selectedVisa.id}`) || visaActions.isPending(`reject:${selectedVisa.id}`)}
+                          className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-2xs transition flex items-center gap-1 cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                         >
                           <CheckCircle2 className="h-3.5 w-3.5" />
-                          <span>اعتماد الطلب</span>
+                          <span>{visaActions.isPending(`approve:${selectedVisa.id}`) ? 'جاري الاعتماد...' : 'اعتماد الطلب'}</span>
                         </button>
 
                         <button
                           type="button"
-                          onClick={() => setIsRejecting(!isRejecting)}
-                          className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-2xs transition flex items-center gap-1 cursor-pointer"
+                          onClick={() => {
+                            setIsRejecting(!isRejecting);
+                            setDecisionError('');
+                          }}
+                          disabled={visaActions.isPending(`approve:${selectedVisa.id}`)}
+                          className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-2xs transition flex items-center gap-1 cursor-pointer disabled:opacity-60"
                         >
                           <XCircle className="h-3.5 w-3.5" />
                           <span>رفض</span>
@@ -1476,20 +1654,23 @@ export const VisaManagement: React.FC = () => {
                   <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl space-y-1">
                     <div className="flex items-center gap-2 text-rose-800 font-bold text-xs">
                       <XCircle className="h-4 w-4 text-rose-600" />
-                      <span>تم رفض هذا الطلب بواسطة {selectedVisa.approvedByName || 'محمود'}</span>
+                      <span>
+                        تم رفض هذا الطلب{selectedVisa.approvedByName ? ` بواسطة ${selectedVisa.approvedByName}` : ''}
+                        {selectedVisa.approvedAt ? ` — ${formatLocalDateTime(selectedVisa.approvedAt)}` : ''}
+                      </span>
                     </div>
                     {selectedVisa.rejectionReason && (
                       <p className="text-[11px] text-rose-700 pr-6">سبب الرفض: {selectedVisa.rejectionReason}</p>
                     )}
                   </div>
                 ) : (
-                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between">
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 text-emerald-800 font-bold text-xs">
                       <CheckCircle2 className="h-4 w-4 text-emerald-600" />
                       <div>
-                        <span>معتمد ومصرح للصرف بواسطة {selectedVisa.approvedByName || 'محمود'}</span>
-                        <span className="text-[10px] text-emerald-600 font-normal block font-mono">
-                          تاريخ الاعتماد: {selectedVisa.approvedAt ? new Date(selectedVisa.approvedAt).toLocaleString('ar-EG') : 'تم الاعتماد'}
+                        <span>معتمد ومصرح للصرف{selectedVisa.approvedByName ? ` بواسطة ${selectedVisa.approvedByName}` : ''}</span>
+                        <span className="text-[10px] text-emerald-600 font-normal block font-mono" dir="ltr">
+                          {selectedVisa.approvedAt ? formatLocalDateTime(selectedVisa.approvedAt) : ''}
                         </span>
                       </div>
                     </div>
@@ -1500,13 +1681,16 @@ export const VisaManagement: React.FC = () => {
                 )}
 
                 {/* Sub-form: Rejection form */}
-                {isRejecting && (
+                {isRejecting && canDecide && selectedVisa.status === 'pending' && (
                   <div className="p-3 bg-rose-50/50 border border-rose-200 rounded-xl space-y-2 mt-2">
-                    <label className="block text-xs font-bold text-rose-900">اذكر سبب رفض التأشيرة:</label>
+                    <label className="block text-xs font-bold text-rose-900">اذكر سبب رفض التأشيرة: *</label>
                     <input
                       type="text"
                       value={rejectionReason}
-                      onChange={(e) => setRejectionReason(e.target.value)}
+                      onChange={(e) => {
+                        setRejectionReason(e.target.value);
+                        setDecisionError('');
+                      }}
                       placeholder="مثال: المستند غير واضح، أو الجواز منتهي الصلاحية..."
                       className="w-full px-3 py-2 bg-white border border-rose-300 rounded-lg text-xs"
                     />
@@ -1520,13 +1704,20 @@ export const VisaManagement: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleReject(selectedVisa.id)}
+                        onClick={() => handleReject(selectedVisa)}
                         disabled={visaActions.isPending(`reject:${selectedVisa.id}`)}
-                        className="px-4 py-1 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg"
+                        className="px-4 py-1 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg disabled:opacity-60 disabled:cursor-wait"
                       >
-                        تأكيد الرفض
+                        {visaActions.isPending(`reject:${selectedVisa.id}`) ? 'جاري الرفض...' : 'تأكيد الرفض'}
                       </button>
                     </div>
+                  </div>
+                )}
+
+                {decisionError && (
+                  <div role="alert" className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-700 text-xs font-bold flex items-start gap-2">
+                    <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span>{decisionError}</span>
                   </div>
                 )}
               </div>
@@ -1548,21 +1739,21 @@ export const VisaManagement: React.FC = () => {
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                     <div>
                       <span className="text-slate-400 block text-[10px]">إجمالي التكلفة:</span>
-                      <span className="font-bold text-slate-900 text-sm">{selectedVisa.totalAmount.toLocaleString()} {selectedVisa.currency}</span>
+                      <span className="font-bold text-slate-900 text-sm">{fmtMoney(selectedVisa.totalAmount)} {selectedVisa.currency}</span>
                     </div>
                     <div>
                       <span className="text-teal-700 block text-[10px]">دفعة السداد المحددة:</span>
                       <span className="font-bold text-teal-800 text-sm">
-                        {(selectedVisa.initialPayment !== undefined ? selectedVisa.initialPayment : selectedVisa.totalAmount).toLocaleString()} {selectedVisa.currency}
+                        {fmtMoney(selectedVisa.initialPayment !== undefined ? selectedVisa.initialPayment : selectedVisa.totalAmount)} {selectedVisa.currency}
                       </span>
                     </div>
                     <div>
                       <span className="text-emerald-600 block text-[10px]">المسدد حتى الآن:</span>
-                      <span className="font-bold text-emerald-700 text-sm">{selectedVisa.paidAmount.toLocaleString()} {selectedVisa.currency}</span>
+                      <span className="font-bold text-emerald-700 text-sm">{fmtMoney(selectedVisa.paidAmount)} {selectedVisa.currency}</span>
                     </div>
                     <div>
                       <span className="text-rose-600 block text-[10px]">الرصيد المتبقي:</span>
-                      <span className="font-bold text-rose-700 text-sm">{selectedVisa.remainingBalance.toLocaleString()} {selectedVisa.currency}</span>
+                      <span className="font-bold text-rose-700 text-sm">{selectedVisa.status === 'rejected' ? 'لا مستحقات (مرفوض)' : `${fmtMoney(selectedVisa.remainingBalance)} ${selectedVisa.currency}`}</span>
                     </div>
                   </div>
 
@@ -1607,8 +1798,8 @@ export const VisaManagement: React.FC = () => {
                             const defaultPay = selectedVisa.initialPayment && selectedVisa.paidAmount === 0
                               ? Math.min(selectedVisa.initialPayment, selectedVisa.remainingBalance)
                               : selectedVisa.remainingBalance;
+                            resetPaymentForm();
                             setPaymentAmount(defaultPay);
-                            setPaymentError('');
                             paymentGuard.rotateKey();
                             setIsAddingPayment(true);
                           }}
@@ -1626,12 +1817,12 @@ export const VisaManagement: React.FC = () => {
                         <div className="flex items-center justify-between pb-1 border-b border-teal-200/60">
                           <span className="text-xs font-bold text-teal-950">تسجيل سداد دفعة جديدة</span>
                           <span className="text-[11px] text-teal-700 font-mono">
-                            المتبقي الأقصى: {selectedVisa.remainingBalance.toLocaleString()} {selectedVisa.currency}
+                            المتبقي الأقصى: {fmtMoney(selectedVisa.remainingBalance)} {selectedVisa.currency}
                           </span>
                         </div>
 
                         {paymentError && (
-                          <div className="p-2 bg-rose-50 border border-rose-200 rounded-lg text-rose-700 text-xs font-bold">
+                          <div role="alert" className="p-2 bg-rose-50 border border-rose-200 rounded-lg text-rose-700 text-xs font-bold leading-relaxed">
                             {paymentError}
                           </div>
                         )}
@@ -1646,8 +1837,11 @@ export const VisaManagement: React.FC = () => {
                               step="any"
                               required
                               value={paymentAmount}
-                              onChange={(e) => setPaymentAmount(e.target.value === '' ? '' : Number(e.target.value))}
-                              className="w-full px-3 py-1.5 bg-white border border-teal-300 rounded-xl text-xs font-bold"
+                              onChange={(e) => {
+                                setPaymentAmount(e.target.value === '' ? '' : Number(e.target.value));
+                                setPaymentError('');
+                              }}
+                              className={`w-full px-3 py-1.5 bg-white border rounded-xl text-xs font-bold ${paymentExceedsBalance ? 'border-rose-400 text-rose-800' : 'border-teal-300'}`}
                             />
                           </div>
 
@@ -1682,16 +1876,34 @@ export const VisaManagement: React.FC = () => {
                             <label className="block text-[11px] font-bold text-slate-700 mb-1">خصم من خزينة / حساب الشركة (اختياري):</label>
                             <select
                               value={paymentAccountId}
-                              onChange={(e) => setPaymentAccountId(e.target.value)}
+                              onChange={(e) => {
+                                const id = e.target.value;
+                                setPaymentAccountId(id);
+                                setPaymentError('');
+                                // The payment goes out the way the chosen account pays (bank transfer, InstaPay, wallet, cash)
+                                const acc = availableAccounts.find(a => a.id === id);
+                                if (acc) setPaymentMethod(accountTypeToPaymentMethod(acc.type));
+                              }}
                               className="w-full px-3 py-1.5 bg-white border border-teal-300 rounded-xl text-xs font-bold"
                             >
                               <option value="">-- بدون خصم آلي من الخزينة --</option>
                               {availableAccounts.map(acc => (
                                 <option key={acc.id} value={acc.id}>
-                                  {acc.name} (رصيد: {Number(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency || 'EGP'})
+                                  {acc.name} ({accountTypeLabel(acc.type)}) — المتاح: {fmtMoney(spendableBalance(acc, resolveParentBankAccount(acc)))} {currencyCode(acc.currency)}
                                 </option>
                               ))}
                             </select>
+                            {availableAccounts.length === 0 && (
+                              <span className="text-[10px] text-amber-700 font-bold mt-1 block">
+                                لا يوجد حساب نشط لهذه الشركة بعملة التأشيرة ({currencyCode(selectedVisa.currency)}).
+                              </span>
+                            )}
+                            {paymentAccount && (
+                              <span className={`text-[10px] font-bold mt-1 block ${paymentExceedsBalance ? 'text-rose-700' : 'text-slate-500'}`}>
+                                المتاح للصرف من هذا الحساب: {fmtMoney(paymentAvailable)} {currencyCode(paymentAccount.currency)}
+                                {paymentAccountBank ? ` (يُخصم أيضاً من الحساب البنكي المرتبط "${paymentAccountBank.name}")` : ''}
+                              </span>
+                            )}
                           </div>
 
                           <div>
@@ -1706,18 +1918,25 @@ export const VisaManagement: React.FC = () => {
                           </div>
                         </div>
 
+                        {/* No overdraft: say so before the user submits */}
+                        {paymentExceedsBalance && (
+                          <p className="text-[11px] text-rose-700 font-bold leading-relaxed">
+                            {insufficientPaymentMessage()}
+                          </p>
+                        )}
+
                         <div className="flex items-center justify-end gap-2 pt-1">
                           <button
                             type="button"
-                            onClick={() => setIsAddingPayment(false)}
+                            onClick={resetPaymentForm}
                             className="px-3 py-1 text-xs text-slate-600 hover:bg-slate-200/50 rounded-lg"
                           >
                             إلغاء
                           </button>
                           <button
                             type="submit"
-                            disabled={isProcessingPayment}
-                            className="px-4 py-1.5 bg-teal-700 hover:bg-teal-800 text-white font-bold text-xs rounded-xl shadow-xs transition"
+                            disabled={isProcessingPayment || paymentExceedsBalance}
+                            className="px-4 py-1.5 bg-teal-700 hover:bg-teal-800 text-white font-bold text-xs rounded-xl shadow-xs transition disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {isProcessingPayment ? 'جاري التسجيل...' : 'تأكيد وحفظ الدفعة'}
                           </button>
@@ -1747,15 +1966,13 @@ export const VisaManagement: React.FC = () => {
                             {selectedVisa.payments.map((p, idx) => (
                               <tr key={p.id || idx} className="hover:bg-slate-50/50 font-medium">
                                 <td className="py-2.5 px-3 font-bold text-emerald-700 font-mono">
-                                  {p.amount.toLocaleString()} {p.currency}
+                                  {fmtMoney(p.amount)} {p.currency}
                                 </td>
                                 <td className="py-2.5 px-3 font-mono text-slate-600">
                                   {p.date}
                                 </td>
                                 <td className="py-2.5 px-3 text-slate-700">
-                                  {p.paymentMethod === 'bank_transfer' ? 'تحويل بنكي' :
-                                   p.paymentMethod === 'instapay' ? 'إنستاباي' :
-                                   p.paymentMethod === 'digital_wallet' ? 'محفظة إلكترونية' : 'نقداً'}
+                                  {paymentMethodLabel(p.paymentMethod)}
                                 </td>
                                 <td className="py-2.5 px-3 text-slate-600">
                                   {p.accountName || '—'}
@@ -1783,34 +2000,23 @@ export const VisaManagement: React.FC = () => {
             <div className="bg-slate-50 px-6 py-3 border-t border-slate-200 flex items-center justify-between">
               <button
                 type="button"
-                onClick={() => setSelectedVisa(null)}
+                onClick={closeVisa}
                 className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer"
               >
                 إغلاق النافذة
               </button>
 
-              {/* Delete button (Super admin or requester while pending) */}
-              {(currentRole === 'super_admin' || (selectedVisa.requesterId === currentUser.id && selectedVisa.status === 'pending')) && (
+              {/* Delete: only the roles firestore.rules let delete a visa (permissions.ts deleteVisas); a visa
+                  with recorded payments stays in the books (the domain refuses it for everyone but the platform owner). */}
+              {canDeleteVisas && (isSuperAdmin || Number(selectedVisa.paidAmount || 0) <= 0) && (
                 <button
                   type="button"
-                  onClick={async () => {
-                    if (confirm(`هل أنت متأكد من حذف طلب تأشيرة المسافر "${selectedVisa.travelerName}"؟`)) {
-                      const visaId = selectedVisa.id;
-                      await visaActions.run(`delete:${visaId}`, async () => {
-                        try {
-                          await deleteVisaRequest(visaId);
-                          setSelectedVisa(null);
-                        } catch (err: any) {
-                          alert(err?.message || 'تعذر تنفيذ العملية');
-                        }
-                      });
-                    }
-                  }}
+                  onClick={() => handleDelete(selectedVisa)}
                   disabled={visaActions.isPending(`delete:${selectedVisa.id}`)}
-                  className="text-rose-600 hover:text-rose-700 text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-rose-50 transition cursor-pointer flex items-center gap-1.5"
+                  className="text-rose-600 hover:text-rose-700 text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-rose-50 transition cursor-pointer flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-wait"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
-                  <span>حذف الطلب</span>
+                  <span>{visaActions.isPending(`delete:${selectedVisa.id}`) ? 'جاري الحذف...' : 'حذف الطلب'}</span>
                 </button>
               )}
             </div>

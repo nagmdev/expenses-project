@@ -12,14 +12,16 @@ import {
   CheckCircle2,
   Plus,
   Loader2,
-  AlertTriangle
+  AlertTriangle,
+  Lock
 } from 'lucide-react';
 import { OrganizationMember, Role } from '../types';
 import { isValidEmail, sanitizePhone } from '../utils/validation';
-import { normalizeEmail } from '../domain/common';
+import { normalizeEmail, type Actor } from '../domain/common';
 // The platform owner is the ONLY super admin (same list as AppContext and the rules). Nobody else can be promoted here.
-import { isPlatformOwnerEmail as isPlatformOwner } from '../domain/directory';
+import { isPlatformOwnerEmail as isPlatformOwner, membershipProtection } from '../domain/directory';
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import { can } from '../utils/permissions';
 import { OrgMultiSelect } from './OrgMultiSelect';
 
 /** Roles that can be assigned here. Platform super admin is never grantable from the UI. */
@@ -28,6 +30,13 @@ type AssignableRole = Exclude<Role, 'super_admin'>;
 type EditRoleChoice = AssignableRole | 'keep_super_admin';
 
 const ALREADY_MEMBER_REASON = 'مسجل بالفعل';
+
+const ROLE_LABELS: Record<AssignableRole, string> = {
+  org_admin: 'مدير مؤسسة',
+  finance: 'مسؤول الصرف والخزينة',
+  employee: 'موظف',
+  data_entry: 'مدخل بيانات',
+};
 
 /** email -> the companies where that email already has a membership. */
 type MembershipIndex = Map<string, Set<string>>;
@@ -57,7 +66,23 @@ export const UsersManagement: React.FC = () => {
     adminResetUserPassword,
     activeOrgId,
     currentRole,
+    currentUser,
   } = useApp();
+
+  // What this role may do here (src/utils/permissions.ts mirrors the domain and the rules).
+  const canViewUsers = can(currentRole, 'viewUsers');
+  const canManageUsers = can(currentRole, 'manageUsers');
+
+  // Policy (same check as the domain, membershipProtection): a company admin never deletes,
+  // suspends or re-roles the platform owner's membership nor their own. Those rows keep
+  // contact edits only.
+  const myEmail = normalizeEmail(currentUser.email);
+  const viewer: Actor = { id: currentUser.id, name: currentUser.name, email: currentUser.email, role: currentRole };
+  const isProtectedMembership = (m: OrganizationMember) => membershipProtection(viewer, m) !== null;
+  const protectedReason = (m: OrganizationMember) =>
+    membershipProtection(viewer, m) === 'self'
+      ? 'هذا حسابك: لا يمكنك حذفه أو تعطيله أو تغيير دورك بنفسك.'
+      : 'حساب مالك المنصة محمي: لا يمكن حذفه أو تعطيله أو تغيير دوره.';
 
   // Search and Filter States
   const [searchQuery, setSearchQuery] = useState('');
@@ -75,6 +100,7 @@ export const UsersManagement: React.FC = () => {
   const [editMemberOrgId, setEditMemberOrgId] = useState('');
   const [editMemberStatus, setEditMemberStatus] = useState<'active' | 'inactive'>('active');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editError, setEditError] = useState('');
   const editGuard = useSubmitGuard();
   const isSavingEdit = editGuard.pending;
 
@@ -93,7 +119,14 @@ export const UsersManagement: React.FC = () => {
 
   // Deletion Confirmation
   const [deletingMember, setDeletingMember] = useState<OrganizationMember | null>(null);
+  const [deleteError, setDeleteError] = useState('');
   const memberActions = useKeyedSubmitGuard();
+
+  const openDeleteDialog = (member: OrganizationMember) => {
+    if (!canManageUsers || isProtectedMembership(member)) return;
+    setDeleteError('');
+    setDeletingMember(member);
+  };
 
   // Reset Password State
   const [resettingPasswordEmail, setResettingPasswordEmail] = useState<string | null>(null);
@@ -149,6 +182,7 @@ export const UsersManagement: React.FC = () => {
   };
 
   const openProvisionModal = () => {
+    if (!canManageUsers) return;
     provisionGuard.rotateKey();
     setProvError('');
     setProvOrgIds(defaultProvisionOrgIds().filter(id => !provUnavailable[id]));
@@ -234,6 +268,7 @@ export const UsersManagement: React.FC = () => {
   // only super admin: nobody can be promoted, and the owner can never be demoted.
   const handleDemoteSuperAdmin = async (email: string) => {
     if (!email || !canManageSuperAdmins || isPlatformOwner(email) || !isSuperAdminEmail(email)) return;
+    if (normalizeEmail(email) === myEmail) return; // never one's own access
     await memberActions.run(`superadmin:${normalizeEmail(email)}`, async () => {
       if (!confirm(`هل أنت متأكد من سحب صلاحيات المشرف العام من ${email}؟\nلا يمكن منحها مرة أخرى: مالك المنصة هو المشرف العام الوحيد.`)) return;
       try {
@@ -247,6 +282,8 @@ export const UsersManagement: React.FC = () => {
 
   // Open Edit Modal
   const handleStartEdit = (member: OrganizationMember) => {
+    if (!canManageUsers) return;
+    setEditError('');
     setEditingMember(member);
     setEditMemberName(member.userName || '');
     // Only a real grant counts; a stale member role of 'super_admin' is shown as employee so
@@ -265,44 +302,57 @@ export const UsersManagement: React.FC = () => {
 
   // Save Edit
   const handleSaveEdit = async () => {
-    if (!editingMember) return;
+    if (!editingMember || !canManageUsers) return;
+    const name = editMemberName.trim();
+    if (!name) {
+      setEditError('يرجى إدخال اسم المستخدم؛ لا يمكن حفظ اسم فارغ.');
+      return;
+    }
+    setEditError('');
+    const target = editingMember;
+    // Own / platform-owner membership: contact details only, role / company / status are never sent.
+    const locked = isProtectedMembership(target);
     await editGuard.run(async () => {
     try {
-    const email = editingMember.userEmail;
-    const isOwner = isPlatformOwner(email);
+    const email = target.userEmail;
     const isCurrentlySuper = isSuperAdminEmail(email);
 
     // Super admin is never granted here. The only change allowed is removing a leftover legacy
-    // grant (not the owner): picking a regular role for that person demotes them.
-    const demoteLegacySuper = canManageSuperAdmins && isCurrentlySuper && !isOwner && editMemberRole !== 'keep_super_admin';
+    // grant (not the owner, who is always a locked row): picking a regular role demotes them.
+    const demoteLegacySuper = !locked && canManageSuperAdmins && isCurrentlySuper && editMemberRole !== 'keep_super_admin';
     if (demoteLegacySuper && email) {
       await removeSuperAdminEmail(email);
     }
 
-    // The membership keeps a regular role; 'super_admin' is never written to a membership.
-    const targetRole: AssignableRole =
-      isOwner || editMemberRole === 'keep_super_admin' ? membershipRoleOf(editingMember, isCurrentlySuper) : editMemberRole;
-    await updateMember(editingMember.id, {
-      userName: editMemberName,
-      role: targetRole,
-      department: editMemberDept,
-      jobTitle: editMemberTitle,
-      phone: editMemberPhone,
-      orgId: editMemberOrgId || editingMember.orgId,
-      active: editMemberStatus === 'active',
-    });
+    const updates: Partial<OrganizationMember> = {
+      userName: name,
+      department: editMemberDept.trim(),
+      jobTitle: editMemberTitle.trim(),
+      phone: editMemberPhone.trim(),
+    };
+    if (!locked) {
+      // The membership keeps a regular role; 'super_admin' is never written to a membership.
+      const targetRole: AssignableRole =
+        editMemberRole === 'keep_super_admin' ? membershipRoleOf(target, isCurrentlySuper) : editMemberRole;
+      const active = editMemberStatus === 'active';
+      // Only what actually changed is sent.
+      if (targetRole !== target.role) updates.role = targetRole;
+      if (active !== (target.active !== false)) updates.active = active;
+      if (editMemberOrgId && editMemberOrgId !== target.orgId) updates.orgId = editMemberOrgId;
+    }
+    await updateMember(target.id, updates);
 
     setIsEditModalOpen(false);
     setEditingMember(null);
     showFeedback(
       demoteLegacySuper
-        ? `تم حفظ تعديلات المستخدم ${editMemberName} وسحب صلاحيات المشرف العام منه`
-        : `تم حفظ تعديلات المستخدم ${editMemberName} بنجاح`,
+        ? `تم حفظ تعديلات المستخدم ${name} وسحب صلاحيات المشرف العام منه`
+        : `تم حفظ تعديلات المستخدم ${name} بنجاح`,
       false,
       4000
     );
     } catch (err: any) {
-      alert(err?.message || 'تعذر تنفيذ العملية');
+      setEditError(err?.message || 'تعذر حفظ التعديلات');
     }
     });
   };
@@ -381,6 +431,8 @@ export const UsersManagement: React.FC = () => {
 
   // Edit modal: the owner's role is fixed; a leftover legacy grant can only be kept or removed.
   const editingIsOwner = Boolean(editingMember) && isPlatformOwner(editingMember?.userEmail);
+  // Own / owner membership: role, company and status are shown read-only and never sent.
+  const editingIsLocked = Boolean(editingMember) && isProtectedMembership(editingMember!);
   const editingIsLegacySuper = Boolean(editingMember) && !editingIsOwner && isSuperAdminEmail(editingMember?.userEmail);
   // Companies where the edited person already has a membership (the edit stays single-company).
   const editTakenOrgIds = useMemo(
@@ -390,8 +442,9 @@ export const UsersManagement: React.FC = () => {
 
   // Delete Member (one company's membership)
   const handleConfirmDelete = async () => {
-    if (!deletingMember) return;
+    if (!deletingMember || !canManageUsers || isProtectedMembership(deletingMember)) return;
     const stillMemberElsewhere = deletingOtherOrgIds.length > 0;
+    setDeleteError('');
     await memberActions.run(`delete:${deletingMember.id}`, async () => {
     try {
       await removeMember(deletingMember.id);
@@ -410,43 +463,54 @@ export const UsersManagement: React.FC = () => {
         4000
       );
     } catch (err: any) {
-      alert(err?.message || 'تعذر حذف الحساب');
+      setDeleteError(err?.message || 'تعذر حذف الحساب');
     }
     });
   };
+
+  // The users screen belongs to company admins (TAB_ACCESS); any other role only gets a notice.
+  if (!canViewUsers) {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center shadow-xs">
+        <Lock className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+        <h2 className="font-bold text-slate-800 text-sm">إدارة المستخدمين متاحة لمدير الشركة فقط</h2>
+        <p className="text-xs text-slate-500 mt-1">يمكنك تعديل اسمك ورقم هاتفك وبيانات حسابك من صفحة "بياناتي وحساباتي البنكية".</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       {/* Top Header Title */}
       <div className="text-center">
-        <h1 className="text-3xl font-black text-slate-900 tracking-tight">المستخدمون والموظفين</h1>
-        <p className="text-sm font-semibold text-slate-500 mt-1">المستخدمون والموظفين</p>
+        <h1 className="text-3xl font-black text-slate-900 tracking-tight">المستخدمون والموظفون</h1>
+        <p className="text-sm font-semibold text-slate-500 mt-1">حسابات المستخدمين وأدوارهم في الشركات</p>
       </div>
 
       {/* 5 KPI Metric Summary Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
         <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs text-center flex flex-col items-center justify-center">
-          <span className="text-xs font-semibold text-slate-500 block mb-1">Total Users</span>
+          <span className="text-xs font-semibold text-slate-500 block mb-1">إجمالي المستخدمين</span>
           <span className="text-3xl font-black font-mono text-slate-900">{totalUsersCount}</span>
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs text-center flex flex-col items-center justify-center">
-          <span className="text-xs font-semibold text-slate-500 block mb-1">Active Accounts</span>
+          <span className="text-xs font-semibold text-slate-500 block mb-1">الحسابات النشطة</span>
           <span className="text-3xl font-black font-mono text-emerald-600">{activeUsersCount}</span>
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs text-center flex flex-col items-center justify-center">
-          <span className="text-xs font-semibold text-slate-500 block mb-1">Disabled Accounts</span>
+          <span className="text-xs font-semibold text-slate-500 block mb-1">الحسابات المعطلة</span>
           <span className="text-3xl font-black font-mono text-rose-600">{disabledUsersCount}</span>
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs text-center flex flex-col items-center justify-center">
-          <span className="text-xs font-semibold text-slate-500 block mb-1">Company Managers</span>
+          <span className="text-xs font-semibold text-slate-500 block mb-1">مدراء الشركات</span>
           <span className="text-3xl font-black font-mono text-blue-600">{companyManagersCount}</span>
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs text-center flex flex-col items-center justify-center">
-          <span className="text-xs font-semibold text-slate-500 block mb-1">Employees</span>
+          <span className="text-xs font-semibold text-slate-500 block mb-1">الموظفون</span>
           <span className="text-3xl font-black font-mono text-slate-800">{employeesCount}</span>
         </div>
       </div>
@@ -519,15 +583,17 @@ export const UsersManagement: React.FC = () => {
             <span>إعادة ضبط الفلاتر</span>
           </button>
 
-          {/* Add User Action */}
-          <button
-            type="button"
-            onClick={openProvisionModal}
-            className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer shadow-xs"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>+ مستخدم جديد</span>
-          </button>
+          {/* Add User Action (company admins only) */}
+          {canManageUsers && (
+            <button
+              type="button"
+              onClick={openProvisionModal}
+              className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer shadow-xs"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>+ مستخدم جديد</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -562,7 +628,25 @@ export const UsersManagement: React.FC = () => {
                 <tr>
                   <td colSpan={6} className="py-12 text-center text-slate-400">
                     <Users className="h-10 w-10 mx-auto text-slate-300 mb-2 stroke-[1.5]" />
-                    <p className="font-semibold text-sm">لا يوجد مستخدمون يطابقون خيارات البحث والفلاتر</p>
+                    {displayMembers.length === 0 ? (
+                      <p className="font-semibold text-sm">لا يوجد مستخدمون مسجلون في هذه الشركة بعد</p>
+                    ) : (
+                      <>
+                        <p className="font-semibold text-sm">
+                          {searchQuery.trim()
+                            ? `لا توجد نتائج مطابقة للبحث "${searchQuery.trim()}"`
+                            : 'لا يوجد مستخدمون يطابقون الفلاتر المختارة'}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={handleResetFilters}
+                          className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition cursor-pointer"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          <span>إعادة ضبط البحث والفلاتر</span>
+                        </button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ) : (
@@ -571,6 +655,7 @@ export const UsersManagement: React.FC = () => {
                   const isThisSuperAdmin = isSuperAdminEmail(mem.userEmail);
                   const isThisOwner = isPlatformOwner(mem.userEmail);
                   const isResetting = resettingPasswordEmail === mem.userEmail;
+                  const isProtectedRow = isProtectedMembership(mem);
 
                   return (
                     <tr key={mem.id} className="hover:bg-slate-50/70 transition">
@@ -661,43 +746,59 @@ export const UsersManagement: React.FC = () => {
                       {/* 6. Action Buttons */}
                       <td className="py-3.5 px-4">
                         <div className="flex items-center justify-center gap-2">
-                          {/* 1. Edit User Button */}
-                          <button
-                            type="button"
-                            onClick={() => handleStartEdit(mem)}
-                            title="تعديل بيانات المستخدم"
-                            className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-slate-900 hover:bg-slate-50 transition cursor-pointer"
-                          >
-                            <Edit3 className="h-3.5 w-3.5" />
-                          </button>
+                          {!canManageUsers && <span className="text-[11px] text-slate-400">—</span>}
+
+                          {/* 1. Edit User Button (a protected row keeps contact edits only) */}
+                          {canManageUsers && (
+                            <button
+                              type="button"
+                              onClick={() => handleStartEdit(mem)}
+                              title={isProtectedRow ? 'تعديل الاسم وبيانات التواصل فقط' : 'تعديل بيانات المستخدم'}
+                              className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-slate-900 hover:bg-slate-50 transition cursor-pointer"
+                            >
+                              <Edit3 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
 
                           {/* 2. Reset Password Key Button */}
-                          <button
-                            type="button"
-                            disabled={isResetting || !mem.userEmail}
-                            onClick={() => handleResetPassword(mem.userEmail)}
-                            title="إرسال رابط تعيين كلمة المرور عبر البريد"
-                            className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-50"
-                          >
-                            {isResetting ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-600" />
-                            ) : (
-                              <KeyRound className="h-3.5 w-3.5" />
-                            )}
-                          </button>
+                          {canManageUsers && (
+                            <button
+                              type="button"
+                              disabled={isResetting || !mem.userEmail}
+                              onClick={() => handleResetPassword(mem.userEmail)}
+                              title="إرسال رابط تعيين كلمة المرور عبر البريد"
+                              className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-50"
+                            >
+                              {isResetting ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-600" />
+                              ) : (
+                                <KeyRound className="h-3.5 w-3.5" />
+                              )}
+                            </button>
+                          )}
 
-                          {/* 3. Delete User Button */}
-                          <button
-                            type="button"
-                            onClick={() => setDeletingMember(mem)}
-                            title="حذف المستخدم نهائياً"
-                            className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                          {/* 3. Delete User Button — never on one's own or the platform owner's membership */}
+                          {canManageUsers && !isProtectedRow && (
+                            <button
+                              type="button"
+                              onClick={() => openDeleteDialog(mem)}
+                              title="حذف المستخدم نهائياً"
+                              className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {canManageUsers && isProtectedRow && (
+                            <span
+                              title={protectedReason(mem)}
+                              className="p-1.5 rounded-lg border border-slate-100 bg-slate-50 text-slate-400"
+                            >
+                              <Lock className="h-3.5 w-3.5" />
+                            </span>
+                          )}
 
-                          {/* 4. Remove a leftover legacy super-admin grant (never promote; never the owner) */}
-                          {canManageSuperAdmins && isThisSuperAdmin && !isThisOwner && (
+                          {/* 4. Remove a leftover legacy super-admin grant (never promote; never the owner or oneself) */}
+                          {canManageSuperAdmins && isThisSuperAdmin && !isThisOwner && normalizeEmail(mem.userEmail) !== myEmail && (
                             <button
                               type="button"
                               onClick={() => handleDemoteSuperAdmin(mem.userEmail)}
@@ -734,13 +835,28 @@ export const UsersManagement: React.FC = () => {
             </div>
 
             <div className="space-y-3 text-xs">
+              {editError && (
+                <div role="alert" className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 font-semibold flex items-start gap-1.5">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <span>{editError}</span>
+                </div>
+              )}
+              {editingIsLocked && (
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] text-slate-600 font-semibold flex items-start gap-1.5">
+                  <Lock className="h-3.5 w-3.5 shrink-0 mt-0.5 text-slate-400" />
+                  <span>{protectedReason(editingMember)} يمكن تعديل الاسم والقسم والمسمى والهاتف فقط.</span>
+                </div>
+              )}
               <div>
-                <label className="font-bold text-slate-700 block mb-1">الاسم الكامل</label>
+                <label className="font-bold text-slate-700 block mb-1">الاسم الكامل *</label>
                 <input
                   type="text"
+                  required
                   value={editMemberName}
-                  onChange={(e) => setEditMemberName(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800"
+                  onChange={(e) => { setEditMemberName(e.target.value); if (editError) setEditError(''); }}
+                  className={`w-full bg-slate-50 border rounded-xl px-3 py-2 font-medium text-slate-800 ${
+                    editError && !editMemberName.trim() ? 'border-rose-400' : 'border-slate-200'
+                  }`}
                 />
               </div>
 
@@ -760,6 +876,11 @@ export const UsersManagement: React.FC = () => {
                   <div className="w-full bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 font-bold text-amber-800 flex items-center gap-1.5">
                     <Crown className="h-3.5 w-3.5 shrink-0" />
                     <span>👑 مشرف عام (مالك المنصة)</span>
+                  </div>
+                ) : editingIsLocked ? (
+                  <div className="w-full bg-slate-100 border border-slate-200 rounded-xl px-3 py-2 font-bold text-slate-600 flex items-center gap-1.5">
+                    <Lock className="h-3.5 w-3.5 shrink-0" />
+                    <span>{ROLE_LABELS[membershipRoleOf(editingMember, isSuperAdminEmail(editingMember.userEmail))]} (لا يمكن تغيير دورك بنفسك)</span>
                   </div>
                 ) : editingIsLegacySuper && !canManageSuperAdmins ? (
                   <div className="w-full bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 font-bold text-amber-800 flex items-center gap-1.5">
@@ -789,7 +910,7 @@ export const UsersManagement: React.FC = () => {
                 )}
               </div>
 
-              {currentRole === 'super_admin' && (
+              {currentRole === 'super_admin' && !editingIsLocked && (
                 <div>
                   <label className="font-bold text-slate-700 block mb-1">الشركة التابع لها</label>
                   <select
@@ -845,14 +966,21 @@ export const UsersManagement: React.FC = () => {
                 </div>
                 <div>
                   <label className="font-bold text-slate-700 block mb-1">حالة الحساب</label>
-                  <select
-                    value={editMemberStatus}
-                    onChange={(e) => setEditMemberStatus(e.target.value as any)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-bold text-slate-800"
-                  >
-                    <option value="active">نشط</option>
-                    <option value="inactive">معطل</option>
-                  </select>
+                  {editingIsLocked ? (
+                    <div className="w-full bg-slate-100 border border-slate-200 rounded-xl px-3 py-2 font-bold text-slate-600 flex items-center gap-1.5">
+                      <Lock className="h-3 w-3 shrink-0" />
+                      <span>{editMemberStatus === 'active' ? 'نشط' : 'معطل'}</span>
+                    </div>
+                  ) : (
+                    <select
+                      value={editMemberStatus}
+                      onChange={(e) => setEditMemberStatus(e.target.value as 'active' | 'inactive')}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-bold text-slate-800"
+                    >
+                      <option value="active">نشط</option>
+                      <option value="inactive">معطل</option>
+                    </select>
+                  )}
                 </div>
               </div>
             </div>
@@ -861,7 +989,8 @@ export const UsersManagement: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsEditModalOpen(false)}
-                className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50"
+                disabled={isSavingEdit}
+                className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
               >
                 إلغاء
               </button>
@@ -869,9 +998,10 @@ export const UsersManagement: React.FC = () => {
                 type="button"
                 onClick={handleSaveEdit}
                 disabled={isSavingEdit}
-                className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs"
+                className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 disabled:opacity-60"
               >
-                حفظ التعديلات
+                {isSavingEdit && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>{isSavingEdit ? 'جاري الحفظ...' : 'حفظ التعديلات'}</span>
               </button>
             </div>
           </div>
@@ -1043,11 +1173,18 @@ export const UsersManagement: React.FC = () => {
                 </p>
               )}
             </div>
+            {deleteError && (
+              <div role="alert" className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-start gap-2 text-right">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <span>{deleteError}</span>
+              </div>
+            )}
             <div className="flex items-center justify-center gap-2 pt-2">
               <button
                 type="button"
                 onClick={() => setDeletingMember(null)}
-                className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
+                disabled={memberActions.isPending(`delete:${deletingMember.id}`)}
+                className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer disabled:opacity-50"
               >
                 تراجع
               </button>
@@ -1055,9 +1192,10 @@ export const UsersManagement: React.FC = () => {
                 type="button"
                 onClick={handleConfirmDelete}
                 disabled={memberActions.isPending(`delete:${deletingMember.id}`)}
-                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer"
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer flex items-center gap-1.5 disabled:opacity-60"
               >
-                تأكيد الحذف
+                {memberActions.isPending(`delete:${deletingMember.id}`) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>{memberActions.isPending(`delete:${deletingMember.id}`) ? 'جاري الحذف...' : 'تأكيد الحذف'}</span>
               </button>
             </div>
           </div>

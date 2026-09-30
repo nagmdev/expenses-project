@@ -16,26 +16,27 @@ import {
   Building2, 
   History, 
   Settings, 
-  Check, 
-  RefreshCw,
+  Check,
   Clock,
-  ArrowUpRight,
   Receipt,
   FileCheck2,
   HelpCircle,
   XCircle,
   Database
 } from 'lucide-react';
-import { EmailEventType, Role } from '../types';
+import { EmailEventType } from '../types';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
+import { can, canOpenTab } from '../utils/permissions';
+import { formatLocalDateTime } from '../utils/requestUi';
+import { sanitizePhone } from '../utils/validation';
+
+type SettingsSubTab = 'email' | 'general' | 'cloud' | 'profile' | 'audit';
 
 export const SettingsManagement: React.FC = () => {
   const { 
     currentUser, 
-    currentRole, 
-    activeOrg, 
-    organizations, 
-    setActiveTab, 
+    currentRole,
+    setActiveTab,
     openFirebaseModal,
     isFirebaseConnected,
     emailSettings,
@@ -43,12 +44,48 @@ export const SettingsManagement: React.FC = () => {
     emailLogs,
     sendTestEmail,
     clearEmailLogs,
+    migrateUniqueKeys,
+    keyMigration,
     auditLogs,
     updateUserProfileInfo,
     changeCurrentUserPassword,
   } = useApp();
 
-  const [activeSubTab, setActiveSubTab] = useState<'email' | 'general' | 'cloud' | 'profile' | 'audit'>('email');
+  // Platform-wide tools (email sender + API keys, Firebase connection) belong to the platform
+  // owner only (firestore.rules -> settings). A company admin keeps the email tab for the test
+  // email and the company's delivery log, plus profile, shortcuts and the audit log.
+  const isPlatformAdmin = can(currentRole, 'platformSettings');
+  const canUseEmailTools = can(currentRole, 'emailDiagnostics');
+  const canSeeAudit = can(currentRole, 'viewAuditLog');
+  // A key migration still running when the page is reopened: back on its tab, still showing it.
+  const [selectedSubTab, setActiveSubTab] = useState<SettingsSubTab>(
+    isPlatformAdmin && keyMigration?.pending ? 'cloud' : canUseEmailTools ? 'email' : 'profile'
+  );
+  const activeSubTab: SettingsSubTab =
+    (!canUseEmailTools && selectedSubTab === 'email') || (!isPlatformAdmin && selectedSubTab === 'cloud') || (!canSeeAudit && selectedSubTab === 'audit')
+      ? 'profile'
+      : selectedSubTab;
+
+  // Uniqueness keys migration (platform owner, once after the rules update). Its running state
+  // and result live in the app context: leaving this page mid-run and coming back still shows them.
+  const migrationPending = Boolean(keyMigration?.pending);
+  const migrationResult = keyMigration?.result;
+  const migrationFeedback: { msg: string; isError?: boolean } | null = migrationPending || !keyMigration
+    ? null
+    : keyMigration.error
+    ? { msg: keyMigration.error, isError: true }
+    : migrationResult
+    ? {
+        msg: migrationResult.moved + migrationResult.replaced === 0
+          ? `لا توجد مفاتيح بالصيغة القديمة تحتاج إلى ترحيل.${migrationResult.skipped ? ` (${migrationResult.skipped} مفتاح قديم لا يخص سجلاً حالياً تُرك كما هو)` : ''}`
+          : `تم ترحيل ${migrationResult.moved} مفتاح، وإزالة ${migrationResult.replaced} مفتاح قديم مكرر.${migrationResult.skipped ? ` (${migrationResult.skipped} مفتاح قديم لا يخص سجلاً حالياً تُرك كما هو)` : ''}`,
+      }
+    : null;
+  const handleMigrateUniqueKeys = () => {
+    if (migrationPending) return;
+    // The outcome (or the error) is shown from keyMigration; a second click joins the running call.
+    migrateUniqueKeys().catch(() => undefined);
+  };
 
   // Email Test state
   const [testRecipient, setTestRecipient] = useState(currentUser.email || '');
@@ -59,7 +96,7 @@ export const SettingsManagement: React.FC = () => {
   // Email Settings Form state
   const settingsGuard = useSubmitGuard();
   const isSavingSettings = settingsGuard.pending;
-  const [settingsFeedback, setSettingsFeedback] = useState<string | null>(null);
+  const [settingsFeedback, setSettingsFeedback] = useState<{ msg: string; isError?: boolean } | null>(null);
   const [formSettings, setFormSettings] = useState(emailSettings);
 
   // Profile Form state
@@ -76,22 +113,30 @@ export const SettingsManagement: React.FC = () => {
   const [isChangingPass, setIsChangingPass] = useState(false);
   const [passFeedback, setPassFeedback] = useState<{ msg: string; isError?: boolean } | null>(null);
 
-  // Synchronize local form settings when context settings change
-  React.useEffect(() => {
+  // Reload the form when the saved settings change (adjusted during render, no effect needed).
+  const [syncedEmailSettings, setSyncedEmailSettings] = useState(emailSettings);
+  if (syncedEmailSettings !== emailSettings) {
+    setSyncedEmailSettings(emailSettings);
     setFormSettings(emailSettings);
-  }, [emailSettings]);
+  }
 
   const handleSaveEmailSettings = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isPlatformAdmin) return;
     await settingsGuard.run(async () => {
     setSettingsFeedback(null);
     try {
       await updateEmailSettings(formSettings);
-      setSettingsFeedback('تم حفظ وتطبيق إعدادات الإشعارات بنجاح!');
+      setSettingsFeedback({ msg: 'تم حفظ وتطبيق إعدادات الإشعارات بنجاح!' });
       setTimeout(() => setSettingsFeedback(null), 4000);
     } catch (err: any) {
-      // The feedback banner is success-styled; report failures separately.
-      alert(err?.message || 'حدث خطأ أثناء حفظ الإعدادات.');
+      const code = String(err?.code || '');
+      setSettingsFeedback({
+        isError: true,
+        msg: code.includes('permission-denied') || /permission|صلاحي/i.test(String(err?.message || ''))
+          ? 'لا تملك صلاحية تعديل إعدادات البريد على مستوى المنصة. هذه الإعدادات يديرها المشرف العام للمنصة فقط.'
+          : 'تعذر حفظ إعدادات الإشعارات. تحقق من الاتصال ثم أعد المحاولة.',
+      });
     }
     });
   };
@@ -164,6 +209,8 @@ export const SettingsManagement: React.FC = () => {
       } else {
         setPassFeedback({ msg: res.error || 'تعذر تغيير كلمة المرور.', isError: true });
       }
+    } catch {
+      setPassFeedback({ msg: 'تعذر تغيير كلمة المرور. تحقق من الاتصال ثم أعد المحاولة.', isError: true });
     } finally {
       setIsChangingPass(false);
     }
@@ -202,14 +249,18 @@ export const SettingsManagement: React.FC = () => {
             <div>
               <h2 className="text-xl font-extrabold text-slate-900">مركز الإعدادات والتحكم الشامل</h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                تخصيص إشعارات البريد التلقائية، ربط Firebase السحابي، الملف الشخصي، وإعدادات المؤسسة
+                {isPlatformAdmin
+                  ? 'تخصيص إشعارات البريد التلقائية، ربط Firebase السحابي، الملف الشخصي، وإعدادات المؤسسة'
+                  : canUseEmailTools
+                    ? 'فحص البريد وسجل إشعارات الشركة، الملف الشخصي والأمان، اختصارات إدارة الشركة، وسجل العمليات'
+                    : 'الملف الشخصي والأمان، اختصارات إدارة الشركة، وسجل العمليات'}
               </p>
             </div>
           </div>
         </div>
 
         {/* Global Connection Status Pill */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={openLegacyRecovery}
@@ -223,7 +274,7 @@ export const SettingsManagement: React.FC = () => {
               <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
               <span>🔥 السحابة متصلة ونشطة</span>
             </div>
-          ) : (
+          ) : isPlatformAdmin && (
             <button
               type="button"
               onClick={openFirebaseModal}
@@ -238,6 +289,7 @@ export const SettingsManagement: React.FC = () => {
 
       {/* Tabs Bar */}
       <div className="flex space-x-reverse space-x-2 border-b border-slate-200 overflow-x-auto pb-2 scrollbar-none">
+        {canUseEmailTools && (
         <button
           type="button"
           onClick={() => setActiveSubTab('email')}
@@ -250,7 +302,9 @@ export const SettingsManagement: React.FC = () => {
           <Mail className="h-4 w-4" />
           <span>🔔 إشعارات البريد الإلكتروني (Email Notifications)</span>
         </button>
+        )}
 
+        {isPlatformAdmin && (
         <button
           type="button"
           onClick={() => setActiveSubTab('cloud')}
@@ -263,6 +317,7 @@ export const SettingsManagement: React.FC = () => {
           <Flame className="h-4 w-4" />
           <span>🔥 الاتصال السحابي وقاعدة البيانات</span>
         </button>
+        )}
 
         <button
           type="button"
@@ -290,6 +345,7 @@ export const SettingsManagement: React.FC = () => {
           <span>🏢 تفضيلات المؤسسة والعمليات</span>
         </button>
 
+        {canSeeAudit && (
         <button
           type="button"
           onClick={() => setActiveSubTab('audit')}
@@ -302,15 +358,26 @@ export const SettingsManagement: React.FC = () => {
           <History className="h-4 w-4" />
           <span>📜 سجل التدقيق والرقابة</span>
         </button>
+        )}
       </div>
 
       {/* ========================================================================= */}
       {/* TAB 1: EMAIL & NOTIFICATIONS */}
       {/* ========================================================================= */}
-      {activeSubTab === 'email' && (
+      {activeSubTab === 'email' && canUseEmailTools && (
         <div className="space-y-6 animate-in fade-in duration-200">
-          
-          {/* Main Email Config Form */}
+
+          {!isPlatformAdmin && (
+            <div className="flex items-start gap-2 p-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-600">
+              <ShieldCheck className="h-4 w-4 text-slate-500 shrink-0 mt-0.5" />
+              <span>
+                إعدادات مزود البريد والأحداث التي تُرسل عندها الإشعارات يديرها المشرف العام للمنصة. يمكنك هنا إرسال بريد تجريبي إلى بريدك أو إلى مديري الشركة المسجلين، ومراجعة سجل الإشعارات البريدية لشركتك.
+              </span>
+            </div>
+          )}
+
+          {/* Main Email Config Form (platform-wide: the platform owner only) */}
+          {isPlatformAdmin && (
           <form onSubmit={handleSaveEmailSettings} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-100 gap-3">
               <div>
@@ -640,9 +707,13 @@ export const SettingsManagement: React.FC = () => {
 
             {/* Feedback Message */}
             {settingsFeedback && (
-              <div className="p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-bold flex items-center gap-2">
-                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                <span>{settingsFeedback}</span>
+              <div role="status" className={`p-3 rounded-xl text-xs font-bold flex items-center gap-2 border ${
+                settingsFeedback.isError ? 'bg-rose-50 text-rose-800 border-rose-200' : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+              }`}>
+                {settingsFeedback.isError
+                  ? <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
+                  : <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />}
+                <span>{settingsFeedback.msg}</span>
               </div>
             )}
 
@@ -667,8 +738,9 @@ export const SettingsManagement: React.FC = () => {
               </button>
             </div>
           </form>
+          )}
 
-          {/* Test Email Dispatch Card */}
+          {/* Test Email Dispatch Card (org admins too: their company's recipients or themselves) */}
           <div className="bg-gradient-to-br from-indigo-900 via-slate-900 to-slate-950 text-white p-6 rounded-2xl border border-indigo-500/30 shadow-lg space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
@@ -678,7 +750,9 @@ export const SettingsManagement: React.FC = () => {
                 <div>
                   <h3 className="font-bold text-sm text-white">🧪 فحص وإرسال بريد تجريبي مباشر</h3>
                   <p className="text-[11px] text-slate-300">
-                    أرسل بريداً تجريبياً فورياً لأي إيميل للتحقق من وصول الإشعارات وشكل القالب العربي.
+                    {isPlatformAdmin
+                      ? 'أرسل بريداً تجريبياً فورياً لأي إيميل للتحقق من وصول الإشعارات وشكل القالب العربي.'
+                      : 'أرسل بريداً تجريبياً إلى بريدك أو إلى مديري الشركة المسجلين للتحقق من وصول الإشعارات وشكل القالب العربي.'}
                   </p>
                 </div>
               </div>
@@ -784,7 +858,7 @@ export const SettingsManagement: React.FC = () => {
                         <div className="text-[11px] text-slate-500 mt-1 flex items-center gap-2">
                           <span className="font-mono text-slate-700 font-semibold">{log.recipientEmail}</span>
                           <span>•</span>
-                          <span>{new Date(log.timestamp).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</span>
+                          <span dir="ltr">{formatLocalDateTime(log.timestamp)}</span>
                         </div>
                       </div>
                     </div>
@@ -812,7 +886,7 @@ export const SettingsManagement: React.FC = () => {
       {/* ========================================================================= */}
       {/* TAB 2: CLOUD & DATABASE */}
       {/* ========================================================================= */}
-      {activeSubTab === 'cloud' && (
+      {activeSubTab === 'cloud' && isPlatformAdmin && (
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-6 animate-in fade-in duration-200">
           <div className="flex items-center justify-between pb-4 border-b border-slate-100">
             <div>
@@ -839,8 +913,8 @@ export const SettingsManagement: React.FC = () => {
             <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
               <div className="text-xs text-slate-500 font-bold">حالة المزامنة السحابية:</div>
               <div className="text-sm font-extrabold text-emerald-700 mt-1 flex items-center gap-1.5">
-                <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                <span>{isFirebaseConnected ? 'نشط ومتصل لحظياً' : 'غير متصل'}</span>
+                <span className={`h-2.5 w-2.5 rounded-full ${isFirebaseConnected ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`}></span>
+                <span className={isFirebaseConnected ? '' : 'text-rose-700'}>{isFirebaseConnected ? 'نشط ومتصل لحظياً' : 'غير متصل'}</span>
               </div>
             </div>
 
@@ -862,6 +936,35 @@ export const SettingsManagement: React.FC = () => {
           <div className="p-4 bg-amber-50/70 border border-amber-200 rounded-xl text-xs text-amber-900 leading-relaxed">
             💡 <strong>تنبيه للمدير:</strong> نظام الإشعارات يقوم تلقائياً بكتابة مستند في مجموعة <code className="bg-amber-100 px-1 py-0.5 rounded font-mono font-bold">mail</code> عند كل عملية صرف أو اعتماد.
             لتصل الرسائل إلى صندوق البريد الوارد الفعلي للمستخدمين، تأكد من تثبيت إضافة <strong>Trigger Email from Firestore</strong> في Firebase Console وربطها مع مزود بريد (مثل SendGrid أو Gmail SMTP أو Resend).
+          </div>
+
+          {/* Uniqueness keys: move the old id format (docs/05-data-integrity-and-idempotency.md) */}
+          <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-extrabold text-slate-900">ترحيل مفاتيح منع التكرار</div>
+                <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                  تُستخدم هذه المفاتيح لمنع تكرار البريد والموردين والأقسام وأكواد البنود وأرقام الحسابات داخل كل شركة. شغّل الترحيل مرة واحدة بعد نشر قواعد الأمان الجديدة حتى تستمر حماية السجلات القديمة من التكرار. تكرار التشغيل آمن.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleMigrateUniqueKeys}
+                disabled={migrationPending}
+                className="shrink-0 flex items-center justify-center gap-1.5 px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-50"
+              >
+                {migrationPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
+                <span>{migrationPending ? 'جارٍ الترحيل...' : 'ترحيل المفاتيح'}</span>
+              </button>
+            </div>
+            {migrationFeedback && (
+              <div className={`p-3 rounded-xl text-xs font-bold flex items-center gap-2 ${
+                migrationFeedback.isError ? 'bg-rose-50 text-rose-800 border border-rose-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+              }`}>
+                {migrationFeedback.isError ? <AlertCircle className="h-4 w-4 shrink-0" /> : <CheckCircle2 className="h-4 w-4 shrink-0" />}
+                <span>{migrationFeedback.msg}</span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -904,8 +1007,9 @@ export const SettingsManagement: React.FC = () => {
               <label className="block text-xs font-bold text-slate-700 mb-1">رقم الهاتف:</label>
               <input 
                 type="tel"
+                dir="ltr"
                 value={phoneNumber}
-                onChange={(e) => setPhoneNumber(e.target.value)}
+                onChange={(e) => setPhoneNumber(sanitizePhone(e.target.value))}
                 placeholder="010xxxxxxxx"
                 className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
               />
@@ -1010,6 +1114,7 @@ export const SettingsManagement: React.FC = () => {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+            {canOpenTab(currentRole, 'organizations') && (
             <button
               type="button"
               onClick={() => setActiveTab('organizations')}
@@ -1021,10 +1126,12 @@ export const SettingsManagement: React.FC = () => {
               <h4 className="font-bold text-sm text-slate-900 group-hover:text-emerald-700">🏢 الشركات والفروع</h4>
               <p className="text-xs text-slate-500 mt-1">تعديل الميزانيات، العملات، وأسماء الشركات والكود التعريفي.</p>
             </button>
+            )}
 
+            {canOpenTab(currentRole, 'users') && (
             <button
               type="button"
-              onClick={() => setActiveTab('organizations')}
+              onClick={() => setActiveTab('users')}
               className="p-5 text-right rounded-2xl border border-slate-200 hover:border-emerald-500 hover:shadow-md transition bg-slate-50/50 group cursor-pointer"
             >
               <div className="h-10 w-10 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold mb-3 group-hover:scale-105 transition">
@@ -1033,7 +1140,9 @@ export const SettingsManagement: React.FC = () => {
               <h4 className="font-bold text-sm text-slate-900 group-hover:text-indigo-700">👥 إدارة المستخدمين والصلاحيات</h4>
               <p className="text-xs text-slate-500 mt-1">إضافة موظفين، تغيير الأدوار، وتجميد أو إعادة تفعيل الحسابات.</p>
             </button>
+            )}
 
+            {canOpenTab(currentRole, 'services') && (
             <button
               type="button"
               onClick={() => setActiveTab('services')}
@@ -1045,6 +1154,7 @@ export const SettingsManagement: React.FC = () => {
               <h4 className="font-bold text-sm text-slate-900 group-hover:text-sky-700">📋 بنود الصرف والخدمات</h4>
               <p className="text-xs text-slate-500 mt-1">إدارة مسميات الخدمات وميزانياتها المخصصة لكل شركة.</p>
             </button>
+            )}
           </div>
         </div>
       )}
@@ -1052,7 +1162,7 @@ export const SettingsManagement: React.FC = () => {
       {/* ========================================================================= */}
       {/* TAB 5: AUDIT LOG */}
       {/* ========================================================================= */}
-      {activeSubTab === 'audit' && (
+      {activeSubTab === 'audit' && canSeeAudit && (
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4 animate-in fade-in duration-200">
           <div>
             <h3 className="font-extrabold text-base text-slate-900 flex items-center gap-2">
@@ -1074,7 +1184,7 @@ export const SettingsManagement: React.FC = () => {
                   </div>
                 </div>
                 <span className="text-[10px] text-slate-400 font-mono shrink-0">
-                  {new Date(log.timestamp).toLocaleString('ar-EG')}
+                  <span dir="ltr">{formatLocalDateTime(log.timestamp)}</span>
                 </span>
               </div>
             ))}

@@ -49,7 +49,7 @@ src/
 │   └── AppContext.tsx            # محرك الحالة وإدارة دورة حياة الطلبات والمزامنة
 ├── components/
 │   ├── Header.tsx                # الشريط العلوي مع مبدل المؤسسات والأدوار
-│   ├── Navbar.tsx                # شريط التبويبات الرئيسي مع شارات التنبيه
+│   ├── Sidebar.tsx               # القائمة الجانبية: الصفحات المسموحة لكل دور (TAB_ACCESS في utils/permissions.ts)
 │   ├── DashboardAnalytics.tsx    # لوحة التحليلات ومؤشرات الأداء والرسوم البيانية
 │   ├── ExpenseRequestsList.tsx   # جدول سجل الطلبات مع الفلترة والبحث المتقدم
 │   ├── RequesterTracker.tsx      # شاشة الموظف المستقلة مع شريط المراحل والردود

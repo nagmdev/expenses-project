@@ -1,10 +1,9 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import { 
-  PettyCashCustody, 
-  CustodySettlementItem, 
-  CustodyStatus,
-  PaymentAccount 
+import {
+  PettyCashCustody,
+  PaymentAccount,
+  isServiceMatchingOrg
 } from '../types';
 import { 
   Briefcase, 
@@ -19,19 +18,12 @@ import {
   CheckCircle2, 
   Clock3, 
   AlertCircle, 
-  Layers, 
   FileText, 
   RefreshCw, 
-  DollarSign, 
   X, 
   Eye, 
-  Percent, 
-  ArrowRight,
-  TrendingDown,
   UploadCloud,
   Image as ImageIcon,
-  ExternalLink,
-  ChevronRight,
   Undo2,
   Landmark
 } from 'lucide-react';
@@ -43,12 +35,25 @@ import {
 import { InvoiceViewerModal } from './InvoiceViewerModal';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
 import { newId } from '../utils/ids';
-import { toMoney } from '../domain/common';
+import { isArchivedOrg, toMoney } from '../domain/common';
+import { can } from '../utils/permissions';
+import { accountTypeLabel, formatLocalDate, spendableBalance } from '../utils/requestUi';
 
 // Same rules as the domain (src/domain/treasury.ts): an empty currency counts as EGP.
 const currencyOf = (c?: string | null) => ((c || '').trim() || 'EGP').toUpperCase();
 const balanceOf = (a: PaymentAccount) => toMoney(a.currentBalance ?? a.balance ?? 0);
-const fmtMoney = (n: number) => toMoney(n).toLocaleString('en-US', { maximumFractionDigits: 2 });
+// Amounts always in Western digits, whatever the browser locale.
+const fmtMoney = (n: unknown) => toMoney(n).toLocaleString('en-US', { maximumFractionDigits: 2 });
+const fmtMoney2 = (n: unknown) => toMoney(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+/** Today in the viewer's local time (YYYY-MM-DD); toISOString() gave the UTC day. */
+const localToday = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+};
+
+type CustodyTotals = { currency: string; issued: number; remaining: number; settled: number; returned: number };
 
 export const CustodyManagement: React.FC = () => {
   const {
@@ -62,14 +67,11 @@ export const CustodyManagement: React.FC = () => {
     allPaymentAccounts,
     services,
     allServices,
-    providers,
-    allProviders,
     members,
     allMembers,
     activeOrgId,
     activeOrg,
     currentRole,
-    currentUser,
     issueCustody,
     settleCustodyItem,
     replenishCustody,
@@ -78,16 +80,18 @@ export const CustodyManagement: React.FC = () => {
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
-  // Only these roles can read treasury accounts and create custodies (firestore.rules isFinance);
-  // for anyone else an empty account list means "refused", not "none exist".
-  const canIssueCustody = isSuperAdmin || currentRole === 'org_admin' || currentRole === 'finance';
+  // Issue / replenish / return a remainder: only the roles the domain and firestore.rules accept
+  // (src/utils/permissions.ts). Everyone else sees only their own custodies and can settle them.
+  const canIssueCustody = can(currentRole, 'issueCustody');
+  const canViewAllCustodies = can(currentRole, 'viewAllCustodies');
   const orgList = isSuperAdmin ? (allOrganizations.length > 0 ? allOrganizations : organizations) : organizations;
+  // A custody is issued only in a company that is still active (an archived one takes no new records).
+  const creatableOrgs = orgList.filter(o => !isArchivedOrg(o));
   const targetCustodies = isSuperAdmin ? allCustodies : custodies;
   const targetSettlements = isSuperAdmin ? allCustodySettlements : custodySettlements;
   const targetAccounts = isSuperAdmin ? allPaymentAccounts : paymentAccounts;
   const targetMembers = isSuperAdmin ? allMembers : members;
   const targetServices = isSuperAdmin ? allServices : services;
-  const targetProviders = isSuperAdmin ? allProviders : providers;
 
   // Strict deduplication guarantee for Custodies (by ID & Custody Number)
   const cleanTargetCustodies = useMemo(() => {
@@ -166,7 +170,7 @@ export const CustodyManagement: React.FC = () => {
   const [settleServiceCategoryId, setSettleServiceCategoryId] = useState('');
   const [settleVendorName, setSettleVendorName] = useState('');
   const [settleInvoiceNumber, setSettleInvoiceNumber] = useState('');
-  const [settleInvoiceDate, setSettleInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
+  const [settleInvoiceDate, setSettleInvoiceDate] = useState(localToday);
   const [settleDescription, setSettleDescription] = useState('');
   const [settleReceiptUrl, setSettleReceiptUrl] = useState('');
   const settleGuard = useSubmitGuard();
@@ -190,13 +194,14 @@ export const CustodyManagement: React.FC = () => {
   const returnGuard = useSubmitGuard();
   const isReturning = returnGuard.pending;
   const [returnError, setReturnError] = useState<string | null>(null);
-  const [returnSuccess, setReturnSuccess] = useState<string | null>(null);
+  // Success feedback after every custody operation (issue, invoice, replenish, return)
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!returnSuccess) return;
-    const t = setTimeout(() => setReturnSuccess(null), 8000);
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 10000);
     return () => clearTimeout(t);
-  }, [returnSuccess]);
+  }, [notice]);
 
   // Filtered Custodies
   const filteredCustodies = useMemo(() => {
@@ -253,36 +258,72 @@ export const CustodyManagement: React.FC = () => {
     });
   }, [cleanTargetSettlements, selectedOrgFilter, employeeFilter, searchQuery]);
 
-  // KPI Calculations
-  const { totalIssued, totalRemaining, totalSettled, totalReturned, activeCount } = useMemo(() => {
-    let issued = 0;
-    let remaining = 0;
-    let settled = 0;
-    let returned = 0;
+  // KPI Calculations, per currency (a custody takes the currency of the account it was paid
+  // from, so amounts in different currencies are never added under one label).
+  const { kpiTotals, activeCount } = useMemo(() => {
+    const byCurrency = new Map<string, CustodyTotals>();
     let active = 0;
 
     filteredCustodies.forEach(c => {
-      issued += Number(c.totalAmount || 0);
-      remaining += Number(c.remainingAmount || 0);
-      settled += Number(c.settledAmount || 0);
-      returned += Number(c.returnedAmount || 0);
+      const cur = currencyOf(c.currency);
+      const row = byCurrency.get(cur) || { currency: cur, issued: 0, remaining: 0, settled: 0, returned: 0 };
+      row.issued += Number(c.totalAmount || 0);
+      row.remaining += Number(c.remainingAmount || 0);
+      row.settled += Number(c.settledAmount || 0);
+      row.returned += Number(c.returnedAmount || 0);
+      byCurrency.set(cur, row);
       if (c.status === 'active') {
         active += 1;
       }
     });
 
-    return {
-      totalIssued: issued,
-      totalRemaining: remaining,
-      totalSettled: settled,
-      totalReturned: returned,
-      activeCount: active,
-    };
-  }, [filteredCustodies]);
+    // The company's own currency first, then the others alphabetically
+    const mainCurrency = currencyOf(activeOrg?.currency);
+    const totals = Array.from(byCurrency.values()).sort((a, b) =>
+      a.currency === mainCurrency ? -1 : b.currency === mainCurrency ? 1 : a.currency.localeCompare(b.currency)
+    );
+    if (totals.length === 0) totals.push({ currency: mainCurrency, issued: 0, remaining: 0, settled: 0, returned: 0 });
+    return { kpiTotals: totals, activeCount: active };
+  }, [filteredCustodies, activeOrg?.currency]);
+  const totalReturned = kpiTotals.reduce((sum, row) => sum + row.returned, 0);
+
+  // What an account can pay out now: never below zero, and an InstaPay channel's bank must cover it too
+  const availableOf = (acc: PaymentAccount) => spendableBalance(acc, resolveParentBankAccount(acc));
+  const accountOptionLabel = (acc: PaymentAccount) =>
+    `${acc.name} (${accountTypeLabel(acc.type)}) — المتاح: ${fmtMoney(availableOf(acc))} ${currencyOf(acc.currency)}`;
+  const insufficientMessage = (acc: PaymentAccount, amount: number) => {
+    const cur = currencyOf(acc.currency);
+    const bank = resolveParentBankAccount(acc);
+    const limitedByBank = bank && balanceOf(bank) < balanceOf(acc);
+    return `رصيد الحساب "${acc.name}" غير كافٍ: المتاح ${fmtMoney(availableOf(acc))} ${cur}${
+      limitedByBank ? ` (محدود برصيد الحساب البنكي المرتبط "${bank?.name}")` : ''
+    } والمبلغ المطلوب ${fmtMoney(amount)} ${cur}. لا يُسمح بأن يصبح رصيد أي حساب بالسالب؛ قم بإيداع المبلغ في الحساب أولاً من صفحة الخزينة أو اختر حساباً آخر.`;
+  };
+
+  // A per-currency amount on a KPI card: the first currency big, any other one below it
+  const renderKpiAmounts = (pick: (row: CustodyTotals) => number, mainClass: string, unitClass: string) => {
+    const [first, ...others] = kpiTotals;
+    return (
+      <>
+        <div className="mt-3 flex items-baseline gap-1.5">
+          <span className={`text-2xl font-black tracking-tight ${mainClass}`}>{fmtMoney2(pick(first))}</span>
+          <span className={`text-xs font-bold ${unitClass}`}>{first.currency}</span>
+        </div>
+        {others.map(row => (
+          <div key={row.currency} className="flex items-baseline gap-1">
+            <span className={`text-sm font-black ${mainClass}`}>+ {fmtMoney2(pick(row))}</span>
+            <span className={`text-[10px] font-bold ${unitClass}`}>{row.currency}</span>
+          </div>
+        ))}
+      </>
+    );
+  };
 
   // Handle open issue custody modal
   const handleOpenIssueModal = () => {
-    const defaultOrg = selectedOrgFilter !== 'all' ? selectedOrgFilter : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : orgList[0]?.id || '');
+    const preferredOrg = selectedOrgFilter !== 'all' ? selectedOrgFilter : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : creatableOrgs[0]?.id || '');
+    // The super admin's picker lists active companies only: an archived default is left unselected.
+    const defaultOrg = isSuperAdmin && !creatableOrgs.some(o => o.id === preferredOrg) ? '' : preferredOrg;
     setIssueOrgId(defaultOrg);
     setIssueEmployeeMode('select');
     setIssueEmployeeId('');
@@ -304,16 +345,21 @@ export const CustodyManagement: React.FC = () => {
 
   // Available treasury accounts for the selected org in issue modal
   const availableAccountsForIssue = useMemo(() => {
-    if (!issueOrgId) return targetAccounts;
+    if (!issueOrgId) return targetAccounts.filter(a => a.active !== false);
     return targetAccounts.filter(a => a.orgId === issueOrgId && a.active !== false);
   }, [targetAccounts, issueOrgId]);
+
+  // No account may go below zero: the chosen source (and the bank behind an InstaPay channel) must cover the custody
+  const issueAccount = issueSourceAccountId ? availableAccountsForIssue.find(a => a.id === issueSourceAccountId) || null : null;
+  const issueAmountNum = toMoney(parseFloat(issueAmount) || 0);
+  const issueExceedsBalance = Boolean(issueAccount) && issueAmountNum > 0 && issueAmountNum > availableOf(issueAccount!);
 
   // Handle submit issue custody
   const handleSubmitIssue = async (e: React.FormEvent) => {
     e.preventDefault();
     setIssueError(null);
 
-    const amountNum = parseFloat(issueAmount);
+    const amountNum = issueAmountNum;
     if (!amountNum || amountNum <= 0) {
       setIssueError('يرجى إدخال مبلغ صحيح للعهدة.');
       return;
@@ -347,11 +393,16 @@ export const CustodyManagement: React.FC = () => {
       }
     }
 
-    if (!issueSourceAccountId) {
+    if (!issueSourceAccountId || !issueAccount) {
       setIssueError('يرجى اختيار حساب الخزينة أو المحفظة مصدر الصرف.');
       return;
     }
+    if (issueExceedsBalance) {
+      setIssueError(insufficientMessage(issueAccount, amountNum));
+      return;
+    }
 
+    const account = issueAccount;
     await issueGuard.run(async (idempotencyKey) => {
       try {
         const res = await issueCustody(
@@ -360,7 +411,7 @@ export const CustodyManagement: React.FC = () => {
           finalEmpName,
           finalEmpPhone || undefined,
           amountNum,
-          issueSourceAccountId,
+          account.id,
           issueNotes.trim() || undefined,
           { idempotencyKey }
         );
@@ -372,6 +423,9 @@ export const CustodyManagement: React.FC = () => {
 
         issueGuard.rotateKey();
         setIsIssueModalOpen(false);
+        setNotice(
+          `${res.message || 'تم صرف العهدة بنجاح'}: ${fmtMoney(amountNum)} ${currencyOf(account.currency)} للموظف "${finalEmpName}" من "${account.name}".`
+        );
       } catch (err: any) {
         console.error(err);
         setIssueError(err?.message || 'حدث خطأ أثناء صرف العهدة.');
@@ -386,7 +440,7 @@ export const CustodyManagement: React.FC = () => {
     setSettleServiceCategoryId('');
     setSettleVendorName('');
     setSettleInvoiceNumber('');
-    setSettleInvoiceDate(new Date().toISOString().split('T')[0]);
+    setSettleInvoiceDate(localToday());
     setSettleDescription('');
     setSettleReceiptUrl('');
     setSettleError(null);
@@ -399,7 +453,7 @@ export const CustodyManagement: React.FC = () => {
     if (!file) return;
 
     if (file.size > 5 * 1024 * 1024) {
-      alert('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 5 ميجابايت.');
+      setSettleError('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 5 ميجابايت.');
       return;
     }
 
@@ -426,7 +480,7 @@ export const CustodyManagement: React.FC = () => {
 
     if (amountNum > settlingCustody.remainingAmount) {
       const confirmExceed = window.confirm(
-        `تنبيه: قيمة الفاتورة (${amountNum.toLocaleString()}) أكبر من الرصيد المتبقي طرف الموظف (${settlingCustody.remainingAmount.toLocaleString()}). هل تريد المتابعة وتصفية كامل العهدة؟`
+        `تنبيه: قيمة الفاتورة (${fmtMoney(amountNum)}) أكبر من الرصيد المتبقي من العهدة (${fmtMoney(settlingCustody.remainingAmount)}). هل تريد المتابعة وتصفية كامل العهدة؟`
       );
       if (!confirmExceed) return;
     }
@@ -436,11 +490,11 @@ export const CustodyManagement: React.FC = () => {
       return;
     }
 
-    const custodyId = settlingCustody.id;
+    const custody = settlingCustody;
     await settleGuard.run(async (idempotencyKey) => {
       try {
         const res = await settleCustodyItem(
-          custodyId,
+          custody.id,
           amountNum,
           settleDescription.trim(),
           settleServiceCategoryId || undefined,
@@ -458,6 +512,7 @@ export const CustodyManagement: React.FC = () => {
 
         settleGuard.rotateKey();
         setSettlingCustody(null);
+        setNotice(`تم تسجيل فاتورة تصفية بمبلغ ${fmtMoney(amountNum)} ${currencyOf(custody.currency)} على العهدة ${custody.custodyNumber}.`);
       } catch (err: any) {
         console.error(err);
         setSettleError(err?.message || 'حدث خطأ غير متوقع أثناء تسجيل التصفية.');
@@ -465,11 +520,29 @@ export const CustodyManagement: React.FC = () => {
     });
   };
 
+  // Accounts a replenishment may come from: active accounts of the custody's company in the
+  // custody's currency (the domain refuses another company's account).
+  const replenishAccounts = useMemo(() => {
+    if (!replenishingCustody) return [];
+    const cur = currencyOf(replenishingCustody.currency);
+    return targetAccounts.filter(a =>
+      a.orgId === replenishingCustody.orgId && a.active !== false && currencyOf(a.currency) === cur
+    );
+  }, [targetAccounts, replenishingCustody]);
+  const replenishAccount = replenishSourceAccountId ? replenishAccounts.find(a => a.id === replenishSourceAccountId) || null : null;
+  const replenishAmountNum = toMoney(parseFloat(replenishAmount) || 0);
+  const replenishExceedsBalance = Boolean(replenishAccount) && replenishAmountNum > 0 && replenishAmountNum > availableOf(replenishAccount!);
+
   // Handle open replenish modal
   const handleOpenReplenishModal = (custody: PettyCashCustody) => {
     setReplenishingCustody(custody);
     setReplenishAmount('');
-    setReplenishSourceAccountId(custody.sourceAccountId || '');
+    // The account the custody was paid from, when it can still pay (active, same company and currency)
+    const source = targetAccounts.find(a => a.id === custody.sourceAccountId);
+    const sourceUsable = Boolean(
+      source && source.active !== false && source.orgId === custody.orgId && currencyOf(source.currency) === currencyOf(custody.currency)
+    );
+    setReplenishSourceAccountId(sourceUsable && source ? source.id : '');
     setReplenishNotes('');
     setReplenishError(null);
     replenishGuard.rotateKey();
@@ -481,24 +554,29 @@ export const CustodyManagement: React.FC = () => {
     if (!replenishingCustody) return;
     setReplenishError(null);
 
-    const amountNum = parseFloat(replenishAmount);
+    const amountNum = replenishAmountNum;
     if (!amountNum || amountNum <= 0) {
       setReplenishError('يرجى إدخال مبلغ استعاضة صحيح.');
       return;
     }
 
-    if (!replenishSourceAccountId) {
+    if (!replenishSourceAccountId || !replenishAccount) {
       setReplenishError('يرجى اختيار حساب الخزينة أو المصدر المالي للاستعاضة.');
       return;
     }
+    if (replenishExceedsBalance) {
+      setReplenishError(insufficientMessage(replenishAccount, amountNum));
+      return;
+    }
 
-    const custodyId = replenishingCustody.id;
+    const custody = replenishingCustody;
+    const account = replenishAccount;
     await replenishGuard.run(async (idempotencyKey) => {
       try {
         const res = await replenishCustody(
-          custodyId,
+          custody.id,
           amountNum,
-          replenishSourceAccountId,
+          account.id,
           replenishNotes.trim() || undefined,
           { idempotencyKey }
         );
@@ -510,6 +588,9 @@ export const CustodyManagement: React.FC = () => {
 
         replenishGuard.rotateKey();
         setReplenishingCustody(null);
+        setNotice(
+          `تمت استعاضة العهدة ${custody.custodyNumber} للموظف "${custody.employeeName}" بمبلغ ${fmtMoney(amountNum)} ${currencyOf(custody.currency)} من "${account.name}".`
+        );
       } catch (err: any) {
         console.error(err);
         setReplenishError(err?.message || 'حدث خطأ غير متوقع أثناء استعاضة العهدة.');
@@ -590,7 +671,7 @@ export const CustodyManagement: React.FC = () => {
         const res = await returnCustodyRemainders([custody.id], targetAccountId, returnNotes.trim(), { idempotencyKey });
         returnGuard.rotateKey();
         setReturningCustodyId(null);
-        setReturnSuccess(
+        setNotice(
           res.returnedCount > 0
             ? `تم إيداع المتبقي من العهدة ${custody.custodyNumber} (${fmtMoney(res.totalReturned)} ${currency}) في "${targetName}" وإغلاق العهدة.`
             : `تم إيداع المتبقي من العهدة ${custody.custodyNumber} مسبقاً، ولم يتكرر الإيداع.`
@@ -625,19 +706,23 @@ export const CustodyManagement: React.FC = () => {
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-bold text-slate-900">إدارة العُهد النقدية للموظفين والمناديب</h1>
+                <h1 className="text-xl font-bold text-slate-900">
+                  {canViewAllCustodies ? 'إدارة العُهد النقدية للموظفين والمناديب' : 'عُهدي النقدية'}
+                </h1>
                 <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
                   Petty Cash
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-1">
-                صرف العهد التشغيلية، تسجيل فواتير التصفية الدورية، واستعاضة الأرصدة عبر الخزائن والمحافظ
+                {canViewAllCustodies
+                  ? 'صرف العهد التشغيلية، تسجيل فواتير التصفية الدورية، واستعاضة الأرصدة عبر الخزائن والمحافظ'
+                  : 'العُهد النقدية المصروفة لك: سجّل فواتير التصفية وتابع المتبقي طرفك'}
               </p>
             </div>
           </div>
 
-          {/* Action button */}
-          {currentRole !== 'employee' && (
+          {/* Action button: issuing a custody is a treasury operation (permissions.ts issueCustody) */}
+          {canIssueCustody && (
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -672,20 +757,22 @@ export const CustodyManagement: React.FC = () => {
               </div>
             )}
 
-            {/* Employee Filter */}
-            <div className="relative min-w-[170px]">
-              <User className="h-4 w-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
-              <select
-                value={employeeFilter}
-                onChange={(e) => setEmployeeFilter(e.target.value)}
-                className="w-full pr-9 pl-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
-              >
-                <option value="all">👤 كافة الموظفين والمناديب</option>
-                {uniqueEmployees.map(emp => (
-                  <option key={emp} value={emp}>{emp}</option>
-                ))}
-              </select>
-            </div>
+            {/* Employee Filter (only for those who see everyone's custodies) */}
+            {canViewAllCustodies && (
+              <div className="relative min-w-[170px]">
+                <User className="h-4 w-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                <select
+                  value={employeeFilter}
+                  onChange={(e) => setEmployeeFilter(e.target.value)}
+                  className="w-full pr-9 pl-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+                >
+                  <option value="all">👤 كافة الموظفين والمناديب</option>
+                  {uniqueEmployees.map(emp => (
+                    <option key={emp} value={emp}>{emp}</option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             {/* Status Filter Chips */}
             <div className="inline-flex bg-slate-100 p-1 rounded-xl gap-1 text-xs">
@@ -732,7 +819,7 @@ export const CustodyManagement: React.FC = () => {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="البحث باسم الموظف، كود العهدة CUS-، رقم الهاتف، أو الخزينة..."
+              placeholder={canViewAllCustodies ? 'البحث باسم الموظف، كود العهدة CUS-، رقم الهاتف، أو الخزينة...' : 'البحث بكود العهدة CUS- أو الملاحظات أو الخزينة...'}
               className="w-full pr-10 pl-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
             />
             {searchQuery && (
@@ -748,15 +835,16 @@ export const CustodyManagement: React.FC = () => {
         </div>
       </div>
 
-      {returnSuccess && (
+      {/* Success feedback after issue / invoice / replenish / return */}
+      {notice && (
         <div role="status" className="p-3.5 rounded-2xl bg-teal-50 border border-teal-200 text-teal-800 text-xs font-bold flex items-center justify-between gap-3">
           <span className="flex items-center gap-2">
             <CheckCircle2 className="h-4 w-4 shrink-0" />
-            <span>{returnSuccess}</span>
+            <span className="leading-relaxed">{notice}</span>
           </span>
           <button
             type="button"
-            onClick={() => setReturnSuccess(null)}
+            onClick={() => setNotice(null)}
             className="p-1 rounded-lg text-teal-700 hover:bg-teal-100 cursor-pointer shrink-0"
             aria-label="إغلاق"
           >
@@ -765,27 +853,24 @@ export const CustodyManagement: React.FC = () => {
         </div>
       )}
 
-      {/* 2. KPI Stat Cards */}
+      {/* 2. KPI Stat Cards (per currency) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Card 1: Total Active Custodies Amount */}
+        {/* Card 1: Total Issued Custodies Amount */}
         <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs relative overflow-hidden">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500">إجمالي مبالغ العُهد المصروفة</span>
+            <span className="text-xs font-bold text-slate-500">
+              {canViewAllCustodies ? 'إجمالي مبالغ العُهد المصروفة' : 'إجمالي العُهد المصروفة لي'}
+            </span>
             <div className="h-9 w-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center border border-emerald-100">
               <Wallet className="h-4 w-4" />
             </div>
           </div>
-          <div className="mt-3 flex items-baseline gap-1.5">
-            <span className="text-2xl font-black text-slate-900 tracking-tight">
-              {totalIssued.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </span>
-            <span className="text-xs font-bold text-slate-400">{activeOrg?.currency || 'EGP'}</span>
-          </div>
+          {renderKpiAmounts(row => row.issued, 'text-slate-900', 'text-slate-400')}
           <p className="text-[11px] text-slate-400 mt-1">
-            المجموع الكلي لقيمة العُهد المفتوحة
+            المجموع الكلي لقيمة العُهد (المصروف + الاستعاضات)
             {totalReturned > 0 && (
               <span className="block text-teal-700 font-bold mt-0.5">
-                منها {fmtMoney(totalReturned)} مُردة للخزينة
+                منها {kpiTotals.filter(row => row.returned > 0).map(row => `${fmtMoney(row.returned)} ${row.currency}`).join(' + ')} مُردة للخزينة
               </span>
             )}
           </p>
@@ -795,17 +880,14 @@ export const CustodyManagement: React.FC = () => {
         {/* Card 2: Remaining Balance in Hand */}
         <div className="bg-white rounded-2xl border border-amber-200 p-5 shadow-xs relative overflow-hidden bg-gradient-to-bl from-white via-white to-amber-50/40">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-amber-800">الرصيد المتبقي طرف الموظفين</span>
+            <span className="text-xs font-bold text-amber-800">
+              {canViewAllCustodies ? 'الرصيد المتبقي طرف الموظفين' : 'الرصيد المتبقي طرفي'}
+            </span>
             <div className="h-9 w-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center border border-amber-200">
               <Clock3 className="h-4 w-4" />
             </div>
           </div>
-          <div className="mt-3 flex items-baseline gap-1.5">
-            <span className="text-2xl font-black text-amber-900 tracking-tight">
-              {totalRemaining.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </span>
-            <span className="text-xs font-bold text-amber-700">{activeOrg?.currency || 'EGP'}</span>
-          </div>
+          {renderKpiAmounts(row => row.remaining, 'text-amber-900', 'text-amber-700')}
           <p className="text-[11px] text-amber-700/80 mt-1">نقدية بانتظار تقديم فواتير التصفية</p>
           <div className="absolute -bottom-6 -left-6 w-20 h-20 bg-amber-500/10 rounded-full pointer-events-none" />
         </div>
@@ -818,12 +900,7 @@ export const CustodyManagement: React.FC = () => {
               <Receipt className="h-4 w-4" />
             </div>
           </div>
-          <div className="mt-3 flex items-baseline gap-1.5">
-            <span className="text-2xl font-black text-blue-950 tracking-tight">
-              {totalSettled.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </span>
-            <span className="text-xs font-bold text-slate-400">{activeOrg?.currency || 'EGP'}</span>
-          </div>
+          {renderKpiAmounts(row => row.settled, 'text-blue-950', 'text-slate-400')}
           <p className="text-[11px] text-slate-400 mt-1">مبالغ موثقة بفواتير ومستندات رسمية</p>
           <div className="absolute -bottom-6 -left-6 w-20 h-20 bg-blue-500/5 rounded-full pointer-events-none" />
         </div>
@@ -840,7 +917,7 @@ export const CustodyManagement: React.FC = () => {
             <span className="text-2xl font-black text-purple-950 tracking-tight">
               {activeCount}
             </span>
-            <span className="text-xs font-bold text-slate-400">عهدة طرف موظفين</span>
+            <span className="text-xs font-bold text-slate-400">{canViewAllCustodies ? 'عهدة طرف موظفين' : 'عهدة طرفي'}</span>
           </div>
           <p className="text-[11px] text-slate-400 mt-1">من إجمالي {filteredCustodies.length} مسجلة بالنظام</p>
           <div className="absolute -bottom-6 -left-6 w-20 h-20 bg-purple-500/5 rounded-full pointer-events-none" />
@@ -884,17 +961,46 @@ export const CustodyManagement: React.FC = () => {
               <div className="h-16 w-16 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto mb-4">
                 <Briefcase className="h-8 w-8 stroke-[1.5]" />
               </div>
-              <h3 className="text-base font-bold text-slate-800">لا توجد عُهد نقدية مطابقة</h3>
-              <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                لم يتم العثور على أي عهد نقدية بالمعايير الحالية. يمكنك صرف عهدة نقدية جديدة لأحد الموظفين أو المناديب للبدء.
-              </p>
-              <button
-                type="button"
-                onClick={handleOpenIssueModal}
-                className="mt-5 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm transition cursor-pointer"
-              >
-                + صرف عهدة جديدة الآن
-              </button>
+              {cleanTargetCustodies.length > 0 ? (
+                <>
+                  <h3 className="text-base font-bold text-slate-800">لا نتائج مطابقة للبحث أو التصفية الحالية</h3>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    يوجد {cleanTargetCustodies.length} عهدة مسجلة؛ عدّل كلمة البحث أو فلتر الحالة لعرضها.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery('');
+                      setStatusFilter('all');
+                      setEmployeeFilter('all');
+                    }}
+                    className="mt-5 px-5 py-2.5 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs rounded-xl shadow-sm transition cursor-pointer"
+                  >
+                    مسح البحث والتصفية
+                  </button>
+                </>
+              ) : (
+                <>
+                  <h3 className="text-base font-bold text-slate-800">
+                    {canViewAllCustodies ? 'لا توجد عُهد نقدية مسجلة بعد' : 'لا توجد عُهد نقدية مصروفة لك'}
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    {canIssueCustody
+                      ? 'يمكنك صرف عهدة نقدية جديدة لأحد الموظفين أو المناديب للبدء.'
+                      : 'عندما يصرف لك المسؤول المالي عهدة نقدية ستظهر هنا لتسجيل فواتير تصفيتها.'}
+                  </p>
+                  {/* Issuing is a treasury action: never offered to an employee or data entry */}
+                  {canIssueCustody && (
+                    <button
+                      type="button"
+                      onClick={handleOpenIssueModal}
+                      className="mt-5 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm transition cursor-pointer"
+                    >
+                      + صرف عهدة جديدة الآن
+                    </button>
+                  )}
+                </>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
@@ -971,7 +1077,7 @@ export const CustodyManagement: React.FC = () => {
                             )}
                             <span className="flex items-center gap-1">
                               <Calendar className="h-3 w-3 text-slate-400" />
-                              <span>{custody.issuedAt ? new Date(custody.issuedAt).toLocaleDateString('ar-EG') : '—'}</span>
+                              <span>{custody.issuedAt ? formatLocalDate(custody.issuedAt) : '—'}</span>
                             </span>
                           </div>
                         </div>
@@ -1014,19 +1120,19 @@ export const CustodyManagement: React.FC = () => {
                           <div>
                             <span className="text-[10px] text-slate-400 block font-medium">إجمالي العهدة</span>
                             <span className="text-xs font-black text-slate-900 mt-0.5 block">
-                              {Number(custody.totalAmount || 0).toLocaleString()}
+                              {fmtMoney(custody.totalAmount)} <span className="text-[9px] font-bold text-slate-400">{currencyOf(custody.currency)}</span>
                             </span>
                           </div>
                           <div>
                             <span className="text-[10px] text-blue-600 block font-medium">المصفى بفواتير</span>
                             <span className="text-xs font-black text-blue-700 mt-0.5 block">
-                              {Number(custody.settledAmount || 0).toLocaleString()}
+                              {fmtMoney(custody.settledAmount)}
                             </span>
                           </div>
                           <div>
                             <span className="text-[10px] text-amber-600 block font-medium">المتبقي نقداً</span>
                             <span className="text-xs font-black text-amber-700 mt-0.5 block">
-                              {Number(custody.remainingAmount || 0).toLocaleString()}
+                              {fmtMoney(custody.remainingAmount)}
                             </span>
                           </div>
                         </div>
@@ -1036,7 +1142,7 @@ export const CustodyManagement: React.FC = () => {
                           <div className="mt-2 pt-2 border-t border-slate-200/60 flex items-center justify-between gap-2 text-[11px]">
                             <span className="flex items-center gap-1 font-bold text-teal-700 shrink-0">
                               <Undo2 className="h-3 w-3" />
-                              مُرد للخزينة: {returnedAmount.toLocaleString()}
+                              مُرد للخزينة: {fmtMoney(returnedAmount)}
                             </span>
                             {custody.returnedToAccountName && (
                               <span className="text-slate-500 truncate" title={custody.returnedToAccountName}>
@@ -1067,7 +1173,7 @@ export const CustodyManagement: React.FC = () => {
                         >
                           <Undo2 className="h-3.5 w-3.5 shrink-0" />
                           <span>إيداع المتبقي للحساب المسحوب منه</span>
-                          <span className="font-mono text-teal-700">({remainingAmount.toLocaleString()})</span>
+                          <span className="font-mono text-teal-700">({fmtMoney(remainingAmount)})</span>
                         </button>
                       )}
 
@@ -1088,8 +1194,8 @@ export const CustodyManagement: React.FC = () => {
                           <span>تصفية عهدة (فاتورة)</span>
                         </button>
   
-                        {/* Replenish Action */}
-                        {currentRole !== 'employee' && (
+                        {/* Replenish Action: a treasury operation (permissions.ts issueCustody) */}
+                        {canIssueCustody && (
                           <button
                             type="button"
                             onClick={() => handleOpenReplenishModal(custody)}
@@ -1156,7 +1262,7 @@ export const CustodyManagement: React.FC = () => {
                   {filteredSettlements.map((item) => (
                     <tr key={item.id} className="hover:bg-slate-50/70 transition">
                       <td className="p-4 text-slate-600 font-mono whitespace-nowrap">
-                        {item.invoiceDate || new Date(item.createdAt).toLocaleDateString('ar-EG')}
+                        {item.invoiceDate || formatLocalDate(item.createdAt)}
                       </td>
                       <td className="p-4 font-bold text-slate-900 whitespace-nowrap">
                         {item.employeeName}
@@ -1176,7 +1282,7 @@ export const CustodyManagement: React.FC = () => {
                         {item.description}
                       </td>
                       <td className="p-4 font-black text-slate-900 whitespace-nowrap">
-                        {Number(item.amount || 0).toLocaleString()} {item.currency || 'EGP'}
+                        {fmtMoney(item.amount)} {currencyOf(item.currency)}
                       </td>
                       <td className="p-4 text-center whitespace-nowrap">
                         {item.receiptUrl ? (
@@ -1204,7 +1310,7 @@ export const CustodyManagement: React.FC = () => {
       {/* ========================================================================= */}
       {/* MODAL 1: صرف عهدة نقدية جديدة لموظف */}
       {/* ========================================================================= */}
-      {isIssueModalOpen && (
+      {isIssueModalOpen && canIssueCustody && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-150">
           <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-4 border-b border-slate-100">
@@ -1226,12 +1332,6 @@ export const CustodyManagement: React.FC = () => {
               </button>
             </div>
 
-            {!canIssueCustody && (
-              <div className="mt-4 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold flex items-center gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>صرف العهد متاح للمسؤول المالي أو مدير الشركة فقط، وحسابك لا يملك صلاحية الاطلاع على الخزائن.</span>
-              </div>
-            )}
             {issueError && (
               <div className="mt-4 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-bold flex items-center gap-2">
                 <AlertCircle className="h-4 w-4 shrink-0" />
@@ -1256,7 +1356,7 @@ export const CustodyManagement: React.FC = () => {
                     className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
                   >
                     <option value="">-- اختر الشركة --</option>
-                    {orgList.map(o => (
+                    {creatableOrgs.map(o => (
                       <option key={o.id} value={o.id}>{o.name}</option>
                     ))}
                   </select>
@@ -1301,7 +1401,7 @@ export const CustodyManagement: React.FC = () => {
                         </option>
                       ))}
                     </select>
-                    {canIssueCustody && issueOrgId && availableMembers.length === 0 && (
+                    {issueOrgId && availableMembers.length === 0 && (
                       <span className="text-[10px] text-amber-700 font-bold mt-1 block">
                         لا يوجد موظفون نشطون مسجلون في هذه الشركة. استخدم «كتابة اسم يدوي» أو أضف الموظف من صفحة المستخدمين.
                       </span>
@@ -1337,13 +1437,19 @@ export const CustodyManagement: React.FC = () => {
                     inputMode="decimal"
                     onKeyDown={handleNumericKeyDown}
                     value={issueAmount}
-                    onChange={(e) => setIssueAmount(sanitizeAmount(e.target.value))}
+                    onChange={(e) => {
+                      setIssueAmount(sanitizeAmount(e.target.value));
+                      setIssueError(null);
+                    }}
                     placeholder="0.00"
                     required
-                    className="w-full pr-4 pl-12 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-black text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    className={`w-full pr-4 pl-12 py-2.5 bg-slate-50 border rounded-xl text-sm font-black focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
+                      issueExceedsBalance ? 'border-rose-400 text-rose-800' : 'border-slate-200 text-slate-900'
+                    }`}
                   />
+                  {/* The custody takes the currency of the account it is paid from */}
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">
-                    {activeOrg?.currency || 'EGP'}
+                    {currencyOf(issueAccount?.currency || activeOrg?.currency)}
                   </span>
                 </div>
               </div>
@@ -1353,24 +1459,30 @@ export const CustodyManagement: React.FC = () => {
                 <label className="block text-xs font-bold text-slate-700 mb-1">خصم من الخزينة / حساب الدفع *</label>
                 <select
                   value={issueSourceAccountId}
-                  onChange={(e) => setIssueSourceAccountId(e.target.value)}
+                  onChange={(e) => {
+                    setIssueSourceAccountId(e.target.value);
+                    setIssueError(null);
+                  }}
                   required
                   className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 >
                   <option value="">-- اختر الخزينة أو الحساب المالي --</option>
-                  {availableAccountsForIssue.map(acc => {
-                    const bal = Number(acc.currentBalance ?? acc.balance ?? 0);
-                    return (
-                      <option key={acc.id} value={acc.id}>
-                        {acc.name} (الرصيد: {bal.toLocaleString()} {acc.currency})
-                      </option>
-                    );
-                  })}
+                  {availableAccountsForIssue.map(acc => (
+                    <option key={acc.id} value={acc.id}>
+                      {accountOptionLabel(acc)}
+                    </option>
+                  ))}
                 </select>
-                {canIssueCustody && issueOrgId && availableAccountsForIssue.length === 0 && (
+                {issueOrgId && availableAccountsForIssue.length === 0 && (
                   <span className="text-[10px] text-amber-700 font-bold mt-1 block">
                     لا توجد خزينة أو حساب دفع نشط لهذه الشركة. أنشئ حساباً من صفحة الخزينة أولاً.
                   </span>
+                )}
+                {/* No overdraft: say so before the user submits */}
+                {issueAccount && issueExceedsBalance && (
+                  <p className="text-[11px] text-rose-700 font-bold mt-1.5 leading-relaxed">
+                    {insufficientMessage(issueAccount, issueAmountNum)}
+                  </p>
                 )}
               </div>
 
@@ -1398,8 +1510,8 @@ export const CustodyManagement: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isIssuing}
-                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-xs transition flex items-center gap-2 cursor-pointer"
+                  disabled={isIssuing || issueExceedsBalance}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-xs transition flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isIssuing ? (
                     <>
@@ -1454,7 +1566,7 @@ export const CustodyManagement: React.FC = () => {
               <div className="text-left">
                 <span className="text-amber-600 block text-[10px] font-bold">الرصيد المتبقي طرفه:</span>
                 <span className="font-black text-sm text-amber-700">
-                  {Number(settlingCustody.remainingAmount || 0).toLocaleString()} {settlingCustody.currency}
+                  {fmtMoney(settlingCustody.remainingAmount)} {currencyOf(settlingCustody.currency)}
                 </span>
               </div>
             </div>
@@ -1498,8 +1610,10 @@ export const CustodyManagement: React.FC = () => {
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     <option value="">-- بند عام / غير محدد --</option>
+                    {/* Services of the custody's own company, incl. services shared with it (orgIds);
+                        a deactivated service is not offered for new invoices */}
                     {targetServices
-                      .filter(s => s.orgId === settlingCustody.orgId || isSuperAdmin)
+                      .filter(s => isServiceMatchingOrg(s, settlingCustody.orgId) && s.active !== false)
                       .map(s => (
                         <option key={s.id} value={s.id}>{s.name}</option>
                       ))}
@@ -1631,7 +1745,7 @@ export const CustodyManagement: React.FC = () => {
       {/* ========================================================================= */}
       {/* MODAL 3: استعاضة العهدة النقدية */}
       {/* ========================================================================= */}
-      {replenishingCustody && (
+      {replenishingCustody && canIssueCustody && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-150">
           <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl max-w-md w-full p-6">
             <div className="flex items-center justify-between pb-4 border-b border-slate-100">
@@ -1663,7 +1777,7 @@ export const CustodyManagement: React.FC = () => {
               <div className="text-left">
                 <span className="text-slate-400 block text-[10px]">الرصيد المتبقي حالياً:</span>
                 <span className="font-black text-amber-700">
-                  {Number(replenishingCustody.remainingAmount || 0).toLocaleString()} {replenishingCustody.currency}
+                  {fmtMoney(replenishingCustody.remainingAmount)} {currencyOf(replenishingCustody.currency)}
                 </span>
               </div>
             </div>
@@ -1686,13 +1800,18 @@ export const CustodyManagement: React.FC = () => {
                     inputMode="decimal"
                     onKeyDown={handleNumericKeyDown}
                     value={replenishAmount}
-                    onChange={(e) => setReplenishAmount(sanitizeAmount(e.target.value))}
+                    onChange={(e) => {
+                      setReplenishAmount(sanitizeAmount(e.target.value));
+                      setReplenishError(null);
+                    }}
                     placeholder="0.00"
                     required
-                    className="w-full pr-4 pl-12 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-black text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                    className={`w-full pr-4 pl-12 py-2.5 bg-slate-50 border rounded-xl text-sm font-black focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 ${
+                      replenishExceedsBalance ? 'border-rose-400 text-rose-800' : 'border-slate-200 text-slate-900'
+                    }`}
                   />
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">
-                    {replenishingCustody.currency}
+                    {currencyOf(replenishingCustody.currency)}
                   </span>
                 </div>
               </div>
@@ -1702,22 +1821,32 @@ export const CustodyManagement: React.FC = () => {
                 <label className="block text-xs font-bold text-slate-700 mb-1">خصم مبلغ الاستعاضة من خزينة *</label>
                 <select
                   value={replenishSourceAccountId}
-                  onChange={(e) => setReplenishSourceAccountId(e.target.value)}
+                  onChange={(e) => {
+                    setReplenishSourceAccountId(e.target.value);
+                    setReplenishError(null);
+                  }}
                   required
                   className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-amber-500"
                 >
                   <option value="">-- اختر الخزينة أو المحفظة --</option>
-                  {targetAccounts
-                    .filter(a => a.orgId === replenishingCustody.orgId || isSuperAdmin)
-                    .map(acc => {
-                      const bal = Number(acc.currentBalance ?? acc.balance ?? 0);
-                      return (
-                        <option key={acc.id} value={acc.id}>
-                          {acc.name} (الرصيد: {bal.toLocaleString()} {acc.currency})
-                        </option>
-                      );
-                    })}
+                  {/* Active accounts of the custody's company in the custody's currency */}
+                  {replenishAccounts.map(acc => (
+                    <option key={acc.id} value={acc.id}>
+                      {accountOptionLabel(acc)}
+                    </option>
+                  ))}
                 </select>
+                {replenishAccounts.length === 0 && (
+                  <span className="text-[10px] text-amber-700 font-bold mt-1 block">
+                    لا يوجد حساب نشط لشركة هذه العهدة بعملتها ({currencyOf(replenishingCustody.currency)}). أنشئ حساباً أو فعّله من صفحة الخزينة أولاً.
+                  </span>
+                )}
+                {/* No overdraft: say so before the user submits */}
+                {replenishAccount && replenishExceedsBalance && (
+                  <p className="text-[11px] text-rose-700 font-bold mt-1.5 leading-relaxed">
+                    {insufficientMessage(replenishAccount, replenishAmountNum)}
+                  </p>
+                )}
               </div>
 
               {/* Notes */}
@@ -1744,8 +1873,8 @@ export const CustodyManagement: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isReplenishing}
-                  className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl shadow-xs transition flex items-center gap-2 cursor-pointer"
+                  disabled={isReplenishing || replenishExceedsBalance}
+                  className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl shadow-xs transition flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isReplenishing ? (
                     <>
@@ -1973,27 +2102,27 @@ export const CustodyManagement: React.FC = () => {
               <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-100 text-center">
                 <span className="text-[11px] text-slate-400 block font-medium">إجمالي المنصرف</span>
                 <span className="text-sm font-black text-slate-900 mt-1 block">
-                  {Number(inspectingCustody.totalAmount).toLocaleString()} {inspectingCustody.currency}
+                  {fmtMoney(inspectingCustody.totalAmount)} {currencyOf(inspectingCustody.currency)}
                 </span>
               </div>
               <div className="bg-blue-50/60 p-3.5 rounded-2xl border border-blue-100 text-center">
                 <span className="text-[11px] text-blue-600 block font-medium">تمت تصفيته بالفواتير</span>
                 <span className="text-sm font-black text-blue-800 mt-1 block">
-                  {Number(inspectingCustody.settledAmount).toLocaleString()} {inspectingCustody.currency}
+                  {fmtMoney(inspectingCustody.settledAmount)} {currencyOf(inspectingCustody.currency)}
                 </span>
               </div>
               {Number(inspectingCustody.returnedAmount || 0) > 0 && (
                 <div className="bg-teal-50/60 p-3.5 rounded-2xl border border-teal-100 text-center">
                   <span className="text-[11px] text-teal-700 block font-medium">مُرد للخزينة</span>
                   <span className="text-sm font-black text-teal-800 mt-1 block">
-                    {Number(inspectingCustody.returnedAmount).toLocaleString()} {inspectingCustody.currency}
+                    {fmtMoney(inspectingCustody.returnedAmount)} {currencyOf(inspectingCustody.currency)}
                   </span>
                 </div>
               )}
               <div className="bg-amber-50/60 p-3.5 rounded-2xl border border-amber-100 text-center">
                 <span className="text-[11px] text-amber-700 block font-medium">المتبقي طرف الموظف</span>
                 <span className="text-sm font-black text-amber-900 mt-1 block">
-                  {Number(inspectingCustody.remainingAmount).toLocaleString()} {inspectingCustody.currency}
+                  {fmtMoney(inspectingCustody.remainingAmount)} {currencyOf(inspectingCustody.currency)}
                 </span>
               </div>
             </div>
@@ -2003,9 +2132,9 @@ export const CustodyManagement: React.FC = () => {
               <div className="p-3 rounded-2xl bg-teal-50/60 border border-teal-100 text-xs text-teal-800 flex items-center gap-2">
                 <Undo2 className="h-4 w-4 shrink-0" />
                 <span>
-                  تم رد {Number(inspectingCustody.returnedAmount).toLocaleString()} {inspectingCustody.currency} من هذه العهدة للخزينة
+                  تم رد {fmtMoney(inspectingCustody.returnedAmount)} {currencyOf(inspectingCustody.currency)} من هذه العهدة للخزينة
                   {inspectingCustody.returnedToAccountName ? <> في حساب <strong>«{inspectingCustody.returnedToAccountName}»</strong></> : null}
-                  {inspectingCustody.returnedAt ? ` بتاريخ ${new Date(inspectingCustody.returnedAt).toLocaleDateString('ar-EG')}` : ''}.
+                  {inspectingCustody.returnedAt ? ` بتاريخ ${formatLocalDate(inspectingCustody.returnedAt)}` : ''}.
                 </span>
               </div>
             )}
@@ -2014,7 +2143,7 @@ export const CustodyManagement: React.FC = () => {
             {canIssueCustody && Number(inspectingCustody.remainingAmount || 0) > 0 && (
               <div className="mt-3 p-3 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
                 <span className="text-slate-600">
-                  المتبقي طرف الموظف: <strong className="text-amber-700">{Number(inspectingCustody.remainingAmount).toLocaleString()} {inspectingCustody.currency}</strong> — مصدر الصرف: <strong className="text-slate-800">{inspectingCustody.sourceAccountName || 'غير محدد'}</strong>
+                  المتبقي طرف الموظف: <strong className="text-amber-700">{fmtMoney(inspectingCustody.remainingAmount)} {currencyOf(inspectingCustody.currency)}</strong> — مصدر الصرف: <strong className="text-slate-800">{inspectingCustody.sourceAccountName || 'غير محدد'}</strong>
                 </span>
                 <button
                   type="button"
@@ -2074,7 +2203,7 @@ export const CustodyManagement: React.FC = () => {
                           )}
                         </div>
                         <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
-                          <span>{item.invoiceDate || new Date(item.createdAt).toLocaleDateString('ar-EG')}</span>
+                          <span>{item.invoiceDate || formatLocalDate(item.createdAt)}</span>
                           {item.vendorName && <span>• المورد: {item.vendorName}</span>}
                           {item.serviceCategoryName && <span>• البند: {item.serviceCategoryName}</span>}
                         </div>
@@ -2082,7 +2211,7 @@ export const CustodyManagement: React.FC = () => {
 
                       <div className="flex items-center gap-3 shrink-0">
                         <span className="font-black text-slate-900">
-                          {Number(item.amount).toLocaleString()} {item.currency}
+                          {fmtMoney(item.amount)} {currencyOf(item.currency)}
                         </span>
                         {item.receiptUrl && (
                           <button

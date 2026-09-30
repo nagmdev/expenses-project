@@ -1,14 +1,16 @@
-import React, { useState, Suspense, lazy } from 'react';
+import React, { useState, Suspense, lazy, useSyncExternalStore } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { LoginPage } from './components/LoginPage';
 import { Header } from './components/Header';
-import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { ExpenseRequest, SUPPORTED_CURRENCIES } from './types';
-import { Building2, X, AlertTriangle, Loader2, Wallet, Ban, ShieldAlert, MailCheck, RefreshCw, Copy } from 'lucide-react';
+import { Building2, X, AlertTriangle, Loader2, Wallet, Ban, ShieldAlert, MailCheck, RefreshCw, Copy, WifiOff } from 'lucide-react';
 import { sanitizeDigitsOnly, sanitizeCode, handleNumericKeyDown } from './utils/validation';
 import { useSubmitGuard } from './hooks/useSubmitGuard';
 import { LegacyDataRecovery } from './components/LegacyDataRecovery';
+import { canOpenTab, HOME_TAB } from './utils/permissions';
+import { copyTextToClipboard } from './utils/requestUi';
+import { isDomainError } from './domain/common';
 
 // Code-split heavy page views and modals (loads only what the user actively visits)
 const DashboardAnalytics = lazy(() => import('./components/DashboardAnalytics').then(m => ({ default: m.DashboardAnalytics })));
@@ -22,7 +24,6 @@ const CustodyManagement = lazy(() => import('./components/CustodyManagement').th
 const NewRequestModal = lazy(() => import('./components/NewRequestModal').then(m => ({ default: m.NewRequestModal })));
 const RequestDetailModal = lazy(() => import('./components/RequestDetailModal').then(m => ({ default: m.RequestDetailModal })));
 const FirebaseConfigModal = lazy(() => import('./components/FirebaseConfigModal').then(m => ({ default: m.FirebaseConfigModal })));
-const UserProfileModal = lazy(() => import('./components/UserProfileModal').then(m => ({ default: m.UserProfileModal })));
 const SettingsManagement = lazy(() => import('./components/SettingsManagement').then(m => ({ default: m.SettingsManagement })));
 const ProfileManagement = lazy(() => import('./components/ProfileManagement').then(m => ({ default: m.ProfileManagement })));
 const VisaManagement = lazy(() => import('./components/VisaManagement').then(m => ({ default: m.VisaManagement })));
@@ -39,10 +40,23 @@ const TabLoadingFallback: React.FC = () => (
   </div>
 );
 
+// Browser connectivity (navigator.onLine + online/offline events), read without an effect.
+const subscribeOnline = (onChange: () => void) => {
+  window.addEventListener('online', onChange);
+  window.addEventListener('offline', onChange);
+  return () => {
+    window.removeEventListener('online', onChange);
+    window.removeEventListener('offline', onChange);
+  };
+};
+const readOnline = () => (typeof navigator === 'undefined' ? true : navigator.onLine !== false);
+
+const OFFLINE_STATUS_MESSAGE =
+  'تعذر الوصول إلى قاعدة البيانات في الوقت الحالي (الاتصال بطيء أو منقطع)، لذلك لم نتمكن من التحقق من ربط حسابك. تحقق من الاتصال ثم أعد المحاولة بعد لحظات.';
+
 const MainApp: React.FC = () => {
   const { 
     activeTab, 
-    setActiveTab, 
     addOrganization, 
     organizations, 
     loading, 
@@ -65,7 +79,6 @@ const MainApp: React.FC = () => {
   } = useApp();
 
   const [isNewRequestModalOpen, setIsNewRequestModalOpen] = useState(false);
-  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [selectedRequest, setSelectedRequest] = useState<ExpenseRequest | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   
@@ -92,20 +105,37 @@ const MainApp: React.FC = () => {
     });
   };
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const isOnline = useSyncExternalStore(subscribeOnline, readOnline, () => true);
+  const [uidCopyState, setUidCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const handleCopyUid = async (uid: string) => {
+    const ok = await copyTextToClipboard(uid);
+    setUidCopyState(ok ? 'copied' : 'failed');
+    setTimeout(() => setUidCopyState('idle'), 3000);
+  };
 
   // Manual "check my access now": re-reads the user's profile + memberships once.
+  // forceRefreshUserState THROWS (code 'offline') when the database could not be reached,
+  // so a slow / failed connection is never reported as "not linked yet".
   const handleCheckStatusNow = async () => {
     if (!firebaseUser || isRefreshingStatus) return;
     setIsRefreshingStatus(true);
     setStatusMessage(null);
     try {
+      if (!readOnline()) {
+        setStatusMessage(OFFLINE_STATUS_MESSAGE);
+        return;
+      }
       const ok = await forceRefreshUserState();
       if (!ok) {
-        setStatusMessage('لم يتم ربط الحساب بشركة حتى الآن. يرجى التأكد من قيام مسؤول الشركة بإضافة بريدك الإلكتروني في قائمة الأعضاء.');
+        setStatusMessage('لم نعثر على ربط لحسابك بأي شركة حتى الآن. تأكد من قيام مسؤول الشركة بإضافة بريدك الإلكتروني في قائمة الأعضاء، ثم أعد المحاولة.');
       }
     } catch (e: any) {
-      console.error('[Status Check Error]', e);
-      setStatusMessage('تعذر التحقق من حالة الحساب. أعد المحاولة.');
+      if (isDomainError(e) && e.code === 'offline') {
+        setStatusMessage(OFFLINE_STATUS_MESSAGE);
+      } else {
+        console.warn('[Status Check Error]', e?.message || e);
+        setStatusMessage('تعذر التحقق من حالة الحساب. أعد المحاولة.');
+      }
     } finally {
       setIsRefreshingStatus(false);
     }
@@ -140,6 +170,10 @@ const MainApp: React.FC = () => {
   if (!firebaseUser) {
     return <LoginPage />;
   }
+
+  // The page actually rendered: a tab the role may not open (stale saved tab, old link)
+  // shows the role's home page instead of an action the database would refuse.
+  const shownTab = canOpenTab(currentRole, activeTab) ? activeTab : HOME_TAB[currentRole] || 'profile';
 
   const handleQuickAddOrg = (e: React.FormEvent) => {
     e.preventDefault();
@@ -178,10 +212,19 @@ const MainApp: React.FC = () => {
       <Header 
         onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
         onOpenNewOrg={() => setIsQuickOrgModalOpen(true)}
-        onOpenProfile={() => setActiveTab('profile')}
         onToggleSidebar={() => setIsSidebarOpen(prev => !prev)}
         onSelectRequest={setSelectedRequest}
       />
+
+      {/* No connection: say so instead of letting screens look empty or saves hang silently */}
+      {!isOnline && (
+        <div role="status" className="bg-amber-50 border-b border-amber-200 px-4 py-2.5 text-xs text-amber-900 flex items-center gap-2 shadow-xs">
+          <WifiOff className="h-4 w-4 text-amber-600 shrink-0" />
+          <span className="font-semibold">
+            لا يوجد اتصال بالإنترنت حالياً — قد لا تظهر أحدث البيانات، ولن تُحفظ أي عملية حتى يعود الاتصال.
+          </span>
+        </div>
+      )}
 
       {/* Firebase Permission / Connection Alert (Super Admin Only) */}
       {firebaseError && currentRole === 'super_admin' && (
@@ -275,17 +318,20 @@ const MainApp: React.FC = () => {
                   <code dir="ltr" className="bg-white border border-slate-200 rounded px-2 py-0.5 select-all">{currentUser.id}</code>
                   <button
                     type="button"
-                    onClick={() => { void navigator.clipboard?.writeText(currentUser.id); }}
+                    onClick={() => { void handleCopyUid(currentUser.id); }}
                     className="text-slate-500 hover:text-slate-800 cursor-pointer"
                     title="نسخ"
+                    aria-label="نسخ المعرف"
                   >
                     <Copy className="h-3.5 w-3.5" />
                   </button>
+                  {uidCopyState === 'copied' && <span className="text-emerald-700 font-bold">تم النسخ</span>}
+                  {uidCopyState === 'failed' && <span className="text-rose-600 font-bold">تعذر النسخ تلقائياً — حدد المعرف وانسخه يدوياً</span>}
                 </span>
                 مع الحقول: <code>email</code> و <code>role = super_admin</code>، ثم اضغط «تحقق الآن».
               </div>
             </div>
-          ) : !loading && organizations.length === 0 && currentRole === 'super_admin' && activeTab === 'dashboard' ? (
+          ) : !loading && organizations.length === 0 && currentRole === 'super_admin' && shownTab === 'dashboard' ? (
             <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-xl mx-auto text-center shadow-md my-8">
               <div className="h-16 w-16 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto mb-4">
                 <Building2 className="h-8 w-8" />
@@ -361,6 +407,9 @@ const MainApp: React.FC = () => {
                 <br />
                 لم يتم ربط حسابك بأي شركة أو مؤسسة بعد، أو أن الحساب بانتظار تفعيل المسؤول. يرجى التواصل مع مدير شركتك لإضافتك وتفعيل صلاحياتك.
               </p>
+              <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">
+                إذا كان مدير الشركة قد أضافك بالفعل، فقد يكون الاتصال بقاعدة البيانات بطيئاً عند أول دخول: اضغط «تحديث الحالة الآن» أو أعد تحميل الصفحة بعد لحظات.
+              </p>
               <div className="mt-6 flex flex-col items-center gap-3">
                 <button
                   type="button"
@@ -388,11 +437,11 @@ const MainApp: React.FC = () => {
             <Suspense fallback={<TabLoadingFallback />}>
               {currentRole === 'employee' ? (
                 /* Employee Experience: Dedicated Banking Tracker, Profile, Visas, or Petty Cash Custodies */
-                activeTab === 'profile' ? (
+                shownTab === 'profile' ? (
                   <ProfileManagement />
-                ) : activeTab === 'visas' ? (
+                ) : shownTab === 'visas' ? (
                   <VisaManagement />
-                ) : activeTab === 'custody' ? (
+                ) : shownTab === 'custody' ? (
                   <CustodyManagement />
                 ) : (
                   <RequesterTracker 
@@ -401,68 +450,68 @@ const MainApp: React.FC = () => {
                   />
                 )
               ) : (
-                /* Admin / Super Admin / Data Entry Multi-Tab View */
+                /* Admin / Finance / Data Entry: only the pages TAB_ACCESS gives the role (see shownTab) */
                 <>
-                  {activeTab === 'profile' && (
+                  {shownTab === 'profile' && (
                     <ProfileManagement />
                   )}
 
-                  {activeTab === 'dashboard' && currentRole !== 'data_entry' && (
+                  {shownTab === 'dashboard' && (
                     <DashboardAnalytics 
                       onSelectRequest={setSelectedRequest}
                       onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
                     />
                   )}
 
-                  {activeTab === 'requests' && currentRole !== 'data_entry' && (
+                  {shownTab === 'requests' && (
                     <ExpenseRequestsList 
                       onSelectRequest={setSelectedRequest}
                       onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
                     />
                   )}
 
-                  {activeTab === 'visas' && (
+                  {shownTab === 'visas' && (
                     <VisaManagement />
                   )}
 
-                  {activeTab === 'my-requests' && (
+                  {shownTab === 'my-requests' && (
                     <RequesterTracker 
                       onOpenNewRequest={() => setIsNewRequestModalOpen(true)}
                       onSelectRequest={setSelectedRequest}
                     />
                   )}
 
-                  {activeTab === 'treasury' && (
+                  {shownTab === 'treasury' && (
                     <TreasuryManagement />
                   )}
 
-                  {activeTab === 'custody' && (
+                  {shownTab === 'custody' && (
                     <CustodyManagement />
                   )}
 
-                  {activeTab === 'services' && (
+                  {shownTab === 'services' && (
                     <ServicesManagement />
                   )}
 
-                  {activeTab === 'providers' && (
+                  {shownTab === 'providers' && (
                     <VendorsManagement />
                   )}
 
                   {/* Dedicated Users & Employees tab from screenshot */}
-                  {activeTab === 'users' && (
+                  {shownTab === 'users' && (
                     <UsersManagement />
                   )}
 
-                  {activeTab === 'organizations' && (
+                  {shownTab === 'organizations' && (
                     <OrganizationsManagement initialSection="companies" />
                   )}
 
                   {/* Dedicated Audit Log tab */}
-                  {activeTab === 'audit' && (
+                  {shownTab === 'audit' && (
                     <OrganizationsManagement initialSection="audit_log" />
                   )}
 
-                  {activeTab === 'settings' && (currentRole === 'org_admin' || currentRole === 'super_admin') && (
+                  {shownTab === 'settings' && (
                     <SettingsManagement />
                   )}
                 </>
@@ -496,15 +545,6 @@ const MainApp: React.FC = () => {
           <FirebaseConfigModal 
             isOpen={isFirebaseModalOpen}
             onClose={closeFirebaseModal}
-          />
-        </Suspense>
-      )}
-
-      {isProfileModalOpen && (
-        <Suspense fallback={null}>
-          <UserProfileModal 
-            isOpen={isProfileModalOpen}
-            onClose={() => setIsProfileModalOpen(false)}
           />
         </Suspense>
       )}

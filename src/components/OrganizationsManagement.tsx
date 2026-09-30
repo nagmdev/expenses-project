@@ -2,10 +2,22 @@ import React, { useState, useMemo, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 import { OrgMultiSelect } from './OrgMultiSelect';
-import { normalizeEmail, normalizeKeyValue } from '../domain/common';
-import { PLATFORM_OWNER_EMAILS, isPlatformOwnerEmail as isPlatformOwner, isRealUid, knownLoginUidOf } from '../domain/directory';
+import { normalizeEmail, normalizeKeyValue, type Actor } from '../domain/common';
 import {
-  Building2, 
+  PLATFORM_OWNER_EMAILS,
+  isPlatformOwnerEmail as isPlatformOwner,
+  isOwnMembership as isOwnMembershipOf,
+  isRealUid,
+  knownLoginUidOf,
+  membershipProtection,
+} from '../domain/directory';
+import { paymentAccountHasHistory } from '../domain/treasury';
+import { can } from '../utils/permissions';
+import { fmtMoney, formatLocalDateTime, copyTextToClipboard, accountBalance } from '../utils/requestUi';
+import {
+  Lock,
+  RotateCcw,
+  Building2,
   Plus, 
   Users, 
   UserPlus, 
@@ -75,18 +87,38 @@ const recurringFrequencyLabels: Record<string, string> = {
   yearly: 'سنوي',
 };
 
-const paymentMethodLabels: Record<string, string> = {
-  cash: 'نقداً / خزينة',
-  instapay: 'إنستاباي',
-  digital_wallet: 'محفظة إلكترونية',
-  bank_transfer: 'تحويل بنكي',
-  cheque: 'شيك مصرفي',
-};
-
 /** The platform owner: the ONLY super admin (same list as AppContext and the rules). Nobody can be promoted. */
 const PLATFORM_OWNER_EMAIL = PLATFORM_OWNER_EMAILS[0];
 
 type MultiOrgSkipReason = 'already_member' | 'duplicate';
+
+/** A deactivated provider / service stays for history (policy: records in use are never hard-deleted). */
+const isDeactivated = (entity: object) => (entity as { active?: unknown }).active === false;
+
+const OWNER_ORG_REASON = 'الشركة المالكة للبند';
+
+/** Inline error of a form or confirmation dialog (instead of a blocking alert). */
+const InlineError: React.FC<{ message?: string | null }> = ({ message }) =>
+  message ? (
+    <div role="alert" className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-start gap-2 text-right">
+      <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+      <span>{message}</span>
+    </div>
+  ) : null;
+
+/** Arabic names of the audit log's entity types. */
+const auditEntityLabels: Record<string, string> = {
+  organization: 'شركة',
+  member: 'مستخدم',
+  service: 'بند صرف',
+  provider: 'مورد',
+  vault: 'خزينة / حساب',
+  department: 'قسم',
+  role: 'صلاحيات',
+  request: 'طلب صرف',
+  custody: 'عهدة',
+  transaction: 'حركة مالية',
+};
 
 const skipReasonLabel = (reason: MultiOrgSkipReason, existingName?: string) =>
   reason === 'already_member'
@@ -100,8 +132,10 @@ export type AdminSection =
   | 'vendors' 
   | 'vaults' 
   | 'departments' 
-  | 'super_admins' 
+  | 'super_admins'
   | 'audit_log';
+
+const SECTION_ORDER: AdminSection[] = ['companies', 'users', 'services', 'vendors', 'vaults', 'departments', 'super_admins', 'audit_log'];
 
 export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }> = ({ initialSection }) => {
   const { 
@@ -148,14 +182,98 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     removeSuperAdminEmail,
     updateSuperAdminRole,
     currentRole,
+    currentUser,
     requests,
     allRequests,
     custodySettlements,
-    allCustodySettlements
+    allCustodySettlements,
+    allVisaRequests,
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
-  const canManageOrgs = isSuperAdmin;
+  // What this role may do here (src/utils/permissions.ts mirrors the domain and firestore.rules):
+  // an action is shown only to the roles the database accepts.
+  const canManageOrgs = can(currentRole, 'manageCompanies');
+  const canSeeCompanyFigures = can(currentRole, 'viewAllRequests');
+  const canViewUsers = can(currentRole, 'viewUsers');
+  const canManageUsers = can(currentRole, 'manageUsers');
+  const canCreateServices = can(currentRole, 'createServices');
+  const canEditServices = can(currentRole, 'editServices');
+  const canDeleteServices = can(currentRole, 'deleteServices');
+  const canViewProviders = can(currentRole, 'viewProviders');
+  const canCreateProviders = can(currentRole, 'createProviders');
+  const canEditProviders = can(currentRole, 'editProviders');
+  const canDeleteProviders = can(currentRole, 'deleteProviders');
+  const canViewTreasury = can(currentRole, 'viewTreasury');
+  const canCreateAccounts = can(currentRole, 'createAccounts');
+  const canEditAccounts = can(currentRole, 'editAccounts');
+  const canDeleteAccounts = can(currentRole, 'deleteAccounts');
+  const canViewDepartments = can(currentRole, 'viewDepartments');
+  const canCreateDepartments = can(currentRole, 'createDepartments');
+  const canEditDepartments = can(currentRole, 'editDepartments');
+  const canDeleteDepartments = can(currentRole, 'deleteDepartments');
+  const canViewAuditLog = can(currentRole, 'viewAuditLog');
+
+  // Sections of the hub each role reaches. Company cards need the whole company's requests
+  // (money roles); data entry gets only the sections where it can add something: providers
+  // and departments (its services page stays read-only).
+  const sectionAllowed: Record<AdminSection, boolean> = {
+    companies: canSeeCompanyFigures,
+    users: canViewUsers,
+    services: canCreateServices || canEditServices || canDeleteServices,
+    vendors: canViewProviders,
+    vaults: canViewTreasury,
+    departments: canViewDepartments,
+    super_admins: isSuperAdmin,
+    audit_log: canViewAuditLog,
+  };
+
+  // Policy (same check as the domain, membershipProtection): a company admin never deletes,
+  // suspends or re-roles the platform owner's membership nor their own. Those rows keep
+  // contact edits only.
+  const myEmail = normalizeEmail(currentUser.email);
+  const viewer: Actor = { id: currentUser.id, name: currentUser.name, email: currentUser.email, role: currentRole };
+  const isOwnMembership = (m: OrganizationMember) => isOwnMembershipOf(viewer, m);
+  const isProtectedMembership = (m: OrganizationMember) => membershipProtection(viewer, m) !== null;
+  const protectedReason = (m: OrganizationMember) =>
+    membershipProtection(viewer, m) === 'self'
+      ? 'هذا حسابك: لا يمكنك حذفه أو تعطيله أو تغيير دورك بنفسك.'
+      : 'حساب مالك المنصة محمي: لا يمكن حذفه أو تعطيله أو تغيير دوره.';
+
+  // A service owned by another company (shared with this one) is read-only here: the rules
+  // check the role in the service's own company.
+  const ownsService = (srv: ServiceCategory) => isSuperAdmin || srv.orgId === activeOrgId;
+  // Records in use are deactivated instead of deleted: the context decides and reports it;
+  // these previews (same checks) only word the confirmation dialogs.
+  const usageText = (parts: string[]) => parts.filter(Boolean).join(' و');
+  const serviceUsage = (srv: ServiceCategory) => {
+    const requestCount = allRequests.filter(r => r.serviceCategoryId === srv.id).length;
+    const settlementCount = allCustodySettlements.filter(s => s.serviceCategoryId === srv.id).length;
+    const spent = Number(srv.spentAmount || 0) !== 0;
+    const shared = (srv.orgIds || []).some(orgId => orgId !== srv.orgId);
+    return {
+      inUse: requestCount + settlementCount > 0 || spent || shared,
+      text: usageText([
+        requestCount > 0 ? `${requestCount} طلب صرف` : '',
+        settlementCount > 0 ? `${settlementCount} تسوية عهدة` : '',
+        spent ? 'مصروفات مسجلة' : '',
+        shared ? 'شركات أخرى مشتركة فيه' : '',
+      ]),
+    };
+  };
+  const providerUsage = (prov: ServiceProvider) => {
+    const requestCount = allRequests.filter(r => r.providerId === prov.id).length;
+    const visaCount = allVisaRequests.filter(v => v.serviceProviderId === prov.id).length;
+    const paid = Number(prov.totalPaid || 0) !== 0;
+    return {
+      inUse: requestCount + visaCount > 0 || paid,
+      text: usageText([
+        requestCount > 0 ? `${requestCount} طلب صرف` : '',
+        visaCount > 0 ? `${visaCount} طلب تأشيرة` : '',
+        paid ? 'مدفوعات مسجلة' : '',
+      ]),
+    };
+  };
   const displayOrgs = canManageOrgs ? allOrganizations : organizations;
   // Company multi-selects of the add forms: active companies only (an archived one refuses the whole operation).
   const creatableOrgs = useMemo(
@@ -180,8 +298,13 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const orgNameOf = (orgId: string) =>
     (allOrganizations && allOrganizations.length > 0 ? allOrganizations : organizations).find(o => o.id === orgId)?.name || orgId;
 
-  // Result of a multi-company add (shown above the sections, never blocks the rest).
-  const [multiOrgNotice, setMultiOrgNotice] = useState<{ msg: string; isError?: boolean } | null>(null);
+  // Result of the last action (multi-company add, delete / deactivate, row action errors),
+  // shown above the sections, never blocking the rest.
+  const [multiOrgNotice, setMultiOrgNotice] = useState<{ msg: string; isError?: boolean; isWarning?: boolean } | null>(null);
+  const showNotice = (msg: string, tone: 'success' | 'warning' | 'error' = 'success') =>
+    setMultiOrgNotice({ msg, isError: tone === 'error', isWarning: tone === 'warning' });
+  // Error of the open confirmation dialog (only one is open at a time).
+  const [confirmError, setConfirmError] = useState<string | null>(null);
 
   const describeMultiOrgResult = (
     what: string,
@@ -196,10 +319,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     return parts.join(' ');
   };
 
-  // Active View Tab
+  // Active View Tab. A section this role cannot reach (e.g. the companies landing section for
+  // data entry, or while the role is still resolving) falls back to the first one it can.
   const [activeSection, setActiveSection] = useState<AdminSection>(
     initialSection || (canManageOrgs ? 'companies' : 'users')
   );
+  const shownSection: AdminSection | null = sectionAllowed[activeSection]
+    ? activeSection
+    : SECTION_ORDER.find(s => sectionAllowed[s]) || null;
 
   // =========================================================================
   // 1. COMPANIES STATE & MODALS
@@ -221,6 +348,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [editOrgBudget, setEditOrgBudget] = useState('');
   const [editOrgDescription, setEditOrgDescription] = useState('');
   const editOrgGuard = useSubmitGuard();
+  const [editOrgError, setEditOrgError] = useState<string | null>(null);
 
   const [deletingOrg, setDeletingOrg] = useState<Organization | null>(null);
   const [deleteOrgLoading, setDeleteOrgLoading] = useState(false);
@@ -257,6 +385,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     warning?: string;
   } | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const [editingMember, setEditingMember] = useState<OrganizationMember | null>(null);
   const [editMemberName, setEditMemberName] = useState('');
@@ -268,6 +397,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [editMemberActive, setEditMemberActive] = useState(true);
   const editMemberGuard = useSubmitGuard();
   const editMemberLoading = editMemberGuard.pending;
+  const [memberFormError, setMemberFormError] = useState<string | null>(null);
 
   const [deletingMember, setDeletingMember] = useState<OrganizationMember | null>(null);
   const [resetFeedback, setResetFeedback] = useState<{ email: string; message: string; isError?: boolean } | null>(null);
@@ -299,6 +429,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [serviceOrgIds, setServiceOrgIds] = useState<string[]>([]);
   const serviceGuard = useSubmitGuard();
   const isSavingService = serviceGuard.pending;
+  const [serviceFormError, setServiceFormError] = useState<string | null>(null);
   const [deletingService, setDeletingService] = useState<ServiceCategory | null>(null);
   const [serviceSearch, setServiceSearch] = useState('');
 
@@ -321,6 +452,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [vendorServiceIds, setVendorServiceIds] = useState<string[]>([]);
   const vendorGuard = useSubmitGuard();
   const isSavingVendor = vendorGuard.pending;
+  const [vendorFormError, setVendorFormError] = useState<string | null>(null);
   const [deletingVendor, setDeletingVendor] = useState<ServiceProvider | null>(null);
   const [vendorSearch, setVendorSearch] = useState('');
 
@@ -338,6 +470,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [vaultOrgId, setVaultOrgId] = useState(activeOrgId || displayOrgs[0]?.id || '');
   const vaultGuard = useSubmitGuard();
   const isSavingVault = vaultGuard.pending;
+  const [vaultFormError, setVaultFormError] = useState<string | null>(null);
   const [deletingVault, setDeletingVault] = useState<PaymentAccount | null>(null);
   const [vaultSearch, setVaultSearch] = useState('');
 
@@ -350,11 +483,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const [deptCode, setDeptCode] = useState('');
   const [deptDescription, setDeptDescription] = useState('');
   const [deptManager, setDeptManager] = useState('');
-  // Edit: the department's single company. Add: every selected company gets its own department record.
-  const [deptOrgId, setDeptOrgId] = useState(activeOrgId || displayOrgs[0]?.id || '');
+  // Add: every selected company gets its own department record. Edit: the department keeps its own company.
   const [deptOrgIds, setDeptOrgIds] = useState<string[]>([]);
   const deptGuard = useSubmitGuard();
   const isSavingDept = deptGuard.pending;
+  const [deptFormError, setDeptFormError] = useState<string | null>(null);
   const [deletingDept, setDeletingDept] = useState<Department | null>(null);
   const [deptSearch, setDeptSearch] = useState('');
 
@@ -467,6 +600,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   };
 
   const handleStartEditOrg = (org: Organization) => {
+    if (!canManageOrgs) return;
+    setEditOrgError(null);
     setEditingOrg(org);
     setEditOrgName(org.name);
     setEditOrgCode(org.code);
@@ -477,12 +612,18 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   const handleSaveEditOrg = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingOrg || !editOrgName.trim()) return;
+    if (!editingOrg || !canManageOrgs) return;
+    const name = editOrgName.trim();
+    if (!name) {
+      setEditOrgError('يرجى إدخال اسم الشركة.');
+      return;
+    }
+    setEditOrgError(null);
 
     await editOrgGuard.run(async () => {
       try {
         await updateOrganization(editingOrg.id, {
-          name: editOrgName.trim(),
+          name,
           code: editOrgCode.trim().toUpperCase() || editingOrg.code,
           currency: editOrgCurrency,
           budget: Number(editOrgBudget) || 0,
@@ -490,26 +631,30 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         });
 
         setEditingOrg(null);
+        showNotice(`تم حفظ تعديلات الشركة "${name}".`);
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setEditOrgError(err?.message || 'تعذر حفظ تعديلات الشركة');
       }
     });
   };
 
   const handleConfirmDeleteOrg = async () => {
-    if (!deletingOrg) return;
+    if (!deletingOrg || !canManageOrgs) return;
     const target = deletingOrg;
+    setConfirmError(null);
     await rowGuard.run(`delete-org:${target.id}`, async () => {
       setDeleteOrgLoading(true);
       try {
         const res = await deleteOrganization(target.id);
         if (!res.success) {
-          alert(res.message || 'تعذر تنفيذ العملية');
+          setConfirmError(res.message || 'تعذر حذف الشركة');
           return;
         }
         setDeletingOrg(null);
+        // The context archives (never deletes) a company that has financial records: say which happened.
+        showNotice(res.message || `تم حذف الشركة "${target.name}".`);
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setConfirmError(err?.message || 'تعذر حذف الشركة');
       } finally {
         setDeleteOrgLoading(false);
       }
@@ -520,6 +665,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // HANDLERS: USERS
   // =========================================================================
   const handleOpenProvision = () => {
+    if (!canManageUsers) return;
     provisionGuard.rotateKey();
     provisionAttemptEmailRef.current = '';
     setCreatedCredentials(null);
@@ -695,8 +841,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   };
 
   const handleStartEditMember = (mem: OrganizationMember) => {
+    if (!canManageUsers) return;
+    setMemberFormError(null);
     setEditingMember(mem);
-    setEditMemberName(mem.userName);
+    setEditMemberName(mem.userName || '');
     setEditMemberPhone(mem.phone || '');
     setEditMemberOrgId(mem.orgId || displayOrgs[0]?.id || '');
     // Super admin is never a company role (only the platform owner is super admin, via the
@@ -711,27 +859,51 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   const handleSaveEditMember = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingMember || !editMemberName.trim()) return;
+    if (!editingMember || !canManageUsers) return;
+    const name = editMemberName.trim();
+    if (!name) {
+      setMemberFormError('يرجى إدخال اسم الموظف؛ لا يمكن حفظ اسم فارغ.');
+      return;
+    }
+    setMemberFormError(null);
+    const target = editingMember;
+    // Own / platform-owner membership: contact details only, role / company / status are never sent.
+    const locked = isProtectedMembership(target);
 
     await editMemberGuard.run(async () => {
       try {
-        const finalOrgId = editMemberOrgId || editingMember.orgId || displayOrgs[0]?.id || '';
-        // Platform super admin status is managed only in the super admins section (demote only);
-        // editing a membership never grants or removes it.
-        const role: Role = editMemberRole === 'super_admin' ? 'employee' : editMemberRole;
-
-        await updateMember(editingMember.id, {
-          userName: editMemberName.trim(),
+        const updates: Partial<OrganizationMember> = {
+          userName: name,
           phone: editMemberPhone.trim(),
-          orgId: finalOrgId,
-          role,
           department: editMemberDept.trim(),
           jobTitle: editMemberJob.trim(),
-          active: editMemberActive,
-        });
+        };
+        if (!locked) {
+          // Platform super admin status is managed only in the super admins section (demote only);
+          // editing a membership never grants or removes it. Only what changed is sent.
+          const role: Role = editMemberRole === 'super_admin' ? 'employee' : editMemberRole;
+          if (role !== target.role) updates.role = role;
+          if (editMemberActive !== (target.active !== false)) updates.active = editMemberActive;
+          if (canManageOrgs && editMemberOrgId && editMemberOrgId !== target.orgId) updates.orgId = editMemberOrgId;
+        }
+        await updateMember(target.id, updates);
         setEditingMember(null);
+        showNotice(`تم حفظ تعديلات الموظف "${name}".`);
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setMemberFormError(err?.message || 'تعذر حفظ التعديلات');
+      }
+    });
+  };
+
+  /** Status toggle of a row (never on one's own or the platform owner's membership). */
+  const handleToggleMemberStatus = async (mem: OrganizationMember) => {
+    if (!canManageUsers || isProtectedMembership(mem)) return;
+    await rowGuard.run(`toggle-member:${mem.id}`, async () => {
+      try {
+        await toggleMemberStatus(mem.id, mem.active === false);
+        showNotice(mem.active === false ? `تم تفعيل حساب "${mem.userName}".` : `تم تعطيل حساب "${mem.userName}".`);
+      } catch (err: any) {
+        showNotice(err?.message || 'تعذر تغيير حالة الحساب', 'error');
       }
     });
   };
@@ -757,15 +929,23 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     }
   };
 
+  const openDeleteMember = (mem: OrganizationMember) => {
+    if (!canManageUsers || isProtectedMembership(mem)) return;
+    setConfirmError(null);
+    setDeletingMember(mem);
+  };
+
   const handleConfirmDeleteMember = async () => {
-    if (!deletingMember) return;
+    if (!deletingMember || !canManageUsers || isProtectedMembership(deletingMember)) return;
     const target = deletingMember;
+    setConfirmError(null);
     await rowGuard.run(`delete-member:${target.id}`, async () => {
       try {
         await removeMember(target.id);
         setDeletingMember(null);
+        showNotice(`تم حذف "${target.userName}" من ${orgNameOf(target.orgId)}.`);
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setConfirmError(err?.message || 'تعذر حذف الحساب');
       }
     });
   };
@@ -774,7 +954,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // HANDLERS: SERVICES
   // =========================================================================
   const handleOpenAddService = () => {
+    if (!canCreateServices) return;
     serviceGuard.rotateKey();
+    setServiceFormError(null);
     setEditingService(null);
     setServiceName('');
     setServiceCode(`SRV-${Math.floor(100 + Math.random() * 900)}`);
@@ -789,14 +971,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setServiceDefaultAccountId('');
     setServiceCostCenter('');
     setServiceColor('#10b981');
-    const defaultOrg = (selectedOrgFilter && selectedOrgFilter !== 'all')
-      ? selectedOrgFilter
-      : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (displayOrgs[0]?.id || ''));
-    setServiceOrgIds(defaultOrg ? [defaultOrg] : (displayOrgs.length > 0 ? [displayOrgs[0].id] : []));
+    const defaultOrg = defaultFormOrgId();
+    setServiceOrgIds(defaultOrg ? [defaultOrg] : []);
     setIsServiceModalOpen(true);
   };
 
   const handleStartEditService = (srv: ServiceCategory) => {
+    if (!canEditServices || !ownsService(srv)) return;
+    setServiceFormError(null);
     setEditingService(srv);
     setServiceName(srv.name);
     setServiceCode(srv.code);
@@ -811,18 +993,34 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setServiceDefaultPaymentMethod(srv.defaultPaymentMethod || '');
     setServiceDefaultAccountId(srv.defaultAccountId || '');
     setServiceCostCenter(srv.costCenter || '');
-    const initialOrgs = (srv.orgIds && srv.orgIds.length > 0)
-      ? srv.orgIds
-      : (srv.orgId ? [srv.orgId] : (displayOrgs[0]?.id ? [displayOrgs[0].id] : []));
-    setServiceOrgIds(initialOrgs);
+    setServiceOrgIds(srv.orgIds && srv.orgIds.length > 0 ? srv.orgIds : (srv.orgId ? [srv.orgId] : []));
     setIsServiceModalOpen(true);
   };
 
+  // Edit: the owning company always stays linked (the service document belongs to it);
+  // companies this viewer cannot see stay as they are (OrgMultiSelect keeps them).
+  const serviceOwnerLock = useMemo<Record<string, string>>(
+    () => (editingService?.orgId ? { [editingService.orgId]: OWNER_ORG_REASON } : {}),
+    [editingService]
+  );
+  const serviceFormOrgIds = Array.from(new Set([...(editingService?.orgId ? [editingService.orgId] : []), ...serviceOrgIds]));
+  const serviceFormHasOrg = Boolean(editingService) || serviceOrgIds.some(id => creatableOrgs.some(o => o.id === id));
+
   const handleSaveService = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!serviceName.trim() || serviceOrgIds.length === 0) return;
-
-    const primaryOrgId = serviceOrgIds[0] || displayOrgs[0]?.id || '';
+    const trimmedName = serviceName.trim();
+    if (!trimmedName) {
+      setServiceFormError('يرجى إدخال اسم بند الصرف.');
+      return;
+    }
+    // Create: the first selected active company owns the new service; edit: the owner never changes.
+    const orgIds = editingService ? serviceFormOrgIds : serviceOrgIds.filter(id => creatableOrgs.some(o => o.id === id));
+    const primaryOrgId = editingService ? editingService.orgId : orgIds[0];
+    if (!primaryOrgId || orgIds.length === 0) {
+      setServiceFormError('يرجى تحديد شركة واحدة على الأقل لربط البند بها.');
+      return;
+    }
+    setServiceFormError(null);
     const chosenVendor = targetVendors.find(v => v.id === serviceVendorId);
     const vendorName = chosenVendor ? chosenVendor.name : undefined;
 
@@ -831,7 +1029,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         if (editingService) {
           await updateService({
             ...editingService,
-            name: serviceName.trim(),
+            name: trimmedName,
             code: serviceCode.trim().toUpperCase() || editingService.code,
             description: serviceDescription.trim(),
             budgetLimit: Number(serviceBudget) || 0,
@@ -846,11 +1044,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             costCenter: serviceCostCenter.trim() || undefined,
             color: serviceColor,
             orgId: primaryOrgId,
-            orgIds: serviceOrgIds,
+            orgIds,
           });
         } else {
           await addService({
-            name: serviceName.trim(),
+            name: trimmedName,
             code: serviceCode.trim().toUpperCase() || `SRV-${Math.floor(100 + Math.random() * 900)}`,
             description: serviceDescription.trim(),
             budgetLimit: Number(serviceBudget) || 0,
@@ -866,26 +1064,52 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             color: serviceColor,
             iconName: 'Layers',
             orgId: primaryOrgId,
-            orgIds: serviceOrgIds,
+            orgIds,
           }, { idempotencyKey });
         }
         serviceGuard.rotateKey();
         setIsServiceModalOpen(false);
+        showNotice(editingService ? `تم حفظ تعديلات البند "${trimmedName}".` : `تمت إضافة البند "${trimmedName}".`);
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setServiceFormError(err?.message || 'تعذر حفظ البند');
       }
     });
   };
 
+  const openDeleteService = (srv: ServiceCategory) => {
+    if (!canDeleteServices || !ownsService(srv)) return;
+    setConfirmError(null);
+    setDeletingService(srv);
+  };
+
   const handleConfirmDeleteService = async () => {
-    if (!deletingService) return;
+    if (!deletingService || !canDeleteServices) return;
     const target = deletingService;
+    setConfirmError(null);
     await rowGuard.run(`delete-service:${target.id}`, async () => {
       try {
-        await deleteService(target.id);
+        // The context deactivates (never deletes) a service in use and says which happened.
+        const removal = await deleteService(target.id);
         setDeletingService(null);
+        if (removal === 'deactivated') {
+          showNotice(`البند "${target.name}" مرتبط بطلبات صرف أو تسويات عهد أو مصروفات سابقة أو بشركات أخرى، لذلك تم تعطيله بدلاً من حذفه ويبقى في السجلات السابقة.`, 'warning');
+        } else {
+          showNotice(`تم حذف البند "${target.name}" نهائياً.`);
+        }
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setConfirmError(err?.message || 'تعذر حذف البند');
+      }
+    });
+  };
+
+  const handleReactivateService = async (srv: ServiceCategory) => {
+    if (!canEditServices || !canDeleteServices || !ownsService(srv)) return; // reactivation undoes the admin's deactivation
+    await rowGuard.run(`reactivate-service:${srv.id}`, async () => {
+      try {
+        await updateService({ ...srv, active: true });
+        showNotice(`تمت إعادة تفعيل البند "${srv.name}".`);
+      } catch (err: any) {
+        showNotice(err?.message || 'تعذر إعادة تفعيل البند', 'error');
       }
     });
   };
@@ -894,7 +1118,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // HANDLERS: VENDORS
   // =========================================================================
   const handleOpenAddVendor = () => {
+    if (!canCreateProviders) return;
     vendorGuard.rotateKey();
+    setVendorFormError(null);
     setEditingVendor(null);
     setVendorName('');
     setVendorContact('');
@@ -912,13 +1138,19 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   };
 
   // Services offered in the vendor form: those of the vendor's company (edit) or of any selected company (add).
+  // A deactivated service is not offered for new links (a link the vendor already has stays listed).
   const vendorFormOrgIds = editingVendor ? [editingVendor.orgId] : vendorTargetOrgIds;
+  const vendorLinkedServiceIds = editingVendor?.serviceCategoryIds || [];
   const vendorFormServices = isVendorModalOpen
-    ? targetServices.filter(s => vendorFormOrgIds.some(orgId => Boolean(orgId) && isServiceMatchingOrg(s, orgId)))
+    ? targetServices.filter(s =>
+        vendorFormOrgIds.some(orgId => Boolean(orgId) && isServiceMatchingOrg(s, orgId)) &&
+        (!isDeactivated(s) || vendorLinkedServiceIds.includes(s.id))
+      )
     : [];
 
   const handleVendorOrgIdsChange = (orgIds: string[]) => {
     setVendorOrgIds(orgIds);
+    setVendorFormError(null);
     // Keep only the services that still belong to a selected company.
     setVendorServiceIds(prev => prev.filter(id => {
       const srv = targetServices.find(s => s.id === id);
@@ -927,6 +1159,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   };
 
   const handleStartEditVendor = (prov: ServiceProvider) => {
+    if (!canEditProviders) return;
+    setVendorFormError(null);
     setEditingVendor(prov);
     setVendorName(prov.name);
     setVendorContact(prov.contactPerson || '');
@@ -943,13 +1177,17 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   const handleSaveVendor = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!vendorName.trim()) return;
+    if (!vendorName.trim()) {
+      setVendorFormError('يرجى إدخال اسم المورد.');
+      return;
+    }
+    setVendorFormError(null);
 
     if (!editingVendor) {
       // Add: one vendor record per selected company, all in one transaction.
       const orgIds = vendorTargetOrgIds;
       if (orgIds.length === 0) {
-        alert(vendorOrgIds.length > 0
+        setVendorFormError(vendorOrgIds.length > 0
           ? 'يوجد مورد بنفس الاسم في كل الشركات المختارة. اختر شركة أخرى أو غيّر اسم المورد.'
           : 'يرجى تحديد شركة واحدة على الأقل.');
         return;
@@ -977,11 +1215,12 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           setIsVendorModalOpen(false);
           setMultiOrgNotice({ msg: describeMultiOrgResult(`تسجيل المورد "${vendorName.trim()}"`, res.addedOrgIds, res.skipped) || 'تم حفظ المورد.' });
         } catch (err: any) {
-          alert(err?.message || 'تعذر تنفيذ العملية');
+          setVendorFormError(err?.message || 'تعذر حفظ المورد');
         }
       });
       return;
     }
+    if (!canEditProviders) return;
 
     // Edit: stays single-company. The vendor's company never changes (the domain ignores orgId
     // on update), so its services are those of its own company only.
@@ -1004,21 +1243,47 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         });
         vendorGuard.rotateKey();
         setIsVendorModalOpen(false);
+        showNotice(`تم حفظ تعديلات المورد "${vendorName.trim()}".`);
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setVendorFormError(err?.message || 'تعذر حفظ المورد');
       }
     });
   };
 
+  const openDeleteVendor = (prov: ServiceProvider) => {
+    if (!canDeleteProviders) return;
+    setConfirmError(null);
+    setDeletingVendor(prov);
+  };
+
   const handleConfirmDeleteVendor = async () => {
-    if (!deletingVendor) return;
+    if (!deletingVendor || !canDeleteProviders) return;
     const target = deletingVendor;
+    setConfirmError(null);
     await rowGuard.run(`delete-vendor:${target.id}`, async () => {
       try {
-        await deleteProvider(target.id);
+        // The context deactivates (never deletes) a provider in use and says which happened.
+        const removal = await deleteProvider(target.id);
         setDeletingVendor(null);
+        if (removal === 'deactivated') {
+          showNotice(`المورد "${target.name}" مرتبط بطلبات صرف أو تأشيرات أو مدفوعات سابقة، لذلك تم تعطيله بدلاً من حذفه ويبقى في السجلات السابقة.`, 'warning');
+        } else {
+          showNotice(`تم حذف المورد "${target.name}" نهائياً.`);
+        }
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setConfirmError(err?.message || 'تعذر حذف المورد');
+      }
+    });
+  };
+
+  const handleReactivateVendor = async (prov: ServiceProvider) => {
+    if (!canEditProviders || !canDeleteProviders) return; // reactivation undoes the admin's deactivation
+    await rowGuard.run(`reactivate-vendor:${prov.id}`, async () => {
+      try {
+        await updateProvider({ ...prov, active: true });
+        showNotice(`تمت إعادة تفعيل المورد "${prov.name}".`);
+      } catch (err: any) {
+        showNotice(err?.message || 'تعذر إعادة تفعيل المورد', 'error');
       }
     });
   };
@@ -1027,7 +1292,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // HANDLERS: VAULTS & PAYMENT ACCOUNTS
   // =========================================================================
   const handleOpenAddVault = () => {
+    if (!canCreateAccounts) return;
     vaultGuard.rotateKey();
+    setVaultFormError(null);
     setEditingVault(null);
     setVaultName('');
     setVaultType('bank');
@@ -1040,6 +1307,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   };
 
   const handleStartEditVault = (vault: PaymentAccount) => {
+    if (!canEditAccounts) return;
+    setVaultFormError(null);
     setEditingVault(vault);
     setVaultName(vault.name);
     setVaultType(vault.type);
@@ -1053,7 +1322,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   const handleSaveVault = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!vaultName.trim() || !vaultIdentifier.trim()) return;
+    if (!vaultName.trim() || !vaultIdentifier.trim()) {
+      setVaultFormError('يرجى إدخال اسم الحساب ومعرفه.');
+      return;
+    }
+    setVaultFormError(null);
 
     await vaultGuard.run(async (idempotencyKey) => {
       try {
@@ -1085,21 +1358,50 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         }
         vaultGuard.rotateKey();
         setIsVaultModalOpen(false);
+        showNotice(editingVault ? `تم حفظ تعديلات الحساب "${vaultName.trim()}".` : `تمت إضافة الحساب "${vaultName.trim()}".`);
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setVaultFormError(err?.message || 'تعذر حفظ الحساب');
       }
     });
   };
 
+  const openDeleteVault = (vault: PaymentAccount) => {
+    if (!canDeleteAccounts) return;
+    setConfirmError(null);
+    setDeletingVault(vault);
+  };
+
+  // An account with a balance or any history is part of the books: it is deactivated, never
+  // deleted (the domain and the rules refuse the delete as well).
   const handleConfirmDeleteVault = async () => {
-    if (!deletingVault) return;
+    if (!deletingVault || !canDeleteAccounts) return;
     const target = deletingVault;
+    const keepForHistory = paymentAccountHasHistory(target);
+    setConfirmError(null);
     await rowGuard.run(`delete-vault:${target.id}`, async () => {
       try {
-        await deletePaymentAccount(target.id);
+        if (keepForHistory) {
+          await togglePaymentAccountStatus(target.id, false);
+          showNotice(`الحساب "${target.name}" له رصيد أو حركات مالية مسجلة، لذلك تم تعطيله بدلاً من حذفه مع الاحتفاظ بسجله المالي.`, 'warning');
+        } else {
+          await deletePaymentAccount(target.id);
+          showNotice(`تم حذف الحساب "${target.name}" نهائياً.`);
+        }
         setDeletingVault(null);
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setConfirmError(err?.message || 'تعذر حذف الحساب');
+      }
+    });
+  };
+
+  const handleToggleVault = async (vault: PaymentAccount) => {
+    if (!canEditAccounts) return;
+    await rowGuard.run(`toggle-vault:${vault.id}`, async () => {
+      try {
+        await togglePaymentAccountStatus(vault.id, vault.active === false);
+        showNotice(vault.active === false ? `تم تفعيل الحساب "${vault.name}".` : `تم تعطيل الحساب "${vault.name}".`);
+      } catch (err: any) {
+        showNotice(err?.message || 'تعذر تغيير حالة الحساب', 'error');
       }
     });
   };
@@ -1108,37 +1410,43 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   // HANDLERS: DEPARTMENTS
   // =========================================================================
   const handleOpenAddDept = () => {
+    if (!canCreateDepartments) return;
     deptGuard.rotateKey();
+    setDeptFormError(null);
     setEditingDept(null);
     setDeptName('');
     setDeptCode(`DEP-${Math.floor(10 + Math.random() * 90)}`);
     setDeptDescription('');
     setDeptManager('');
     const defaultOrg = defaultFormOrgId();
-    setDeptOrgId(defaultOrg);
     setDeptOrgIds(defaultOrg ? [defaultOrg] : []);
     setIsDeptModalOpen(true);
   };
 
   const handleStartEditDept = (dept: Department) => {
+    if (!canEditDepartments) return;
+    setDeptFormError(null);
     setEditingDept(dept);
     setDeptName(dept.name);
     setDeptCode(dept.code || '');
     setDeptDescription(dept.description || '');
     setDeptManager(dept.managerName || '');
-    setDeptOrgId(dept.orgId);
     setIsDeptModalOpen(true);
   };
 
   const handleSaveDept = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!deptName.trim()) return;
+    if (!deptName.trim()) {
+      setDeptFormError('يرجى إدخال اسم القسم.');
+      return;
+    }
+    setDeptFormError(null);
 
     if (!editingDept) {
       // Add: one department record per selected company, all in one transaction.
       const orgIds = deptTargetOrgIds;
       if (orgIds.length === 0) {
-        alert(deptOrgIds.length > 0
+        setDeptFormError(deptOrgIds.length > 0
           ? 'يوجد قسم بنفس الاسم في كل الشركات المختارة. اختر شركة أخرى أو غيّر اسم القسم.'
           : 'يرجى تحديد شركة واحدة على الأقل.');
         return;
@@ -1155,11 +1463,12 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           setIsDeptModalOpen(false);
           setMultiOrgNotice({ msg: describeMultiOrgResult(`إضافة القسم "${deptName.trim()}"`, res.addedOrgIds, res.skipped) || 'تم حفظ القسم.' });
         } catch (err: any) {
-          alert(err?.message || 'تعذر تنفيذ العملية');
+          setDeptFormError(err?.message || 'تعذر حفظ القسم');
         }
       });
       return;
     }
+    if (!canEditDepartments) return;
 
     // Edit: stays single-company.
     await deptGuard.run(async () => {
@@ -1169,25 +1478,34 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           code: deptCode.trim().toUpperCase() || editingDept.code,
           description: deptDescription.trim(),
           managerName: deptManager.trim(),
-          orgId: deptOrgId || editingDept.orgId,
+          // A department never moves to another company (the rules refuse an orgId change).
         });
         deptGuard.rotateKey();
         setIsDeptModalOpen(false);
+        showNotice(`تم حفظ تعديلات القسم "${deptName.trim()}".`);
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setDeptFormError(err?.message || 'تعذر حفظ القسم');
       }
     });
   };
 
+  const openDeleteDept = (dept: Department) => {
+    if (!canDeleteDepartments) return;
+    setConfirmError(null);
+    setDeletingDept(dept);
+  };
+
   const handleConfirmDeleteDept = async () => {
-    if (!deletingDept) return;
+    if (!deletingDept || !canDeleteDepartments) return;
     const target = deletingDept;
+    setConfirmError(null);
     await rowGuard.run(`delete-dept:${target.id}`, async () => {
       try {
         await deleteDepartment(target.id);
         setDeletingDept(null);
+        showNotice(`تم حذف القسم "${target.name}".`);
       } catch (err: any) {
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setConfirmError(err?.message || 'تعذر حذف القسم');
       }
     });
   };
@@ -1204,8 +1522,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
   const handleRemoveSuperAdmin = async (email: string) => {
     const cleanEmail = normalizeEmail(email);
-    if (isPlatformOwner(cleanEmail)) {
-      alert('لا يمكن سحب صلاحيات مالك المنصة (المشرف العام الوحيد).');
+    if (isPlatformOwner(cleanEmail) || cleanEmail === myEmail) {
+      setSuperAdminActionFeedback({ msg: 'لا يمكن سحب صلاحيات مالك المنصة (المشرف العام الوحيد) ولا صلاحيات حسابك بنفسك.', isError: true });
       return;
     }
 
@@ -1244,8 +1562,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     e.preventDefault();
     if (!editingSuperAdminEmail) return;
 
-    if (isPlatformOwner(editingSuperAdminEmail)) {
-      alert('لا يمكن تغيير رتبة مالك المنصة (المشرف العام الوحيد).');
+    if (isPlatformOwner(editingSuperAdminEmail) || normalizeEmail(editingSuperAdminEmail) === myEmail) {
+      setSuperAdminActionFeedback({ msg: 'لا يمكن تغيير رتبة مالك المنصة (المشرف العام الوحيد) ولا رتبة حسابك بنفسك.', isError: true });
       return;
     }
     // This only DEMOTES a leftover super admin to a company role; it never grants super admin.
@@ -1255,7 +1573,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       try {
         setSuperAdminActionLoading(true);
         await updateSuperAdminRole(editingSuperAdminEmail, newRole, targetSuperAdminOrgId);
-        setSuperAdminActionFeedback({ msg: `تم سحب صلاحية السوبر أدمن عن (${editingSuperAdminEmail}) وتعيينه بدور (${newRole}) في ${orgNameOf(targetSuperAdminOrgId)}.` });
+        const roleName = newRole === 'org_admin' ? 'مدير شركة' : newRole === 'finance' ? 'مسؤول الصرف والخزينة' : newRole === 'data_entry' ? 'مدخل بيانات' : 'موظف';
+        setSuperAdminActionFeedback({ msg: `تم سحب صلاحية السوبر أدمن عن (${editingSuperAdminEmail}) وتعيينه بدور (${roleName}) في ${orgNameOf(targetSuperAdminOrgId)}.` });
         setEditingSuperAdminEmail(null);
       } catch (err: any) {
         setSuperAdminActionFeedback({ msg: err?.message || 'حدث خطأ أثناء تعديل الصلاحية.', isError: true });
@@ -1422,9 +1741,23 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     </div>
   );
 
+  // No section this role can reach (TAB_ACCESS normally keeps it away from this page).
+  if (!shownSection) {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center shadow-xs">
+        <Lock className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+        <h2 className="font-bold text-slate-800 text-sm">هذه الصفحة متاحة لإدارة الشركة فقط</h2>
+        <p className="text-xs text-slate-500 mt-1">لا توجد أقسام إدارية متاحة لدورك الحالي.</p>
+      </div>
+    );
+  }
+
+  // Data entry (and any role without the company-wide sections) sees only the directory it can add to.
+  const isDirectoryOnly = !sectionAllowed.companies && !sectionAllowed.users;
+
   return (
     <div className="space-y-6 pb-16 animate-in fade-in duration-200">
-      
+
       {/* =========================================================================
           TOP COMMAND HEADER
           ========================================================================= */}
@@ -1436,13 +1769,19 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-bold text-slate-900">مركز الإدارة والتحكم الشامل</h1>
-                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">
-                  Enterprise Control Hub
-                </span>
+                <h1 className="text-xl font-bold text-slate-900">
+                  {isDirectoryOnly ? 'الموردون والأقسام' : 'مركز الإدارة والتحكم الشامل'}
+                </h1>
+                {!isDirectoryOnly && (
+                  <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">
+                    لوحة الإدارة
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                إدارة متكاملة للشركات، الموظفين، بنود ومراكز الصرف، الموردين، الخزائن، وسجل التدقيق الإداري
+                {isDirectoryOnly
+                  ? `تسجيل الموردين ومقدمي الخدمات والأقسام الإدارية لشركة ${activeOrg?.name || 'الشركة'}`
+                  : 'إدارة متكاملة للشركات، الموظفين، بنود ومراكز الصرف، الموردين، الخزائن، وسجل التدقيق الإداري'}
               </p>
             </div>
           </div>
@@ -1461,7 +1800,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </button>
           )}
 
-          {activeSection === 'companies' && canManageOrgs && (
+          {shownSection === 'companies' && canManageOrgs && (
             <button
               type="button"
               onClick={() => {
@@ -1475,7 +1814,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </button>
           )}
 
-          {activeSection === 'users' && (
+          {shownSection === 'users' && canManageUsers && (
             <button
               type="button"
               onClick={handleOpenProvision}
@@ -1486,7 +1825,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </button>
           )}
 
-          {activeSection === 'services' && (
+          {shownSection === 'services' && canCreateServices && (
             <button
               type="button"
               onClick={handleOpenAddService}
@@ -1497,7 +1836,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </button>
           )}
 
-          {activeSection === 'vendors' && (
+          {shownSection === 'vendors' && canCreateProviders && (
             <button
               type="button"
               onClick={handleOpenAddVendor}
@@ -1508,7 +1847,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </button>
           )}
 
-          {activeSection === 'vaults' && (
+          {shownSection === 'vaults' && canCreateAccounts && (
             <button
               type="button"
               onClick={handleOpenAddVault}
@@ -1519,7 +1858,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </button>
           )}
 
-          {activeSection === 'departments' && (
+          {shownSection === 'departments' && canCreateDepartments && (
             <button
               type="button"
               onClick={handleOpenAddDept}
@@ -1532,13 +1871,26 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         </div>
       </div>
 
-      {/* Result of the last multi-company add (added / skipped companies) */}
+      {/* Result of the last action (multi-company add, delete / deactivate, row action errors) */}
       {multiOrgNotice && (
-        <div className={`p-3 rounded-2xl text-xs font-semibold flex items-start justify-between gap-2 ${
-          multiOrgNotice.isError ? 'bg-rose-50 border border-rose-200 text-rose-800' : 'bg-emerald-50 border border-emerald-200 text-emerald-900'
-        }`}>
+        <div
+          role="status"
+          className={`p-3 rounded-2xl text-xs font-semibold flex items-start justify-between gap-2 ${
+            multiOrgNotice.isError
+              ? 'bg-rose-50 border border-rose-200 text-rose-800'
+              : multiOrgNotice.isWarning
+              ? 'bg-amber-50 border border-amber-200 text-amber-900'
+              : 'bg-emerald-50 border border-emerald-200 text-emerald-900'
+          }`}
+        >
           <span className="flex items-start gap-2">
-            {multiOrgNotice.isError ? <AlertCircle className="h-4 w-4 shrink-0" /> : <CheckCircle2 className="h-4 w-4 shrink-0" />}
+            {multiOrgNotice.isError ? (
+              <AlertCircle className="h-4 w-4 shrink-0" />
+            ) : multiOrgNotice.isWarning ? (
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 shrink-0" />
+            )}
             <span>{multiOrgNotice.msg}</span>
           </span>
           <button type="button" onClick={() => setMultiOrgNotice(null)} className="p-1 text-slate-400 hover:text-slate-600 shrink-0" title="إغلاق">
@@ -1548,120 +1900,42 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       )}
 
       {/* =========================================================================
-          ADMIN MODULES TAB SWITCHER
+          ADMIN MODULES TAB SWITCHER (only the sections this role can reach)
           ========================================================================= */}
       <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-thin border-b border-slate-200">
-        <button
-          type="button"
-          onClick={() => setActiveSection('companies')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-            activeSection === 'companies'
-              ? 'bg-emerald-600 text-white shadow-md shadow-emerald-500/20'
-              : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-          }`}
-        >
-          <Building2 className="h-3.5 w-3.5" />
-          <span>🏢 الشركات والمؤسسات ({displayOrgs.length})</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveSection('users')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-            activeSection === 'users'
-              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/20'
-              : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-          }`}
-        >
-          <Users className="h-3.5 w-3.5" />
-          <span>👥 المستخدمين والموظفين ({tabUsersCount})</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveSection('services')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-            activeSection === 'services'
-              ? 'bg-teal-600 text-white shadow-md shadow-teal-500/20'
-              : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-          }`}
-        >
-          <Layers className="h-3.5 w-3.5" />
-          <span>📂 بنود ومراكز الصرف ({tabServicesCount})</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveSection('vendors')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-            activeSection === 'vendors'
-              ? 'bg-sky-600 text-white shadow-md shadow-sky-500/20'
-              : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-          }`}
-        >
-          <Truck className="h-3.5 w-3.5" />
-          <span>🚚 الموردين ومقدمي الخدمات ({tabVendorsCount})</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveSection('vaults')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-            activeSection === 'vaults'
-              ? 'bg-amber-600 text-white shadow-md shadow-amber-500/20'
-              : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-          }`}
-        >
-          <Wallet className="h-3.5 w-3.5" />
-          <span>💳 الخزائن وحسابات الدفع ({tabVaultsCount})</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveSection('departments')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-            activeSection === 'departments'
-              ? 'bg-purple-600 text-white shadow-md shadow-purple-500/20'
-              : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-          }`}
-        >
-          <FolderTree className="h-3.5 w-3.5" />
-          <span>🏷️ الأقسام والهيكل ({tabDepartmentsCount})</span>
-        </button>
-
-        {isSuperAdmin && (
-          <button
-            type="button"
-            onClick={() => setActiveSection('super_admins')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-              activeSection === 'super_admins'
-                ? 'bg-rose-600 text-white shadow-md shadow-rose-500/20'
-                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-            }`}
-          >
-            <ShieldCheck className="h-3.5 w-3.5" />
-            <span>🛡️ المشرفين والصلاحيات ({superAdminEmails.length})</span>
-          </button>
-        )}
-
-        <button
-          type="button"
-          onClick={() => setActiveSection('audit_log')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-            activeSection === 'audit_log'
-              ? 'bg-slate-900 text-white shadow-md shadow-slate-900/20'
-              : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-          }`}
-        >
-          <History className="h-3.5 w-3.5" />
-          <span>📜 سجل العمليات والتعديلات ({filteredAuditLogs.length})</span>
-        </button>
+        {([
+          { id: 'companies', label: `🏢 الشركات والمؤسسات (${displayOrgs.length})`, icon: Building2, active: 'bg-emerald-600 text-white shadow-md shadow-emerald-500/20' },
+          { id: 'users', label: `👥 المستخدمون والموظفون (${tabUsersCount})`, icon: Users, active: 'bg-indigo-600 text-white shadow-md shadow-indigo-500/20' },
+          { id: 'services', label: `📂 بنود ومراكز الصرف (${tabServicesCount})`, icon: Layers, active: 'bg-teal-600 text-white shadow-md shadow-teal-500/20' },
+          { id: 'vendors', label: `🚚 الموردون ومقدمو الخدمات (${tabVendorsCount})`, icon: Truck, active: 'bg-sky-600 text-white shadow-md shadow-sky-500/20' },
+          { id: 'vaults', label: `💳 الخزائن وحسابات الدفع (${tabVaultsCount})`, icon: Wallet, active: 'bg-amber-600 text-white shadow-md shadow-amber-500/20' },
+          { id: 'departments', label: `🏷️ الأقسام والهيكل (${tabDepartmentsCount})`, icon: FolderTree, active: 'bg-purple-600 text-white shadow-md shadow-purple-500/20' },
+          { id: 'super_admins', label: `🛡️ المشرفون والصلاحيات (${superAdminEmails.length})`, icon: ShieldCheck, active: 'bg-rose-600 text-white shadow-md shadow-rose-500/20' },
+          { id: 'audit_log', label: `📜 سجل العمليات والتعديلات (${filteredAuditLogs.length})`, icon: History, active: 'bg-slate-900 text-white shadow-md shadow-slate-900/20' },
+        ] as Array<{ id: AdminSection; label: string; icon: typeof Building2; active: string }>)
+          .filter(tab => sectionAllowed[tab.id])
+          .map(tab => {
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveSection(tab.id)}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+                  shownSection === tab.id ? tab.active : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
       </div>
 
       {/* =========================================================================
           SECTION 1: COMPANIES MANAGEMENT
           ========================================================================= */}
-      {activeSection === 'companies' && (
+      {shownSection === 'companies' && (
         <div className="space-y-5">
           {/* Search Bar */}
           {canManageOrgs && displayOrgs.length > 2 && (
@@ -1675,7 +1949,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 className="w-full text-xs bg-transparent outline-hidden text-slate-800"
               />
               {orgSearch && (
-                <button onClick={() => setOrgSearch('')} className="text-slate-400 hover:text-slate-600">
+                <button type="button" onClick={() => setOrgSearch('')} className="text-slate-400 hover:text-slate-600" title="مسح البحث">
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
@@ -1685,27 +1959,34 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           {/* Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             {filteredOrgs.map((org) => {
+              // Company-wide figures only for roles that read the whole company's requests and
+              // settlements (a narrower role would see a partial, wrong total).
               const targetReqs = isSuperAdmin ? allRequests : requests;
               const targetStls = isSuperAdmin ? allCustodySettlements : custodySettlements;
-              const orgReqsDisbursed = targetReqs
-                .filter(r => r.orgId === org.id && r.status === 'disbursed')
-                .reduce((sum, r) => sum + r.amount, 0);
-              const orgStlsDisbursed = targetStls
-                .filter(s => s.orgId === org.id)
-                .reduce((sum, s) => sum + Number(s.amount || 0), 0);
+              const orgReqsDisbursed = canSeeCompanyFigures
+                ? targetReqs
+                    .filter(r => r.orgId === org.id && r.status === 'disbursed')
+                    .reduce((sum, r) => sum + Number(r.amount || 0), 0)
+                : 0;
+              const orgStlsDisbursed = canSeeCompanyFigures
+                ? targetStls
+                    .filter(s => s.orgId === org.id && s.status !== 'rejected')
+                    .reduce((sum, s) => sum + Number(s.amount || 0), 0)
+                : 0;
               const orgTotalDisbursed = orgReqsDisbursed + orgStlsDisbursed;
 
               const isCurrentActive = activeOrgId === org.id;
-              const remainingBudget = Math.max(0, org.budget - orgTotalDisbursed);
-              const percentageSpent = org.budget > 0 ? Math.min(100, Math.round((orgTotalDisbursed / org.budget) * 100)) : 0;
+              const orgBudget = Number(org.budget || 0);
+              const remainingBudget = Math.max(0, orgBudget - orgTotalDisbursed);
+              const percentageSpent = orgBudget > 0 ? Math.min(100, Math.round((orgTotalDisbursed / orgBudget) * 100)) : 0;
               const orgMembersCount = (isSuperAdmin ? allMembers : members).filter(m => m.orgId === org.id).length;
 
               return (
-                <div 
-                  key={org.id} 
+                <div
+                  key={org.id}
                   className={`bg-white rounded-2xl border p-5 shadow-xs transition relative overflow-hidden ${
-                    isCurrentActive 
-                      ? 'border-emerald-500 ring-2 ring-emerald-500/20' 
+                    isCurrentActive
+                      ? 'border-emerald-500 ring-2 ring-emerald-500/20'
                       : 'border-slate-200 hover:border-slate-300'
                   }`}
                 >
@@ -1715,11 +1996,16 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                         {org.code.slice(0, 3)}
                       </div>
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <h3 className="font-bold text-slate-900 text-sm">{org.name}</h3>
                           {isCurrentActive && (
                             <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">
                               الشركة النشطة
+                            </span>
+                          )}
+                          {(org.archived || org.status === 'archived') && (
+                            <span className="text-[10px] bg-slate-100 text-slate-600 font-bold px-2 py-0.5 rounded-full border border-slate-200">
+                              مؤرشفة
                             </span>
                           )}
                         </div>
@@ -1740,7 +2026,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                           </button>
                           <button
                             type="button"
-                            onClick={() => setDeletingOrg(org)}
+                            onClick={() => { setConfirmError(null); setDeletingOrg(org); }}
                             className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
                             title="حذف الشركة"
                           >
@@ -1764,50 +2050,83 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                     {org.description || 'شركة ومؤسسة معتمدة في المنصة المصرفية.'}
                   </p>
 
-                  <div className="mt-4 pt-3 border-t border-slate-100">
-                    <div className="flex items-center justify-between text-xs mb-1.5">
-                      <span className="text-slate-500 text-[11px]">نسبة استهلاك الميزانية:</span>
-                      <span className="font-bold font-mono text-slate-800">{percentageSpent}%</span>
-                    </div>
-                    <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
-                      <div 
-                        className={`h-full transition-all duration-300 ${
-                          percentageSpent > 90 ? 'bg-rose-500' : percentageSpent > 70 ? 'bg-amber-500' : 'bg-emerald-500'
-                        }`}
-                        style={{ width: `${percentageSpent}%` }}
-                      ></div>
-                    </div>
-                  </div>
+                  {canSeeCompanyFigures ? (
+                    <>
+                      <div className="mt-4 pt-3 border-t border-slate-100">
+                        <div className="flex items-center justify-between text-xs mb-1.5">
+                          <span className="text-slate-500 text-[11px]">نسبة استهلاك الميزانية:</span>
+                          <span className="font-bold font-mono text-slate-800">{percentageSpent}%</span>
+                        </div>
+                        <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-300 ${
+                              percentageSpent > 90 ? 'bg-rose-500' : percentageSpent > 70 ? 'bg-amber-500' : 'bg-emerald-500'
+                            }`}
+                            style={{ width: `${percentageSpent}%` }}
+                          ></div>
+                        </div>
+                      </div>
 
-                  <div className="grid grid-cols-4 gap-2 mt-3 pt-3 border-t border-slate-100 text-xs">
-                    <div className="bg-slate-50 p-2 rounded-xl text-center">
-                      <span className="text-slate-400 block text-[10px]">الميزانية</span>
-                      <span className="font-bold text-slate-800 text-[11px] truncate block">
-                        {org.budget.toLocaleString()} {org.currency}
-                      </span>
+                      <div className={`grid ${canViewUsers ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'} gap-2 mt-3 pt-3 border-t border-slate-100 text-xs`}>
+                        <div className="bg-slate-50 p-2 rounded-xl text-center">
+                          <span className="text-slate-400 block text-[10px]">الميزانية</span>
+                          <span className="font-bold text-slate-800 text-[11px] truncate block">
+                            {fmtMoney(orgBudget)} {org.currency}
+                          </span>
+                        </div>
+                        <div className="bg-slate-50 p-2 rounded-xl text-center">
+                          <span className="text-slate-400 block text-[10px]">المنصرف</span>
+                          <span className="font-bold text-emerald-700 text-[11px] truncate block">
+                            {fmtMoney(orgTotalDisbursed)} {org.currency}
+                          </span>
+                        </div>
+                        <div className="bg-slate-50 p-2 rounded-xl text-center">
+                          <span className="text-slate-400 block text-[10px]">المتبقي</span>
+                          <span className="font-bold text-slate-700 text-[11px] truncate block">
+                            {fmtMoney(remainingBudget)} {org.currency}
+                          </span>
+                        </div>
+                        {canViewUsers && (
+                          <div className="bg-slate-50 p-2 rounded-xl text-center">
+                            <span className="text-slate-400 block text-[10px]">فريق العمل</span>
+                            <span className="font-bold text-indigo-700 text-[11px]">
+                              {orgMembersCount} عضو
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
+                      الميزانية المعتمدة: <strong className="text-slate-800 font-mono">{fmtMoney(orgBudget)} {org.currency}</strong>
                     </div>
-                    <div className="bg-slate-50 p-2 rounded-xl text-center">
-                      <span className="text-slate-400 block text-[10px]">المنصرف</span>
-                      <span className="font-bold text-emerald-700 text-[11px] truncate block">
-                        {orgTotalDisbursed.toLocaleString()} {org.currency}
-                      </span>
-                    </div>
-                    <div className="bg-slate-50 p-2 rounded-xl text-center">
-                      <span className="text-slate-400 block text-[10px]">المتبقي</span>
-                      <span className="font-bold text-slate-700 text-[11px] truncate block">
-                        {remainingBudget.toLocaleString()} {org.currency}
-                      </span>
-                    </div>
-                    <div className="bg-slate-50 p-2 rounded-xl text-center">
-                      <span className="text-slate-400 block text-[10px]">فريق العمل</span>
-                      <span className="font-bold text-indigo-700 text-[11px]">
-                        {orgMembersCount} عضو
-                      </span>
-                    </div>
-                  </div>
+                  )}
                 </div>
               );
             })}
+            {filteredOrgs.length === 0 && (
+              <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+                {orgSearch.trim() ? (
+                  <>
+                    <Search className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+                    <h3 className="font-bold text-slate-800 text-sm">لا توجد نتائج مطابقة للبحث "{orgSearch.trim()}"</h3>
+                    <button
+                      type="button"
+                      onClick={() => setOrgSearch('')}
+                      className="mt-3 inline-flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+                    >
+                      <X className="h-4 w-4" />
+                      <span>مسح البحث</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <Building2 className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+                    <h3 className="font-bold text-slate-800 text-sm">لا توجد شركات مسجلة بعد</h3>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1815,7 +2134,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {/* =========================================================================
           SECTION 2: USERS & PERSONNEL
           ========================================================================= */}
-      {activeSection === 'users' && (
+      {shownSection === 'users' && (
         <div className="space-y-5">
           {/* Counters */}
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
@@ -1838,7 +2157,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
               </span>
             </div>
             <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
-              <span className="text-xs text-slate-500 block">الموظفين</span>
+              <span className="text-xs text-slate-500 block">الموظفون</span>
               <span className="text-2xl font-bold font-mono text-slate-700 mt-1 block">
                 {employeesCount}
               </span>
@@ -1929,20 +2248,36 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
+                  {filteredMembers.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="py-10 text-center text-slate-400">
+                        <Users className="h-9 w-9 mx-auto text-slate-300 mb-2" />
+                        <p className="font-semibold text-sm">
+                          {targetMembers.length === 0
+                            ? 'لا يوجد مستخدمون مسجلون بعد'
+                            : userSearch.trim()
+                            ? `لا توجد نتائج مطابقة للبحث "${userSearch.trim()}"`
+                            : 'لا يوجد مستخدمون يطابقون الفلاتر المختارة'}
+                        </p>
+                      </td>
+                    </tr>
+                  )}
                   {filteredMembers.map((mem) => {
                     const orgObj = displayOrgs.find(o => o.id === mem.orgId);
                     const isResetting = resettingPasswordEmail === mem.userEmail;
                     const isThisSuperAdmin = superAdminEmails.some(e => e.toLowerCase().trim() === mem.userEmail?.toLowerCase().trim());
+                    // Own / platform-owner membership: no delete, suspend or role change (policy).
+                    const isProtectedRow = isProtectedMembership(mem);
 
                     return (
                       <tr key={mem.id} className="hover:bg-slate-50/60 transition">
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-2.5">
                             <div className="h-8 w-8 rounded-full bg-indigo-50 text-indigo-700 font-bold flex items-center justify-center text-xs shrink-0">
-                              {mem.userName.slice(0, 1)}
+                              {(mem.userName || mem.userEmail || 'م').slice(0, 1)}
                             </div>
                             <div>
-                              <span className="font-bold text-slate-900 block">{mem.userName}</span>
+                              <span className="font-bold text-slate-900 block">{mem.userName || '—'}</span>
                               <span className="text-[11px] text-slate-400 font-mono block">{mem.userEmail}</span>
                               {mem.phone && <span className="text-[10px] text-slate-500 font-mono block">{mem.phone}</span>}
                             </div>
@@ -1960,7 +2295,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                               <span className="text-[11px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200 w-fit">
                                 غير محدد ⚠️
                               </span>
-                              {canManageOrgs && displayOrgs.length > 0 && (
+                              {canManageOrgs && canManageUsers && !isProtectedRow && displayOrgs.length > 0 && (
                                 <select
                                   value=""
                                   onChange={async (e) => {
@@ -1969,8 +2304,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                                       await rowGuard.run(`assign-org:${mem.id}`, async () => {
                                         try {
                                           await updateMember(mem.id, { orgId: newOrgId });
+                                          showNotice(`تم تعيين "${mem.userName || mem.userEmail}" في ${orgNameOf(newOrgId)}.`);
                                         } catch (err: any) {
-                                          alert(err?.message || 'تعذر تنفيذ العملية');
+                                          showNotice(err?.message || 'تعذر تعيين الشركة', 'error');
                                         }
                                       });
                                     }
@@ -1996,7 +2332,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                           {isThisSuperAdmin ? (
                             <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300">
                               <Crown className="h-3 w-3 text-amber-600" />
-                              مشرف عام (Super Admin)
+                              {isPlatformOwner(mem.userEmail) ? 'مشرف عام (مالك المنصة)' : 'مشرف عام'}
                             </span>
                           ) : (
                             <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
@@ -2014,44 +2350,47 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                         </td>
 
                         <td className="py-3 px-4">
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await rowGuard.run(`toggle-member:${mem.id}`, async () => {
-                                try {
-                                  await toggleMemberStatus(mem.id, mem.active === false);
-                                } catch (err: any) {
-                                  alert(err?.message || 'تعذر تنفيذ العملية');
-                                }
-                              });
-                            }}
-                            disabled={rowGuard.isPending(`toggle-member:${mem.id}`)}
-                            className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full cursor-pointer transition ${
-                              mem.active !== false 
-                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100' 
-                                : 'bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100'
-                            }`}
-                            title="اضغط للتبديل بين التفعيل والتعطيل"
-                          >
-                            {mem.active !== false ? (
-                              <>
+                          {canManageUsers && !isProtectedRow ? (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleMemberStatus(mem)}
+                              disabled={rowGuard.isPending(`toggle-member:${mem.id}`)}
+                              className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full cursor-pointer transition disabled:opacity-60 ${
+                                mem.active !== false
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100'
+                                  : 'bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100'
+                              }`}
+                              title="اضغط للتبديل بين التفعيل والتعطيل"
+                            >
+                              {rowGuard.isPending(`toggle-member:${mem.id}`) ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : mem.active !== false ? (
                                 <CheckCircle2 className="h-3 w-3" />
-                                <span>نشط</span>
-                              </>
-                            ) : (
-                              <>
+                              ) : (
                                 <AlertTriangle className="h-3 w-3" />
-                                <span>معطل</span>
-                              </>
-                            )}
-                          </button>
+                              )}
+                              <span>{mem.active !== false ? 'نشط' : 'معطل'}</span>
+                            </button>
+                          ) : (
+                            <span
+                              title={isProtectedRow ? protectedReason(mem) : undefined}
+                              className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                                mem.active !== false
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-rose-50 text-rose-700 border border-rose-200'
+                              }`}
+                            >
+                              {isProtectedRow ? <Lock className="h-3 w-3" /> : mem.active !== false ? <CheckCircle2 className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
+                              <span>{mem.active !== false ? 'نشط' : 'معطل'}</span>
+                            </span>
+                          )}
                         </td>
 
                         <td className="py-3 px-4">
                           <div className="flex items-center justify-center gap-1.5">
-                            {/* Owner-only super admin: no promote button. A leftover super admin can only be demoted; the owner is protected. */}
+                            {/* Owner-only super admin: no promote button. A leftover super admin can only be demoted; the owner (and oneself) is protected. */}
                             {isSuperAdmin && isThisSuperAdmin && (
-                              isPlatformOwner(mem.userEmail) ? (
+                              isPlatformOwner(mem.userEmail) || isOwnMembership(mem) ? (
                                 <span
                                   className="p-1.5 text-amber-600 bg-amber-50 rounded-lg border border-amber-200"
                                   title="مالك المنصة — المشرف العام الوحيد (محمي)"
@@ -2063,54 +2402,66 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                                   type="button"
                                   onClick={async () => {
                                     const email = normalizeEmail(mem.userEmail);
-                                    if (window.confirm(`هل أنت متأكد من سحب صلاحيات السوبر أدمن عن ${mem.userName} (${email})؟`)) {
+                                    if (window.confirm(`هل أنت متأكد من سحب صلاحيات المشرف العام عن ${mem.userName} (${email})؟`)) {
                                       await rowGuard.run(`super-admin:${email}`, async () => {
                                         try {
                                           await removeSuperAdminEmail(email);
                                           // Only a stale 'super_admin' company role is reset; a real company role is kept.
                                           if (mem.role === 'super_admin') await updateMember(mem.id, { role: 'employee' });
+                                          showNotice(`تم سحب صلاحيات المشرف العام عن ${email}.`);
                                         } catch (err: any) {
-                                          alert(err?.message || 'تعذر تنفيذ العملية');
+                                          showNotice(err?.message || 'تعذر سحب الصلاحية', 'error');
                                         }
                                       });
                                     }
                                   }}
                                   disabled={rowGuard.isPending(`super-admin:${normalizeEmail(mem.userEmail)}`)}
                                   className="p-1.5 text-amber-600 bg-amber-50 hover:bg-rose-50 hover:text-rose-600 rounded-lg transition cursor-pointer border border-amber-200 disabled:opacity-50"
-                                  title="سحب صلاحيات السوبر أدمن"
+                                  title="سحب صلاحيات المشرف العام"
                                 >
                                   <Crown className="h-3.5 w-3.5 fill-amber-500" />
                                 </button>
                               )
                             )}
 
-                            <button
-                              type="button"
-                              onClick={() => handleStartEditMember(mem)}
-                              className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
-                              title="تعديل وإعادة تسمية الموظف"
-                            >
-                              <Edit className="h-3.5 w-3.5" />
-                            </button>
+                            {canManageUsers && (
+                              <button
+                                type="button"
+                                onClick={() => handleStartEditMember(mem)}
+                                className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                                title={isProtectedRow ? 'تعديل الاسم وبيانات التواصل فقط' : 'تعديل وإعادة تسمية الموظف'}
+                              >
+                                <Edit className="h-3.5 w-3.5" />
+                              </button>
+                            )}
 
-                            <button
-                              type="button"
-                              onClick={() => handleTriggerPasswordReset(mem.userEmail)}
-                              disabled={isResetting}
-                              className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition cursor-pointer disabled:opacity-50"
-                              title="إرسال رابط استعادة كلمة المرور"
-                            >
-                              {isResetting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
-                            </button>
+                            {canManageUsers && (
+                              <button
+                                type="button"
+                                onClick={() => handleTriggerPasswordReset(mem.userEmail)}
+                                disabled={isResetting || !mem.userEmail}
+                                className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition cursor-pointer disabled:opacity-50"
+                                title="إرسال رابط استعادة كلمة المرور"
+                              >
+                                {isResetting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
+                              </button>
+                            )}
 
-                            <button
-                              type="button"
-                              onClick={() => setDeletingMember(mem)}
-                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                              title="حذف المستخدم نهائياً"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
+                            {canManageUsers && !isProtectedRow && (
+                              <button
+                                type="button"
+                                onClick={() => openDeleteMember(mem)}
+                                className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                                title="حذف المستخدم نهائياً"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                            {canManageUsers && isProtectedRow && (
+                              <span className="p-1.5 text-slate-300" title={protectedReason(mem)}>
+                                <Lock className="h-3.5 w-3.5" />
+                              </span>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -2126,7 +2477,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {/* =========================================================================
           SECTION 3: SERVICES & EXPENSE CATEGORIES
           ========================================================================= */}
-      {activeSection === 'services' && (
+      {shownSection === 'services' && (
         <div className="space-y-5">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md flex-1">
@@ -2139,7 +2490,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 className="w-full text-xs bg-transparent outline-hidden text-slate-800"
               />
               {serviceSearch && (
-                <button onClick={() => setServiceSearch('')} className="text-slate-400 hover:text-slate-600">
+                <button type="button" onClick={() => setServiceSearch('')} className="text-slate-400 hover:text-slate-600" title="مسح البحث">
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
@@ -2167,6 +2518,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
               const progressWidth = Math.min(100, Math.max(0, percent));
               const parentOrg = displayOrgs.find(o => o.id === srv.orgId);
               const currency = parentOrg?.currency || activeOrg?.currency || 'ج.م';
+              const deactivated = isDeactivated(srv);
+              const owned = ownsService(srv);
+              const showEdit = canEditServices && owned;
+              const showDelete = canDeleteServices && owned && !deactivated;
 
               let budgetStatus: 'safe' | 'warning' | 'danger' = 'safe';
               let barColor = 'bg-emerald-500';
@@ -2187,39 +2542,64 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
               const assignedVendorName = srv.vendorName || vendor?.name;
 
               return (
-                <div key={srv.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition flex flex-col justify-between">
+                <div key={srv.id} className={`bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition flex flex-col justify-between ${deactivated ? 'opacity-75' : ''}`}>
                   <div>
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex items-center gap-2.5">
-                        <div 
+                        <div
                           className="h-9 w-9 rounded-xl flex items-center justify-center text-white text-xs font-bold shadow-xs"
                           style={{ backgroundColor: srv.color || '#10b981' }}
                         >
                           <Layers className="h-4 w-4" />
                         </div>
                         <div>
-                          <h4 className="font-bold text-slate-900 text-xs">{srv.name}</h4>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h4 className="font-bold text-slate-900 text-xs">{srv.name}</h4>
+                            {deactivated && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200">معطل</span>
+                            )}
+                          </div>
                           <span className="text-[10px] text-slate-400 font-mono block">كود: {srv.code}</span>
                         </div>
                       </div>
 
                       <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => handleStartEditService(srv)}
-                          className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
-                          title="تعديل وإعادة تسمية البند"
-                        >
-                          <Edit className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setDeletingService(srv)}
-                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                          title="حذف البند"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        {showEdit && canDeleteServices && deactivated && (
+                          <button
+                            type="button"
+                            onClick={() => handleReactivateService(srv)}
+                            disabled={rowGuard.isPending(`reactivate-service:${srv.id}`)}
+                            className="p-1 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition cursor-pointer disabled:opacity-50"
+                            title="إعادة تفعيل البند"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {showEdit && (
+                          <button
+                            type="button"
+                            onClick={() => handleStartEditService(srv)}
+                            className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                            title="تعديل وإعادة تسمية البند"
+                          >
+                            <Edit className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {showDelete && (
+                          <button
+                            type="button"
+                            onClick={() => openDeleteService(srv)}
+                            className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                            title="حذف البند"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {!owned && (canEditServices || canDeleteServices) && (
+                          <span className="p-1 text-slate-300" title="بند مشترك تديره شركة أخرى: التعديل والحذف من الشركة المالكة فقط">
+                            <Lock className="h-3.5 w-3.5" />
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -2251,6 +2631,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                           </span>
                         ));
                       })()}
+                      {!owned && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-50 text-slate-600 border border-slate-200">
+                          بند مشترك من شركة أخرى
+                        </span>
+                      )}
                     </div>
 
                     {/* Service Badges Row (Meter, Vendor, Budget Period, Frequency, Cost Center) */}
@@ -2305,7 +2690,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                       <div className="flex items-center gap-1 text-slate-600 font-medium">
                         <span className="text-[11px]">الفعلي:</span>
                         <span className="font-bold text-slate-900 font-mono text-xs">
-                          {spent.toLocaleString()} {currency}
+                          {fmtMoney(spent)} {currency}
                         </span>
                       </div>
 
@@ -2338,12 +2723,12 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                       <div className="flex items-center gap-1">
                         <span>الميزانية:</span>
                         <span className="font-bold font-mono text-slate-800">
-                          {budget > 0 ? `${budget.toLocaleString()} ${currency}` : 'غير محدد'}
+                          {budget > 0 ? `${fmtMoney(budget)} ${currency}` : 'غير محدد'}
                         </span>
                       </div>
                       {budget > 0 && (
                         <span className="font-mono text-[10px] text-slate-500">
-                          المتبقي: {Math.max(0, budget - spent).toLocaleString()} {currency}
+                          المتبقي: {fmtMoney(Math.max(0, budget - spent))} {currency}
                         </span>
                       )}
                     </div>
@@ -2355,6 +2740,39 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </div>
               );
             })}
+            {filteredServices.length === 0 && (
+              <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+                {serviceSearch.trim() ? (
+                  <>
+                    <Search className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+                    <h3 className="font-bold text-slate-800 text-sm">لا توجد نتائج مطابقة للبحث "{serviceSearch.trim()}"</h3>
+                    <button
+                      type="button"
+                      onClick={() => setServiceSearch('')}
+                      className="mt-3 inline-flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+                    >
+                      <X className="h-4 w-4" />
+                      <span>مسح البحث</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <Layers className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+                    <h3 className="font-bold text-slate-800 text-sm">لا توجد بنود صرف مسجلة بعد</h3>
+                    {canCreateServices && (
+                      <button
+                        type="button"
+                        onClick={handleOpenAddService}
+                        className="mt-3 inline-flex items-center gap-1.5 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+                      >
+                        <Plus className="h-4 w-4" />
+                        <span>إضافة أول بند صرف</span>
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2362,7 +2780,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {/* =========================================================================
           SECTION 4: VENDORS & PROVIDERS
           ========================================================================= */}
-      {activeSection === 'vendors' && (
+      {shownSection === 'vendors' && (
         <div className="space-y-5">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md flex-1">
@@ -2375,7 +2793,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 className="w-full text-xs bg-transparent outline-hidden text-slate-800"
               />
               {vendorSearch && (
-                <button onClick={() => setVendorSearch('')} className="text-slate-400 hover:text-slate-600">
+                <button type="button" onClick={() => setVendorSearch('')} className="text-slate-400 hover:text-slate-600" title="مسح البحث">
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
@@ -2398,8 +2816,9 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredVendors.map((prov) => {
               const parentOrg = displayOrgs.find(o => o.id === prov.orgId);
+              const deactivated = isDeactivated(prov);
               return (
-                <div key={prov.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition flex flex-col justify-between">
+                <div key={prov.id} className={`bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition flex flex-col justify-between ${deactivated ? 'opacity-75' : ''}`}>
                   <div>
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex items-center gap-2.5">
@@ -2407,28 +2826,48 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                           <Truck className="h-4 w-4" />
                         </div>
                         <div>
-                          <h4 className="font-bold text-slate-900 text-xs">{prov.name}</h4>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h4 className="font-bold text-slate-900 text-xs">{prov.name}</h4>
+                            {deactivated && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200">معطل</span>
+                            )}
+                          </div>
                           <span className="text-[10px] text-slate-500 block">المسؤول: {prov.contactPerson || '-'}</span>
                         </div>
                       </div>
 
                       <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => handleStartEditVendor(prov)}
-                          className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
-                          title="تعديل وتسمية المورد"
-                        >
-                          <Edit className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setDeletingVendor(prov)}
-                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                          title="حذف المورد"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        {canEditProviders && canDeleteProviders && deactivated && (
+                          <button
+                            type="button"
+                            onClick={() => handleReactivateVendor(prov)}
+                            disabled={rowGuard.isPending(`reactivate-vendor:${prov.id}`)}
+                            className="p-1 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition cursor-pointer disabled:opacity-50"
+                            title="إعادة تفعيل المورد"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {canEditProviders && (
+                          <button
+                            type="button"
+                            onClick={() => handleStartEditVendor(prov)}
+                            className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                            title="تعديل وتسمية المورد"
+                          >
+                            <Edit className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {canDeleteProviders && !deactivated && (
+                          <button
+                            type="button"
+                            onClick={() => openDeleteVendor(prov)}
+                            className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                            title="حذف المورد"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -2454,6 +2893,40 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </div>
               );
             })}
+            {filteredVendors.length === 0 && (
+              <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+                {vendorSearch.trim() ? (
+                  <>
+                    <Search className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+                    <h3 className="font-bold text-slate-800 text-sm">لا توجد نتائج مطابقة للبحث "{vendorSearch.trim()}"</h3>
+                    <p className="text-xs text-slate-400 mt-1">جرّب كلمة أخرى أو ابحث بالاسم أو الهاتف أو الرقم الضريبي.</p>
+                    <button
+                      type="button"
+                      onClick={() => setVendorSearch('')}
+                      className="mt-3 inline-flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+                    >
+                      <X className="h-4 w-4" />
+                      <span>مسح البحث</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <Truck className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+                    <h3 className="font-bold text-slate-800 text-sm">لا يوجد موردون مسجلون بعد</h3>
+                    {canCreateProviders && (
+                      <button
+                        type="button"
+                        onClick={handleOpenAddVendor}
+                        className="mt-3 inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+                      >
+                        <Plus className="h-4 w-4" />
+                        <span>تسجيل أول مورد</span>
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2461,7 +2934,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {/* =========================================================================
           SECTION 5: PAYMENT VAULTS & ACCOUNTS
           ========================================================================= */}
-      {activeSection === 'vaults' && (
+      {shownSection === 'vaults' && (
         <div className="space-y-5">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md flex-1">
@@ -2474,7 +2947,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 className="w-full text-xs bg-transparent outline-hidden text-slate-800"
               />
               {vaultSearch && (
-                <button onClick={() => setVaultSearch('')} className="text-slate-400 hover:text-slate-600">
+                <button type="button" onClick={() => setVaultSearch('')} className="text-slate-400 hover:text-slate-600" title="مسح البحث">
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
@@ -2496,19 +2969,21 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredVaults.map((vault) => {
-              const typeIcon = 
+              const isActive = vault.active !== false;
+              const typeIcon =
                 vault.type === 'instapay' ? <Wallet className="h-4 w-4 text-emerald-600" /> :
                 vault.type === 'bank' ? <Landmark className="h-4 w-4 text-indigo-600" /> :
                 vault.type === 'cash' ? <DollarSign className="h-4 w-4 text-amber-600" /> :
                 <CreditCard className="h-4 w-4 text-purple-600" />;
 
-              const typeBadge = 
+              const typeBadge =
                 vault.type === 'instapay' ? 'إنستاباي (InstaPay)' :
                 vault.type === 'bank' ? 'حساب بنكي' :
-                vault.type === 'cash' ? 'خزينة نقدية (Petty Cash)' : 'محفظة إلكترونية';
+                vault.type === 'cash' ? 'خزينة نقدية' :
+                vault.type === 'wallet' ? 'محفظة إلكترونية' : 'حساب آخر';
 
               return (
-                <div key={vault.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition">
+                <div key={vault.id} className={`bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition ${isActive ? '' : 'opacity-75'}`}>
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2.5">
                       <div className="h-9 w-9 rounded-xl bg-slate-50 flex items-center justify-center text-xs font-bold border border-slate-100">
@@ -2521,22 +2996,26 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                     </div>
 
                     <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => handleStartEditVault(vault)}
-                        className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
-                        title="تعديل وتسمية الحساب"
-                      >
-                        <Edit className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setDeletingVault(vault)}
-                        className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                        title="حذف الحساب"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      {canEditAccounts && (
+                        <button
+                          type="button"
+                          onClick={() => handleStartEditVault(vault)}
+                          className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                          title="تعديل وتسمية الحساب"
+                        >
+                          <Edit className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      {canDeleteAccounts && (isActive || !paymentAccountHasHistory(vault)) && (
+                        <button
+                          type="button"
+                          onClick={() => openDeleteVault(vault)}
+                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                          title={paymentAccountHasHistory(vault) ? 'تعطيل الحساب (له رصيد أو حركات فلا يمكن حذفه)' : 'حذف الحساب'}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -2545,32 +3024,57 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                       المعرف: <span className="font-bold text-slate-800">{vault.accountIdentifier}</span>
                     </div>
                     {vault.bankName && <div className="text-slate-500 text-[10px] mt-1">المصرف: {vault.bankName}</div>}
+                    <div className="text-slate-500 text-[10px] mt-1">
+                      الرصيد الحالي: <strong className="font-mono text-slate-800">{fmtMoney(accountBalance(vault))} {vault.currency || 'EGP'}</strong>
+                    </div>
                   </div>
 
                   <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await rowGuard.run(`toggle-vault:${vault.id}`, async () => {
-                          try {
-                            await togglePaymentAccountStatus(vault.id, !vault.active);
-                          } catch (err: any) {
-                            alert(err?.message || 'تعذر تنفيذ العملية');
-                          }
-                        });
-                      }}
-                      disabled={rowGuard.isPending(`toggle-vault:${vault.id}`)}
-                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full cursor-pointer transition ${
-                        vault.active ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
-                      }`}
-                    >
-                      {vault.active ? 'نشط للصرف' : 'معطل مؤقتاً'}
-                    </button>
+                    {canEditAccounts ? (
+                      <button
+                        type="button"
+                        onClick={() => handleToggleVault(vault)}
+                        disabled={rowGuard.isPending(`toggle-vault:${vault.id}`)}
+                        title={isActive ? 'اضغط لتعطيل الحساب مؤقتاً' : 'اضغط لإعادة تفعيل الحساب'}
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full cursor-pointer transition disabled:opacity-60 ${
+                          isActive ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+                        }`}
+                      >
+                        {isActive ? 'نشط للصرف' : 'معطل مؤقتاً'}
+                      </button>
+                    ) : (
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isActive ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+                        {isActive ? 'نشط للصرف' : 'معطل مؤقتاً'}
+                      </span>
+                    )}
                     <span className="text-[10px] text-slate-400">{vault.currency || 'EGP'}</span>
                   </div>
                 </div>
               );
             })}
+            {filteredVaults.length === 0 && (
+              <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+                {vaultSearch.trim() ? (
+                  <>
+                    <Search className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+                    <h3 className="font-bold text-slate-800 text-sm">لا توجد نتائج مطابقة للبحث "{vaultSearch.trim()}"</h3>
+                    <button
+                      type="button"
+                      onClick={() => setVaultSearch('')}
+                      className="mt-3 inline-flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+                    >
+                      <X className="h-4 w-4" />
+                      <span>مسح البحث</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <Wallet className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+                    <h3 className="font-bold text-slate-800 text-sm">لا توجد خزائن أو حسابات دفع مسجلة بعد</h3>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2578,7 +3082,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {/* =========================================================================
           SECTION 6: DEPARTMENTS & STRUCTURE
           ========================================================================= */}
-      {activeSection === 'departments' && (
+      {shownSection === 'departments' && (
         <div className="space-y-5">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div className="flex items-center gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-xs max-w-md flex-1">
@@ -2591,7 +3095,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 className="w-full text-xs bg-transparent outline-hidden text-slate-800"
               />
               {deptSearch && (
-                <button onClick={() => setDeptSearch('')} className="text-slate-400 hover:text-slate-600">
+                <button type="button" onClick={() => setDeptSearch('')} className="text-slate-400 hover:text-slate-600" title="مسح البحث">
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
@@ -2613,7 +3117,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredDepartments.map((dept) => {
-              const assignedCount = targetMembers.filter(m => m.department === dept.name && (dept.orgId ? m.orgId === dept.orgId : true)).length;
+              // Member counts only for roles that read the whole company's members.
+              const assignedCount = canViewUsers
+                ? targetMembers.filter(m => m.department === dept.name && (dept.orgId ? m.orgId === dept.orgId : true)).length
+                : null;
 
               return (
                 <div key={dept.id} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-slate-300 transition">
@@ -2629,22 +3136,26 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                     </div>
 
                     <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => handleStartEditDept(dept)}
-                        className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
-                        title="تعديل وإعادة تسمية القسم"
-                      >
-                        <Edit className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setDeletingDept(dept)}
-                        className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                        title="حذف القسم"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                      {canEditDepartments && (
+                        <button
+                          type="button"
+                          onClick={() => handleStartEditDept(dept)}
+                          className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                          title="تعديل وإعادة تسمية القسم"
+                        >
+                          <Edit className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      {canDeleteDepartments && (
+                        <button
+                          type="button"
+                          onClick={() => openDeleteDept(dept)}
+                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                          title="حذف القسم"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -2654,11 +3165,44 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
 
                   <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px]">
                     <span className="text-slate-400">مسؤول القسم: <strong className="text-slate-700">{dept.managerName || 'غير محدد'}</strong></span>
-                    <span className="text-purple-700 font-bold">{assignedCount} موظف</span>
+                    {assignedCount !== null && <span className="text-purple-700 font-bold">{assignedCount} موظف</span>}
                   </div>
                 </div>
               );
             })}
+            {filteredDepartments.length === 0 && (
+              <div className="col-span-full bg-white rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+                {deptSearch.trim() ? (
+                  <>
+                    <Search className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+                    <h3 className="font-bold text-slate-800 text-sm">لا توجد نتائج مطابقة للبحث "{deptSearch.trim()}"</h3>
+                    <button
+                      type="button"
+                      onClick={() => setDeptSearch('')}
+                      className="mt-3 inline-flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+                    >
+                      <X className="h-4 w-4" />
+                      <span>مسح البحث</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <FolderTree className="h-10 w-10 text-slate-300 mx-auto mb-2" />
+                    <h3 className="font-bold text-slate-800 text-sm">لا توجد أقسام مسجلة بعد</h3>
+                    {canCreateDepartments && (
+                      <button
+                        type="button"
+                        onClick={handleOpenAddDept}
+                        className="mt-3 inline-flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition cursor-pointer"
+                      >
+                        <Plus className="h-4 w-4" />
+                        <span>إضافة أول قسم</span>
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2666,7 +3210,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {/* =========================================================================
           SECTION 7: SUPER ADMINS & ROLES MATRIX
           ========================================================================= */}
-      {activeSection === 'super_admins' && isSuperAdmin && (
+      {shownSection === 'super_admins' && isSuperAdmin && (
         <div className="space-y-6">
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs">
             <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 mb-3">
@@ -2750,7 +3294,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {/* =========================================================================
           SECTION 8: AUDIT TRAIL / ACTIVITY LOG
           ========================================================================= */}
-      {activeSection === 'audit_log' && (
+      {shownSection === 'audit_log' && (
         <div className="space-y-5">
           <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2 flex-1 min-w-[240px]">
@@ -2836,12 +3380,13 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                         log.actionType === 'delete' ? 'حذف' :
                         log.actionType === 'budget_change' ? 'تعديل ميزانية' :
                         log.actionType === 'password_reset' ? 'إعادة تعيين كلمة مرور' :
-                        log.actionType === 'status_toggle' ? 'تغيير حالة' : 'تحديث بيانات';
+                        log.actionType === 'status_toggle' ? 'تغيير حالة' :
+                        log.actionType === 'role_change' ? 'تغيير الدور' : 'تحديث بيانات';
 
                       return (
                         <tr key={log.id} className="hover:bg-slate-50/60 transition">
-                          <td className="py-3 px-4 text-slate-500 font-mono text-[11px] whitespace-nowrap">
-                            {new Date(log.timestamp).toLocaleString('ar-EG')}
+                          <td className="py-3 px-4 text-slate-500 font-mono text-[11px] whitespace-nowrap" dir="ltr">
+                            {formatLocalDateTime(log.timestamp)}
                           </td>
                           <td className="py-3 px-4">
                             <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${badgeColor}`}>
@@ -2850,7 +3395,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                           </td>
                           <td className="py-3 px-4 font-bold text-slate-800">
                             {log.entityName}
-                            <span className="text-[10px] text-slate-400 block font-normal">{log.entityType}</span>
+                            <span className="text-[10px] text-slate-400 block font-normal">{auditEntityLabels[log.entityType] || log.entityType}</span>
                           </td>
                           <td className="py-3 px-4">
                             <span className="font-semibold text-slate-800 block">{log.actorName}</span>
@@ -3052,20 +3597,24 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 ></textarea>
               </div>
 
+              <InlineError message={editOrgError} />
+
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setEditingOrg(null)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                  disabled={editOrgGuard.pending}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
                   disabled={editOrgGuard.pending}
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  حفظ التعديلات
+                  {editOrgGuard.pending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  <span>{editOrgGuard.pending ? 'جارٍ الحفظ...' : 'حفظ التعديلات'}</span>
                 </button>
               </div>
             </form>
@@ -3073,23 +3622,26 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         </div>
       )}
 
-      {/* 3. Delete Organization Modal */}
+      {/* 3. Delete Organization Modal (a company with financial records is archived, never deleted) */}
       {deletingOrg && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
+          <div role="dialog" aria-modal="true" className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
             <div className="h-12 w-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center mx-auto mb-3">
               <Trash2 className="h-6 w-6" />
             </div>
-            <h3 className="font-bold text-slate-900 text-sm">حذف الشركة نهائياً</h3>
+            <h3 className="font-bold text-slate-900 text-sm">حذف الشركة</h3>
             <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-              هل أنت متأكد من رغبتك في حذف شركة <strong>"{deletingOrg.name}"</strong>؟
+              هل أنت متأكد من رغبتك في حذف شركة <strong>"{deletingOrg.name}"</strong>؟ إن كانت لها طلبات أو عهد أو حركات مالية أو حسابات بها رصيد، أو موظفون أو بنود أو موردون أو أقسام، فستتم أرشفتها مع الاحتفاظ بسجلاتها بدلاً من حذفها (حساباتها الافتراضية الخالية من أي حركة تُحذف معها).
             </p>
+
+            {confirmError && <div className="mt-3"><InlineError message={confirmError} /></div>}
 
             <div className="flex justify-center gap-2 mt-5">
               <button
                 type="button"
                 onClick={() => setDeletingOrg(null)}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                disabled={deleteOrgLoading}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
               >
                 إلغاء
               </button>
@@ -3097,9 +3649,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 type="button"
                 disabled={deleteOrgLoading}
                 onClick={handleConfirmDeleteOrg}
-                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-60"
               >
-                {deleteOrgLoading ? 'جاري الحذف...' : 'نعم، حذف الشركة'}
+                {deleteOrgLoading && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>{deleteOrgLoading ? 'جارٍ التنفيذ...' : 'نعم، حذف الشركة'}</span>
               </button>
             </div>
           </div>
@@ -3157,15 +3710,17 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   {createdCredentials.password && (
                     <button
                       type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(`بيانات دخول منصة المصروفات:\nالبريد: ${createdCredentials.email}\nكلمة المرور: ${createdCredentials.password}`);
-                        setCopiedLink(true);
-                        setTimeout(() => setCopiedLink(false), 2000);
+                      onClick={async () => {
+                        // "Copied" only when the browser really accepted the write.
+                        const ok = await copyTextToClipboard(`بيانات دخول منصة المصروفات:\nالبريد: ${createdCredentials.email}\nكلمة المرور: ${createdCredentials.password}`);
+                        setCopiedLink(ok);
+                        setCopyFailed(!ok);
+                        setTimeout(() => { setCopiedLink(false); setCopyFailed(false); }, 3000);
                       }}
-                      className="px-4 py-2 bg-slate-900 text-white font-bold text-xs rounded-xl flex items-center gap-1.5"
+                      className={`px-4 py-2 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 ${copyFailed ? 'bg-rose-600' : 'bg-slate-900'}`}
                     >
                       <Copy className="h-3.5 w-3.5" />
-                      <span>{copiedLink ? 'تم النسخ!' : 'نسخ بيانات الدخول'}</span>
+                      <span>{copiedLink ? 'تم النسخ!' : copyFailed ? 'تعذر النسخ — انسخ البيانات يدوياً' : 'نسخ بيانات الدخول'}</span>
                     </button>
                   )}
                   <button
@@ -3339,16 +3894,20 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         </div>
       )}
 
-      {/* 5. Edit Member Modal */}
-      {editingMember && (
+      {/* 5. Edit Member Modal (own / platform-owner membership: contact details only) */}
+      {editingMember && (() => {
+        const editingLocked = isProtectedMembership(editingMember);
+        const roleLabel = (role: Role) =>
+          role === 'org_admin' ? 'مدير مؤسسة' : role === 'finance' ? 'مسؤول الصرف والخزينة' : role === 'data_entry' ? 'مدخل بيانات' : 'موظف';
+        return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
                 <Edit className="h-4 w-4 text-indigo-600" />
-                <span>تعديل وإعادة تسمية الموظف ({editingMember.userName})</span>
+                <span>تعديل وإعادة تسمية الموظف ({editingMember.userName || editingMember.userEmail})</span>
               </h3>
-              <button onClick={() => setEditingMember(null)} className="p-1 text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => setEditingMember(null)} className="p-1 text-slate-400 hover:text-slate-600">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -3359,9 +3918,15 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   <Crown className="h-4 w-4 shrink-0 text-amber-600" />
                   <span>
                     {isPlatformOwner(editingMember.userEmail)
-                      ? 'هذا الحساب هو مالك المنصة (المشرف العام الوحيد). الدور أدناه يخص هذه الشركة فقط ولا يغيّر صلاحيته كمشرف عام.'
+                      ? 'هذا الحساب هو مالك المنصة (المشرف العام الوحيد).'
                       : 'هذا الحساب لديه صلاحية مشرف عام قديمة. تعديل الدور هنا لا يغيّرها؛ يمكن سحبها من قسم "المشرفين والصلاحيات".'}
                   </span>
+                </div>
+              )}
+              {editingLocked && (
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-[11px] text-slate-600 font-semibold flex items-start gap-1.5">
+                  <Lock className="h-3.5 w-3.5 shrink-0 mt-0.5 text-slate-400" />
+                  <span>{protectedReason(editingMember)} يمكن تعديل الاسم والهاتف والمسمى والقسم فقط.</span>
                 </div>
               )}
 
@@ -3371,8 +3936,10 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   type="text"
                   required
                   value={editMemberName}
-                  onChange={(e) => setEditMemberName(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden"
+                  onChange={(e) => { setEditMemberName(e.target.value); if (memberFormError) setMemberFormError(null); }}
+                  className={`w-full bg-slate-50 border rounded-xl p-2.5 text-xs text-slate-800 outline-hidden ${
+                    memberFormError && !editMemberName.trim() ? 'border-rose-400' : 'border-slate-200'
+                  }`}
                 />
               </div>
 
@@ -3388,17 +3955,24 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">الدور الوظيفي</label>
-                  {/* No super admin option: only the platform owner is super admin. */}
-                  <select
-                    value={editMemberRole}
-                    onChange={(e) => setEditMemberRole(e.target.value as Role)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
-                  >
-                    <option value="org_admin">مدير مؤسسة (Admin)</option>
-                    <option value="finance">مسؤول الصرف والخزينة (Finance / Disburser)</option>
-                    <option value="employee">موظف (Employee)</option>
-                    <option value="data_entry">مدخل بيانات (Data Entry)</option>
-                  </select>
+                  {editingLocked ? (
+                    <div className="w-full bg-slate-100 border border-slate-200 rounded-xl p-2.5 text-xs font-bold text-slate-600 flex items-center gap-1.5">
+                      <Lock className="h-3 w-3 shrink-0" />
+                      <span>{roleLabel(editMemberRole)}</span>
+                    </div>
+                  ) : (
+                    /* No super admin option: only the platform owner is super admin. */
+                    <select
+                      value={editMemberRole}
+                      onChange={(e) => setEditMemberRole(e.target.value as Role)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
+                    >
+                      <option value="org_admin">مدير مؤسسة</option>
+                      <option value="finance">مسؤول الصرف والخزينة</option>
+                      <option value="employee">موظف</option>
+                      <option value="data_entry">مدخل بيانات</option>
+                    </select>
+                  )}
                 </div>
               </div>
 
@@ -3423,7 +3997,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </div>
               </div>
 
-              {canManageOrgs && (
+              {canManageOrgs && !editingLocked && (
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">نقل إلى شركة أخرى</label>
                   <select
@@ -3431,72 +4005,97 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                     onChange={(e) => setEditMemberOrgId(e.target.value)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
                   >
-                    {displayOrgs.map(o => (
-                      <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
-                    ))}
+                    {displayOrgs.map(o => {
+                      // One membership per company: a company where this email already has another membership cannot be chosen.
+                      const taken = o.id !== editingMember.orgId && knownMembers.some(m =>
+                        m.id !== editingMember.id && m.orgId === o.id && normalizeEmail(m.userEmail) === normalizeEmail(editingMember.userEmail)
+                      );
+                      return (
+                        <option key={o.id} value={o.id} disabled={taken}>
+                          {o.name} ({o.code}){taken ? ' (مسجل بالفعل)' : ''}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
               )}
 
               <div className="pt-2">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={editMemberActive}
-                    onChange={(e) => setEditMemberActive(e.target.checked)}
-                    className="rounded text-indigo-600 focus:ring-indigo-500"
-                  />
-                  <span className="font-bold text-slate-700">الحساب نشط ويحق له تسجيل الدخول</span>
-                </label>
+                {editingLocked ? (
+                  <p className="flex items-center gap-2 text-slate-600 font-bold">
+                    <Lock className="h-3.5 w-3.5 text-slate-400" />
+                    <span>حالة الحساب: {editMemberActive ? 'نشط' : 'معطل'}</span>
+                  </p>
+                ) : (
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editMemberActive}
+                      onChange={(e) => setEditMemberActive(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="font-bold text-slate-700">الحساب نشط ويحق له تسجيل الدخول</span>
+                  </label>
+                )}
               </div>
+
+              <InlineError message={memberFormError} />
 
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setEditingMember(null)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                  disabled={editMemberLoading}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
                   disabled={editMemberLoading}
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  {editMemberLoading ? 'جاري الحفظ...' : 'حفظ التعديلات'}
+                  {editMemberLoading && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  <span>{editMemberLoading ? 'جارٍ الحفظ...' : 'حفظ التعديلات'}</span>
                 </button>
               </div>
             </form>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* 6. Delete Member Modal */}
       {deletingMember && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
+          <div role="dialog" aria-modal="true" className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
             <div className="h-12 w-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center mx-auto mb-3">
               <Trash2 className="h-6 w-6" />
             </div>
             <h3 className="font-bold text-slate-900 text-sm">حذف حساب الموظف</h3>
             <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-              هل أنت متأكد من رغبتك في حذف <strong>"{deletingMember.userName}"</strong> ({deletingMember.userEmail}) من النظام نهائياً؟
+              هل أنت متأكد من رغبتك في حذف <strong>"{deletingMember.userName}"</strong> ({deletingMember.userEmail}) من <strong>{orgNameOf(deletingMember.orgId)}</strong>؟ لن يتمكن من الدخول لهذه الشركة بعد ذلك.
             </p>
+
+            {confirmError && <div className="mt-3"><InlineError message={confirmError} /></div>}
 
             <div className="flex justify-center gap-2 mt-5">
               <button
                 type="button"
                 onClick={() => setDeletingMember(null)}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                disabled={rowGuard.isPending(`delete-member:${deletingMember.id}`)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
               >
                 إلغاء
               </button>
               <button
                 type="button"
                 onClick={handleConfirmDeleteMember}
-                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                disabled={rowGuard.isPending(`delete-member:${deletingMember.id}`)}
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-60"
               >
-                نعم، حذف الحساب
+                {rowGuard.isPending(`delete-member:${deletingMember.id}`) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>{rowGuard.isPending(`delete-member:${deletingMember.id}`) ? 'جارٍ الحذف...' : 'نعم، حذف الحساب'}</span>
               </button>
             </div>
           </div>
@@ -3523,66 +4122,16 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             </div>
 
             <form onSubmit={handleSaveService} className="mt-4 space-y-4 text-xs overflow-y-auto pr-1 flex-1">
-              {/* Companies Multi-Selection */}
-              <div className="bg-slate-50/70 p-3.5 rounded-2xl border border-slate-200/80">
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="block font-bold text-slate-700 flex items-center gap-1.5">
-                    <Building2 className="h-3.5 w-3.5 text-teal-600" />
-                    <span>الشركات والمؤسسات التابع لها البند (تحديد متعدد) *</span>
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (serviceOrgIds.length === displayOrgs.length) {
-                        setServiceOrgIds([]);
-                      } else {
-                        setServiceOrgIds(displayOrgs.map(o => o.id));
-                      }
-                    }}
-                    className="text-[11px] text-teal-700 hover:text-teal-800 font-bold hover:underline cursor-pointer"
-                  >
-                    {serviceOrgIds.length === displayOrgs.length ? 'إلغاء تحديد الكل' : 'تحديد كل الشركات'}
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-36 overflow-y-auto p-2 bg-white border border-slate-200 rounded-xl">
-                  {displayOrgs.map(org => {
-                    const isSelected = serviceOrgIds.includes(org.id);
-                    return (
-                      <label 
-                        key={org.id} 
-                        className={`flex items-center gap-2 p-2 rounded-lg border text-xs font-semibold cursor-pointer transition ${
-                          isSelected 
-                            ? 'bg-teal-50 border-teal-400 text-teal-950 font-bold shadow-xs' 
-                            : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100/70'
-                        }`}
-                      >
-                        <input 
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setServiceOrgIds(prev => [...prev, org.id]);
-                            } else {
-                              setServiceOrgIds(prev => prev.filter(id => id !== org.id));
-                            }
-                          }}
-                          className="h-4 w-4 rounded text-teal-600 focus:ring-teal-500 border-slate-300"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className="truncate">{org.name}</div>
-                          <span className="text-[10px] text-slate-400 font-normal">{org.code} ({org.currency})</span>
-                        </div>
-                      </label>
-                    );
-                  })}
-                </div>
-                {serviceOrgIds.length === 0 && (
-                  <p className="mt-1.5 text-[11px] text-rose-600 font-bold">
-                    * يرجى تحديد شركة واحدة على الأقل لربط البند بها.
-                  </p>
-                )}
-              </div>
+              {/* Companies Multi-Selection (the owner of an existing item always stays linked) */}
+              <OrgMultiSelect
+                orgs={creatableOrgs}
+                selected={editingService ? serviceFormOrgIds : serviceOrgIds}
+                onChange={(ids) => { setServiceOrgIds(ids); setServiceFormError(null); }}
+                label="الشركات والمؤسسات التابع لها البند (تحديد متعدد) *"
+                locked={serviceOwnerLock}
+                emptyHint={serviceFormHasOrg ? '' : '* يرجى تحديد شركة واحدة على الأقل لربط البند بها.'}
+                disabled={isSavingService}
+              />
 
               {/* Basic Info & Budget Section */}
               <div className="bg-slate-50/70 p-3.5 rounded-2xl border border-slate-200/80 space-y-3">
@@ -3673,9 +4222,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                       className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition cursor-pointer"
                     >
                       <option value="">بدون مورد محدد (غير مقيد بمورد)</option>
-                      {targetVendors.map(v => (
-                        <option key={v.id} value={v.id}>{v.name} {v.contactPerson ? `(${v.contactPerson})` : ''}</option>
-                      ))}
+                      {/* A deactivated vendor is not offered for new links (the current one stays listed). */}
+                      {targetVendors
+                        .filter(v => !isDeactivated(v) || v.id === editingService?.vendorId)
+                        .map(v => (
+                          <option key={v.id} value={v.id}>
+                            {v.name} {v.contactPerson ? `(${v.contactPerson})` : ''}{isDeactivated(v) ? ' — معطل' : ''}
+                          </option>
+                        ))}
                     </select>
                   </div>
 
@@ -3764,11 +4318,13 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                       className="w-full bg-white border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden focus:border-teal-500 transition cursor-pointer"
                     >
                       <option value="">بدون حساب محدد (يحدد عند الصرف)</option>
-                      {targetVaults.map(vault => (
-                        <option key={vault.id} value={vault.id}>
-                          {vault.name} ({vault.accountIdentifier || vault.type})
-                        </option>
-                      ))}
+                      {targetVaults
+                        .filter(vault => vault.active !== false || vault.id === editingService?.defaultAccountId)
+                        .map(vault => (
+                          <option key={vault.id} value={vault.id}>
+                            {vault.name} ({vault.accountIdentifier || vault.type}){vault.active === false ? ' — معطل' : ''}
+                          </option>
+                        ))}
                     </select>
                   </div>
                 </div>
@@ -3786,21 +4342,25 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 ></textarea>
               </div>
 
+              <InlineError message={serviceFormError} />
+
               {/* Actions Footer */}
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 shrink-0">
                 <button
                   type="button"
                   onClick={() => setIsServiceModalOpen(false)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer"
+                  disabled={isSavingService}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer disabled:opacity-50"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
-                  disabled={isSavingService}
-                  className="px-6 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
+                  disabled={isSavingService || !serviceFormHasOrg}
+                  className="px-6 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  حفظ البند
+                  {isSavingService && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  <span>{isSavingService ? 'جارٍ الحفظ...' : 'حفظ البند'}</span>
                 </button>
               </div>
             </form>
@@ -3809,36 +4369,55 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       )}
 
       {/* 8. Delete Service Modal */}
-      {deletingService && (
+      {deletingService && (() => {
+        const usage = serviceUsage(deletingService);
+        const inUse = usage.inUse;
+        const pending = rowGuard.isPending(`delete-service:${deletingService.id}`);
+        return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
-            <div className="h-12 w-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center mx-auto mb-3">
-              <Trash2 className="h-6 w-6" />
+          <div role="dialog" aria-modal="true" className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
+            <div className={`h-12 w-12 rounded-2xl flex items-center justify-center mx-auto mb-3 ${inUse ? 'bg-amber-100 text-amber-600' : 'bg-rose-100 text-rose-600'}`}>
+              {inUse ? <AlertTriangle className="h-6 w-6" /> : <Trash2 className="h-6 w-6" />}
             </div>
-            <h3 className="font-bold text-slate-900 text-sm">حذف بند الصرف</h3>
+            <h3 className="font-bold text-slate-900 text-sm">{inUse ? 'تعطيل بند الصرف' : 'حذف بند الصرف'}</h3>
             <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-              هل أنت متأكد من حذف البند <strong>"{deletingService.name}"</strong>؟
+              {inUse ? (
+                <>
+                  البند <strong>"{deletingService.name}"</strong> مرتبط بـ{' '}{usage.text}
+                  ، لذلك لن يُحذف نهائياً بل سيتم تعطيله ويبقى في السجلات السابقة.
+                </>
+              ) : (
+                <>هل أنت متأكد من حذف البند <strong>"{deletingService.name}"</strong> نهائياً؟ لا يمكن التراجع عن هذا الإجراء.</>
+              )}
             </p>
+
+            {confirmError && <div className="mt-3"><InlineError message={confirmError} /></div>}
 
             <div className="flex justify-center gap-2 mt-5">
               <button
                 type="button"
                 onClick={() => setDeletingService(null)}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                disabled={pending}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
               >
                 إلغاء
               </button>
               <button
                 type="button"
                 onClick={handleConfirmDeleteService}
-                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                disabled={pending}
+                className={`px-5 py-2 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-60 ${
+                  inUse ? 'bg-amber-600 hover:bg-amber-700' : 'bg-rose-600 hover:bg-rose-700'
+                }`}
               >
-                نعم، حذف
+                {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>{pending ? 'جارٍ التنفيذ...' : inUse ? 'نعم، تعطيل البند' : 'نعم، حذف'}</span>
               </button>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* 9. Vendor Modal (Add / Edit) */}
       {isVendorModalOpen && (
@@ -4015,20 +4594,30 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </div>
               </div>
 
+              <InlineError message={vendorFormError} />
+
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setIsVendorModalOpen(false)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                  disabled={isSavingVendor}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
                   disabled={isSavingVendor || (!editingVendor && vendorTargetOrgIds.length === 0)}
-                  className="px-5 py-2 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs disabled:opacity-50"
+                  className="px-5 py-2 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  {!editingVendor && vendorTargetOrgIds.length > 1 ? `حفظ المورد في ${vendorTargetOrgIds.length} شركات` : 'حفظ المورد'}
+                  {isSavingVendor && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  <span>
+                    {isSavingVendor
+                      ? 'جارٍ الحفظ...'
+                      : !editingVendor && vendorTargetOrgIds.length > 1
+                      ? `حفظ المورد في ${vendorTargetOrgIds.length} شركات`
+                      : 'حفظ المورد'}
+                  </span>
                 </button>
               </div>
             </form>
@@ -4036,37 +4625,56 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         </div>
       )}
 
-      {/* 10. Delete Vendor Modal */}
-      {deletingVendor && (
+      {/* 10. Delete Vendor Modal (a vendor in use is deactivated, never hard-deleted) */}
+      {deletingVendor && (() => {
+        const usage = providerUsage(deletingVendor);
+        const inUse = usage.inUse;
+        const pending = rowGuard.isPending(`delete-vendor:${deletingVendor.id}`);
+        return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
-            <div className="h-12 w-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center mx-auto mb-3">
-              <Trash2 className="h-6 w-6" />
+          <div role="dialog" aria-modal="true" className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
+            <div className={`h-12 w-12 rounded-2xl flex items-center justify-center mx-auto mb-3 ${inUse ? 'bg-amber-100 text-amber-600' : 'bg-rose-100 text-rose-600'}`}>
+              {inUse ? <AlertTriangle className="h-6 w-6" /> : <Trash2 className="h-6 w-6" />}
             </div>
-            <h3 className="font-bold text-slate-900 text-sm">حذف المورد</h3>
+            <h3 className="font-bold text-slate-900 text-sm">{inUse ? 'تعطيل المورد' : 'حذف المورد'}</h3>
             <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-              هل أنت متأكد من حذف المورد <strong>"{deletingVendor.name}"</strong>؟
+              {inUse ? (
+                <>
+                  المورد <strong>"{deletingVendor.name}"</strong> مرتبط بـ{' '}{usage.text}
+                  ، لذلك لن يُحذف نهائياً بل سيتم تعطيله ويبقى في السجلات السابقة.
+                </>
+              ) : (
+                <>هل أنت متأكد من حذف المورد <strong>"{deletingVendor.name}"</strong> نهائياً؟ لا يمكن التراجع عن هذا الإجراء.</>
+              )}
             </p>
+
+            {confirmError && <div className="mt-3"><InlineError message={confirmError} /></div>}
 
             <div className="flex justify-center gap-2 mt-5">
               <button
                 type="button"
                 onClick={() => setDeletingVendor(null)}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                disabled={pending}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
               >
                 إلغاء
               </button>
               <button
                 type="button"
                 onClick={handleConfirmDeleteVendor}
-                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                disabled={pending}
+                className={`px-5 py-2 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-60 ${
+                  inUse ? 'bg-amber-600 hover:bg-amber-700' : 'bg-rose-600 hover:bg-rose-700'
+                }`}
               >
-                نعم، حذف
+                {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>{pending ? 'جارٍ التنفيذ...' : inUse ? 'نعم، تعطيل المورد' : 'نعم، حذف'}</span>
               </button>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* 11. Vault Modal (Add / Edit) */}
       {isVaultModalOpen && (
@@ -4146,20 +4754,24 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 />
               </div>
 
+              <InlineError message={vaultFormError} />
+
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setIsVaultModalOpen(false)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                  disabled={isSavingVault}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
                   disabled={isSavingVault}
-                  className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                  className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  حفظ الخزينة
+                  {isSavingVault && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  <span>{isSavingVault ? 'جارٍ الحفظ...' : 'حفظ الخزينة'}</span>
                 </button>
               </div>
             </form>
@@ -4167,37 +4779,58 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         </div>
       )}
 
-      {/* 12. Delete Vault Modal */}
-      {deletingVault && (
+      {/* 12. Delete Vault Modal (an account with a balance or history is deactivated, never deleted) */}
+      {deletingVault && (() => {
+        const keepForHistory = paymentAccountHasHistory(deletingVault);
+        const pending = rowGuard.isPending(`delete-vault:${deletingVault.id}`);
+        return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
-            <div className="h-12 w-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center mx-auto mb-3">
-              <Trash2 className="h-6 w-6" />
+          <div role="dialog" aria-modal="true" className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
+            <div className={`h-12 w-12 rounded-2xl flex items-center justify-center mx-auto mb-3 ${keepForHistory ? 'bg-amber-100 text-amber-600' : 'bg-rose-100 text-rose-600'}`}>
+              {keepForHistory ? <AlertTriangle className="h-6 w-6" /> : <Trash2 className="h-6 w-6" />}
             </div>
-            <h3 className="font-bold text-slate-900 text-sm">حذف خزينة / وسيلة الدفع</h3>
+            <h3 className="font-bold text-slate-900 text-sm">{keepForHistory ? 'تعطيل الحساب بدلاً من حذفه' : 'حذف خزينة / وسيلة الدفع'}</h3>
             <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-              هل أنت متأكد من حذف الحساب <strong>"{deletingVault.name}"</strong>؟
+              {keepForHistory ? (
+                <>
+                  لا يمكن حذف الحساب <strong>"{deletingVault.name}"</strong> لأن له رصيداً أو حركات مالية مسجلة
+                  (الرصيد الحالي <span className="font-mono font-bold">{fmtMoney(accountBalance(deletingVault))} {deletingVault.currency || 'EGP'}</span>).
+                  يمكنك تعطيله بدلاً من ذلك: يتوقف استخدامه في الصرف ويبقى سجله المالي كاملاً.
+                </>
+              ) : (
+                <>هل أنت متأكد من حذف الحساب <strong>"{deletingVault.name}"</strong> نهائياً؟ لا يمكن التراجع عن هذا الإجراء.</>
+              )}
             </p>
+
+            {confirmError && <div className="mt-3"><InlineError message={confirmError} /></div>}
 
             <div className="flex justify-center gap-2 mt-5">
               <button
                 type="button"
                 onClick={() => setDeletingVault(null)}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                disabled={pending}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
               >
                 إلغاء
               </button>
-              <button
-                type="button"
-                onClick={handleConfirmDeleteVault}
-                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs"
-              >
-                نعم، حذف
-              </button>
+              {(!keepForHistory || deletingVault.active !== false) && (
+                <button
+                  type="button"
+                  onClick={handleConfirmDeleteVault}
+                  disabled={pending}
+                  className={`px-5 py-2 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-60 ${
+                    keepForHistory ? 'bg-amber-600 hover:bg-amber-700' : 'bg-rose-600 hover:bg-rose-700'
+                  }`}
+                >
+                  {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  <span>{pending ? 'جارٍ التنفيذ...' : keepForHistory ? 'نعم، تعطيل الحساب' : 'نعم، حذف'}</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* 13. Department Modal (Add / Edit) */}
       {isDeptModalOpen && (
@@ -4208,7 +4841,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <FolderTree className="h-4 w-4 text-purple-600" />
                 <span>{editingDept ? `تعديل وإعادة تسمية القسم (${editingDept.name})` : 'إضافة قسم إداري جديد'}</span>
               </h3>
-              <button onClick={() => setIsDeptModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => setIsDeptModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -4220,7 +4853,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   type="text"
                   required
                   value={deptName}
-                  onChange={(e) => setDeptName(e.target.value)}
+                  onChange={(e) => { setDeptName(e.target.value); if (deptFormError) setDeptFormError(null); }}
                   placeholder="مثال: الإدارة المالية والمحاسبة"
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden"
                 />
@@ -4238,7 +4871,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                     <OrgMultiSelect
                       orgs={creatableOrgs}
                       selected={deptOrgIds}
-                      onChange={setDeptOrgIds}
+                      onChange={(ids) => { setDeptOrgIds(ids); if (deptFormError) setDeptFormError(null); }}
                       label="الشركات أو المؤسسات التابع لها القسم (تحديد متعدد) *"
                       unavailable={deptUnavailableOrgs}
                       emptyHint="* يرجى تحديد شركة واحدة على الأقل لإضافة القسم إليها."
@@ -4287,20 +4920,30 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 ></textarea>
               </div>
 
+              <InlineError message={deptFormError} />
+
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setIsDeptModalOpen(false)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                  disabled={isSavingDept}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
                   disabled={isSavingDept || (!editingDept && deptTargetOrgIds.length === 0)}
-                  className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs disabled:opacity-50"
+                  className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  {!editingDept && deptTargetOrgIds.length > 1 ? `حفظ القسم في ${deptTargetOrgIds.length} شركات` : 'حفظ القسم'}
+                  {isSavingDept && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  <span>
+                    {isSavingDept
+                      ? 'جارٍ الحفظ...'
+                      : !editingDept && deptTargetOrgIds.length > 1
+                      ? `حفظ القسم في ${deptTargetOrgIds.length} شركات`
+                      : 'حفظ القسم'}
+                  </span>
                 </button>
               </div>
             </form>
@@ -4309,36 +4952,48 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       )}
 
       {/* 14. Delete Department Modal */}
-      {deletingDept && (
+      {deletingDept && (() => {
+        const pending = rowGuard.isPending(`delete-dept:${deletingDept.id}`);
+        const assigned = canViewUsers
+          ? targetMembers.filter(m => m.department === deletingDept.name && (deletingDept.orgId ? m.orgId === deletingDept.orgId : true)).length
+          : 0;
+        return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
+          <div role="dialog" aria-modal="true" className="bg-white rounded-3xl max-w-sm w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 text-center">
             <div className="h-12 w-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center mx-auto mb-3">
               <Trash2 className="h-6 w-6" />
             </div>
             <h3 className="font-bold text-slate-900 text-sm">حذف القسم الإداري</h3>
             <p className="text-xs text-slate-500 mt-2 leading-relaxed">
               هل أنت متأكد من حذف قسم <strong>"{deletingDept.name}"</strong>؟
+              {assigned > 0 && ` يوجد ${assigned} موظف مسجلون في هذا القسم وسيبقى اسم القسم في بياناتهم.`}
             </p>
+
+            {confirmError && <div className="mt-3"><InlineError message={confirmError} /></div>}
 
             <div className="flex justify-center gap-2 mt-5">
               <button
                 type="button"
                 onClick={() => setDeletingDept(null)}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                disabled={pending}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl disabled:opacity-50"
               >
                 إلغاء
               </button>
               <button
                 type="button"
                 onClick={handleConfirmDeleteDept}
-                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs"
+                disabled={pending}
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 disabled:opacity-60"
               >
-                نعم، حذف
+                {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>{pending ? 'جارٍ الحذف...' : 'نعم، حذف'}</span>
               </button>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* 15. Super Admin Management Modal (Dedicated Popup) */}
       {isSuperAdminModalOpen && isSuperAdmin && (

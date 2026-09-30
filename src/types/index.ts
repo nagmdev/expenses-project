@@ -79,6 +79,8 @@ export interface ServiceCategory {
   defaultPaymentMethod?: PaymentMethod; // طريقة الصرف الافتراضية
   defaultAccountId?: string; // الخزينة أو الحساب المالي الافتراضي
   costCenter?: string; // مركز التكلفة / الفرع
+  /** false = deactivated (in use, so never hard-deleted): not offered for new requests or settlements. Missing = active. */
+  active?: boolean;
 }
 
 export const isServiceMatchingOrg = (service: ServiceCategory, targetOrgId?: string): boolean => {

@@ -3,6 +3,7 @@ import { idFromKey } from '../utils/ids';
 import {
   COL,
   DomainError,
+  assertOrgWritable,
   assertRole,
   auditIdFor,
   pad,
@@ -12,9 +13,16 @@ import {
   writeAudit,
   writeCounter,
   type Actor,
+  formatAmount,
 } from './common';
 import type { DataStore } from './store';
 import { applyMovement, readAccountWithParent, type MutationOutcome } from './treasury';
+
+/** Who may decide, pay or edit a visa request (firestore.rules → visaRequests update: isFinance). */
+const VISA_STAFF = ['super_admin', 'org_admin', 'finance'] as const;
+/** Who may delete one (firestore.rules → visaRequests delete: isOrgAdmin). */
+const VISA_ADMINS = ['super_admin', 'org_admin'] as const;
+const currencyOf = (c?: string | null) => ((c || '').trim() || 'EGP').toUpperCase();
 
 export type NewVisaInput = Omit<
   VisaRequest,
@@ -29,6 +37,10 @@ export async function createVisaRequest(
   now: Date = new Date(),
 ): Promise<MutationOutcome<VisaRequest>> {
   if (!input.orgId) throw new DomainError('missing_org', 'يرجى تحديد الشركة.');
+  // A request is filed in one's own name; only a company admin may file one for someone else (rules → create).
+  if (input.requesterId && input.requesterId !== actor.id && !(VISA_ADMINS as readonly string[]).includes(actor.role)) {
+    throw new DomainError('forbidden', 'لا يمكن تسجيل طلب تأشيرة باسم موظف آخر.');
+  }
   const total = requirePositiveAmount(input.totalAmount, 'يرجى إدخال التكلفة الإجمالية للتأشيرة.');
   const id = idFromKey('visa', operationKey);
   const nowIso = now.toISOString();
@@ -37,6 +49,7 @@ export async function createVisaRequest(
   return store.runTransaction(async tx => {
     const existing = await tx.get<VisaRequest>(COL.visaRequests, id);
     if (existing) return { value: existing, changed: false, reason: 'duplicate_operation' };
+    await assertOrgWritable(tx, input.orgId);
     const counter = await readCounter(tx, `visa-${year}`);
     const visa: VisaRequest = {
       ...input,
@@ -61,7 +74,7 @@ export async function createVisaRequest(
         entityId: id,
         entityName: `طلب تأشيرة: ${visa.travelerName} (${visa.requestNumber})`,
         orgId: visa.orgId,
-        details: `تم إنشاء طلب تأشيرة جديد للمسافر "${visa.travelerName}" برقم جواز (${visa.passportNumber}) إلى (${visa.destinationCountry || 'غير محدد'}) بمبلغ ${total.toLocaleString()} ${visa.currency} - المورد: ${visa.serviceProviderName}`,
+        details: `تم إنشاء طلب تأشيرة جديد للمسافر "${visa.travelerName}" برقم جواز (${visa.passportNumber}) إلى (${visa.destinationCountry || 'غير محدد'}) بمبلغ ${formatAmount(total)} ${visa.currency} - المورد: ${visa.serviceProviderName}`,
       },
       auditIdFor(operationKey),
       nowIso,
@@ -70,15 +83,21 @@ export async function createVisaRequest(
   });
 }
 
+/**
+ * Approves or rejects a visa request. The decision is always recorded in the name of the
+ * ACTING user (actor.name / actor.id); `approverName` is accepted from older callers but
+ * ignored — a caller-supplied name (it used to be a hard-coded 'محمود') is never stored.
+ */
 export async function decideVisaRequest(
   store: DataStore,
   actor: Actor,
   visaId: string,
-  decision: { type: 'approve'; approverName: string } | { type: 'reject'; approverName: string; reason: string },
+  decision: { type: 'approve'; approverName?: string } | { type: 'reject'; reason: string; approverName?: string },
   operationKey: string,
   now: Date = new Date(),
 ): Promise<MutationOutcome<VisaRequest>> {
-  assertRole(actor, ['super_admin', 'org_admin', 'finance'], 'اعتماد ورفض التأشيرات متاح للإدارة فقط.');
+  assertRole(actor, VISA_STAFF, 'اعتماد ورفض التأشيرات متاح للإدارة فقط.');
+  const approverName = (actor.name || '').trim() || actor.email || 'المسؤول';
   if (decision.type === 'reject' && !decision.reason.trim()) throw new DomainError('invalid_input', 'يرجى كتابة سبب الرفض.');
   const nowIso = now.toISOString();
 
@@ -102,7 +121,7 @@ export async function decideVisaRequest(
     const patch = {
       status,
       approvedBy: actor.id,
-      approvedByName: decision.approverName,
+      approvedByName: approverName,
       approvedAt: nowIso,
       rejectionReason: decision.type === 'reject' ? decision.reason.trim() : null,
       updatedAt: nowIso,
@@ -119,8 +138,8 @@ export async function decideVisaRequest(
         orgId: visa.orgId,
         details:
           decision.type === 'approve'
-            ? `قام "${decision.approverName}" باعتماد طلب التأشيرة للمسافر "${visa.travelerName}" (${visa.requestNumber})`
-            : `تم رفض طلب التأشيرة للمسافر "${visa.travelerName}" بسبب: "${decision.reason}" بواسطة ${decision.approverName}`,
+            ? `قام "${approverName}" باعتماد طلب التأشيرة للمسافر "${visa.travelerName}" (${visa.requestNumber})`
+            : `تم رفض طلب التأشيرة للمسافر "${visa.travelerName}" بسبب: "${decision.reason.trim()}" بواسطة ${approverName}`,
       },
       auditIdFor(operationKey),
       nowIso,
@@ -139,7 +158,7 @@ export async function addVisaPayment(
   operationKey: string,
   now: Date = new Date(),
 ): Promise<MutationOutcome<VisaRequest>> {
-  assertRole(actor, ['super_admin', 'org_admin', 'finance'], 'تسجيل الدفعات متاح لمسؤولي الخزينة فقط.');
+  assertRole(actor, VISA_STAFF, 'تسجيل الدفعات متاح لمسؤولي الخزينة فقط.');
   const amount = requirePositiveAmount(payment.amount, 'مبلغ الدفعة يجب أن يكون أكبر من الصفر.');
   const paymentId = idFromKey('vpay', operationKey);
   const nowIso = now.toISOString();
@@ -157,7 +176,7 @@ export async function addVisaPayment(
     if (newPaid > toMoney(visa.totalAmount)) {
       throw new DomainError(
         'overpayment',
-        `إجمالي الدفعات المسددة (${newPaid.toLocaleString()} ${visa.currency}) لا يمكن أن يتجاوز إجمالي تكلفة التأشيرة (${Number(visa.totalAmount).toLocaleString()} ${visa.currency}).`,
+        `إجمالي الدفعات المسددة (${formatAmount(newPaid)} ${visa.currency}) لا يمكن أن يتجاوز إجمالي تكلفة التأشيرة (${formatAmount(Number(visa.totalAmount))} ${visa.currency}).`,
       );
     }
 
@@ -169,12 +188,20 @@ export async function addVisaPayment(
       if (account.orgId && visa.orgId && account.orgId !== visa.orgId) {
         throw new DomainError('cross_org', 'لا يمكن السداد من حساب تابع لشركة أخرى.');
       }
+      if (account.active === false) throw new DomainError('inactive_account', `الحساب "${account.name}" معطل ولا يمكن السداد منه.`);
+      if (currencyOf(account.currency) !== currencyOf(visa.currency)) {
+        throw new DomainError(
+          'currency_mismatch',
+          `تعارض في العملات: عملة التأشيرة (${currencyOf(visa.currency)}) لا تطابق عملة الحساب "${account.name}" (${currencyOf(account.currency)}).`,
+        );
+      }
       movement = applyMovement({
         account: read.account,
         parent: read.parent,
         type: 'out',
         amount,
-        allowOverdraft: true,
+        // Never below zero (nor the bank behind an InstaPay): the payment is refused instead.
+        allowOverdraft: false,
         ledgerId: `tx-${operationKey}`,
         referenceType: 'request',
         referenceId: visa.id,
@@ -213,9 +240,9 @@ export async function addVisaPayment(
         actionType: 'create',
         entityType: 'payment' as any,
         entityId: paymentId,
-        entityName: `دفعة تأشيرة: ${amount} ${visa.currency}`,
+        entityName: `دفعة تأشيرة: ${formatAmount(amount)} ${visa.currency}`,
         orgId: visa.orgId,
-        details: `تم تسجيل سداد دفعة بقيمة ${amount.toLocaleString()} ${visa.currency} للمسافر "${visa.travelerName}" (المتبقي: ${remaining.toLocaleString()} ${visa.currency})`,
+        details: `تم تسجيل سداد دفعة بقيمة ${formatAmount(amount)} ${visa.currency} للمسافر "${visa.travelerName}" (المتبقي: ${formatAmount(remaining)} ${visa.currency})`,
       },
       auditIdFor(operationKey),
       nowIso,
@@ -224,9 +251,10 @@ export async function addVisaPayment(
   });
 }
 
-const VISA_PROTECTED: Array<keyof VisaRequest> = ['id', 'requestNumber', 'status', 'paidAmount', 'remainingBalance', 'payments', 'createdAt', 'approvedBy', 'approvedAt'];
+const VISA_PROTECTED: Array<keyof VisaRequest> = ['id', 'requestNumber', 'status', 'paidAmount', 'remainingBalance', 'payments', 'createdAt', 'approvedBy', 'approvedByName', 'approvedAt'];
 
 export async function updateVisaRequest(store: DataStore, actor: Actor, visaId: string, updates: Partial<VisaRequest>, now: Date = new Date()) {
+  assertRole(actor, VISA_STAFF, 'تعديل طلبات التأشيرات متاح للإدارة ومسؤولي الخزينة فقط.');
   const clean: Record<string, any> = { ...updates };
   VISA_PROTECTED.forEach(f => delete clean[f as string]);
   const nowIso = now.toISOString();
@@ -248,6 +276,7 @@ export async function updateVisaRequest(store: DataStore, actor: Actor, visaId: 
 }
 
 export async function deleteVisaRequest(store: DataStore, actor: Actor, visaId: string, operationKey: string, now: Date = new Date()) {
+  assertRole(actor, VISA_ADMINS, 'حذف طلبات التأشيرات متاح لمدير الشركة فقط.');
   const nowIso = now.toISOString();
   return store.runTransaction(async tx => {
     const visa = await tx.get<VisaRequest>(COL.visaRequests, visaId);

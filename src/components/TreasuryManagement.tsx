@@ -28,7 +28,10 @@ import {
   TrendingDown,
   Download,
   FileSpreadsheet,
-  Unlink
+  Unlink,
+  Power,
+  PowerOff,
+  Lock
 } from 'lucide-react';
 import {
   handleNumericKeyDown,
@@ -37,9 +40,10 @@ import {
   sanitizeIBAN,
   sanitizeInstaPay
 } from '../utils/validation';
-import { useSubmitGuard } from '../hooks/useSubmitGuard';
+import { useKeyedSubmitGuard, useSubmitGuard } from '../hooks/useSubmitGuard';
 import { isLegacyLinkedWallet, linkedParentIdOf, MAX_CUSTODY_RETURN_BATCH } from '../domain/treasury';
-import { toMoney } from '../domain/common';
+import { isArchivedOrg, toMoney } from '../domain/common';
+import { can } from '../utils/permissions';
 
 const errorText = (err: unknown, fallback: string) =>
   err instanceof Error && err.message ? err.message : fallback;
@@ -47,6 +51,23 @@ const errorText = (err: unknown, fallback: string) =>
 const balanceOf = (acc: PaymentAccount) => toMoney(acc.currentBalance ?? acc.balance ?? 0);
 // Same normalisation as the domain (src/domain/treasury.ts): an empty currency is EGP.
 const currencyOf = (c?: string | null) => ((c || '').trim() || 'EGP').toUpperCase();
+// Amounts always in Western digits, whatever the browser locale.
+const fmtMoney = (n: unknown) => toMoney(n).toLocaleString('en-US', { maximumFractionDigits: 2 });
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+/** Local date (browser time zone, e.g. Africa/Cairo), Western digits: YYYY-MM-DD. */
+const localDate = (d: Date = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+/**
+ * A stored ISO timestamp (UTC) in the viewer's local time with Western digits:
+ * YYYY-MM-DD HH:mm (or HH:mm:ss). Slicing the ISO string showed UTC, 3 h off in Cairo.
+ */
+const localDateTime = (iso?: string | null, withSeconds = false) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}${withSeconds ? `:${pad2(d.getSeconds())}` : ''}`;
+  return `${localDate(d)} ${hm}`;
+};
 
 // Readable label of a ledger entry's origin (AccountTransaction.referenceType).
 const REFERENCE_TYPE_LABELS: Record<TransactionReferenceType, string> = {
@@ -69,6 +90,7 @@ const ACCOUNT_TYPE_SHORT: Record<PaymentAccountType, string> = {
   cash: 'كاش',
   other: 'أخرى',
 };
+const accountTypeShort = (type?: string) => ACCOUNT_TYPE_SHORT[type as PaymentAccountType] || 'أخرى';
 
 export const TreasuryManagement: React.FC = () => {
   const { 
@@ -84,6 +106,7 @@ export const TreasuryManagement: React.FC = () => {
     addPaymentAccount,
     updatePaymentAccount,
     deletePaymentAccount,
+    togglePaymentAccountStatus,
     recordManualAccountAdjustment,
     resolveParentBankAccount,
     custodies,
@@ -94,9 +117,16 @@ export const TreasuryManagement: React.FC = () => {
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
-  // Roles the domain lets move money between treasuries / take custody cash back (see src/domain/treasury.ts).
-  const canMoveMoney = isSuperAdmin || currentRole === 'org_admin' || currentRole === 'finance';
+  // Every action is shown only to the roles the domain / firestore.rules accept (src/utils/permissions.ts).
+  const canViewTreasury = can(currentRole, 'viewTreasury');
+  const canMoveMoney = can(currentRole, 'moveMoney');
+  const canCreateAccounts = can(currentRole, 'createAccounts');
+  const canEditAccounts = can(currentRole, 'editAccounts');
+  const canDeleteAccounts = can(currentRole, 'deleteAccounts');
+  const canDetachWallets = can(currentRole, 'detachWallets');
   const orgList = isSuperAdmin ? (allOrganizations.length > 0 ? allOrganizations : organizations) : organizations;
+  // A new account goes only to a company that is still active (an archived one takes no new records).
+  const creatableOrgs = orgList.filter(o => !isArchivedOrg(o));
   const targetAccounts = isSuperAdmin ? allPaymentAccounts : paymentAccounts;
   const targetTransactions = isSuperAdmin ? allTransactions : transactions;
   const targetCustodies = isSuperAdmin ? allCustodies : custodies;
@@ -127,8 +157,44 @@ export const TreasuryManagement: React.FC = () => {
   // the bank behind a linked InstaPay channel, otherwise the account itself.
   const fundsHolderIdOf = useCallback((acc: PaymentAccount) => linkedParentOf(acc)?.id || acc.id, [linkedParentOf]);
 
-  // Success feedback for money movements (transfer / custody return)
+  // Success feedback for every money movement / account change, and the error of a card action
   const [notice, setNotice] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const showNotice = (text: string) => {
+    setActionError(null);
+    setNotice(text);
+  };
+
+  // Ledger entries per account (history check before a delete, and the card's statement count)
+  const ledgerCountByAccount = useMemo(() => {
+    const counts = new Map<string, number>();
+    cleanTargetTransactions.forEach(tx => counts.set(tx.accountId, (counts.get(tx.accountId) || 0) + 1));
+    return counts;
+  }, [cleanTargetTransactions]);
+
+  // An account that holds money or has any history is never hard-deleted (its ledger would be
+  // orphaned); it is deactivated instead. Mirrors the domain guard on deletePaymentAccount.
+  const accountHasHistory = (acc: PaymentAccount) =>
+    balanceOf(acc) !== 0 ||
+    toMoney(acc.totalIn) !== 0 ||
+    toMoney(acc.totalOut) !== 0 ||
+    toMoney(acc.initialBalance) !== 0 ||
+    (ledgerCountByAccount.get(acc.id) || 0) > 0;
+
+  // Internal transfers only move money between the company's own accounts: they change the
+  // balances but are neither income nor spending, so the Total IN / Total OUT headline leaves
+  // them out (both legs, and the mirror entry on an InstaPay channel's bank).
+  const transferTotalsByAccount = useMemo(() => {
+    const totals = new Map<string, { in: number; out: number }>();
+    cleanTargetTransactions.forEach(tx => {
+      if (tx.referenceType !== 'transfer') return;
+      const row = totals.get(tx.accountId) || { in: 0, out: 0 };
+      if (tx.type === 'in') row.in += Number(tx.amount || 0);
+      else row.out += Number(tx.amount || 0);
+      totals.set(tx.accountId, row);
+    });
+    return totals;
+  }, [cleanTargetTransactions]);
 
   // Filters & State
   const [selectedOrgFilter, setSelectedOrgFilter] = useState<string>(
@@ -184,6 +250,8 @@ export const TreasuryManagement: React.FC = () => {
   const adjustmentGuard = useSubmitGuard();
   const custodyReturnGuard = useSubmitGuard();
   const transferGuard = useSubmitGuard();
+  // Per-card actions (delete / deactivate / reactivate) with their own pending state
+  const accountActions = useKeyedSubmitGuard();
   const isSavingAccount = accountGuard.pending;
   const isAdjusting = adjustmentGuard.pending || custodyReturnGuard.pending;
   const isTransferring = transferGuard.pending;
@@ -191,44 +259,46 @@ export const TreasuryManagement: React.FC = () => {
   // Account Detail Inspection
   const [inspectingAccount, setInspectingAccount] = useState<PaymentAccount | null>(null);
 
-  // Filtered Accounts
-  const filteredAccounts = useMemo(() => {
-    return targetAccounts.filter(acc => {
-      if (selectedOrgFilter !== 'all' && acc.orgId !== selectedOrgFilter) return false;
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matchName = acc.name.toLowerCase().includes(q);
-        const matchId = acc.accountIdentifier.toLowerCase().includes(q);
-        const matchBank = (acc.bankName || '').toLowerCase().includes(q);
-        if (!matchName && !matchId && !matchBank) return false;
-      }
-      return true;
-    });
-  }, [targetAccounts, selectedOrgFilter, searchQuery]);
+  const searchNeedle = searchQuery.trim().toLowerCase();
 
-  // Filtered Transactions
+  // Accounts of the selected company, before the search box (tells "no match" from "none yet")
+  const orgScopedAccounts = useMemo(
+    () => targetAccounts.filter(acc => selectedOrgFilter === 'all' || acc.orgId === selectedOrgFilter),
+    [targetAccounts, selectedOrgFilter]
+  );
+
+  // Filtered Accounts: name, identifier (IBAN / IPA / phone / code), bank or type (Arabic label or code)
+  const filteredAccounts = useMemo(() => {
+    if (!searchNeedle) return orgScopedAccounts;
+    return orgScopedAccounts.filter(acc =>
+      (acc.name || '').toLowerCase().includes(searchNeedle) ||
+      (acc.accountIdentifier || '').toLowerCase().includes(searchNeedle) ||
+      (acc.bankName || '').toLowerCase().includes(searchNeedle) ||
+      accountTypeShort(acc.type).includes(searchNeedle) ||
+      (acc.type || '').toLowerCase() === searchNeedle
+    );
+  }, [orgScopedAccounts, searchNeedle]);
+
+  // Filtered Transactions: the same search as the cards (every movement of a matching account),
+  // plus a match on the entry's own text (description, reference, responsible person).
   const filteredTransactions = useMemo(() => {
+    const matchingAccountIds = new Set(filteredAccounts.map(a => a.id));
     return cleanTargetTransactions.filter(tx => {
       if (selectedOrgFilter !== 'all' && tx.orgId !== selectedOrgFilter) return false;
       if (inspectingAccount && tx.accountId !== inspectingAccount.id) return false;
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matchAcc = tx.accountName.toLowerCase().includes(q);
-        const matchDesc = (tx.description || '').toLowerCase().includes(q);
-        const matchRef = (tx.referenceNumber || '').toLowerCase().includes(q);
-        const matchActor = (tx.actorName || '').toLowerCase().includes(q);
+      if (searchNeedle) {
+        const matchAcc = matchingAccountIds.has(tx.accountId) || (tx.accountName || '').toLowerCase().includes(searchNeedle);
+        const matchDesc = (tx.description || '').toLowerCase().includes(searchNeedle);
+        const matchRef = (tx.referenceNumber || '').toLowerCase().includes(searchNeedle);
+        const matchActor = (tx.actorName || '').toLowerCase().includes(searchNeedle);
         if (!matchAcc && !matchDesc && !matchRef && !matchActor) return false;
       }
       return true;
     });
-  }, [cleanTargetTransactions, selectedOrgFilter, inspectingAccount, searchQuery]);
+  }, [cleanTargetTransactions, filteredAccounts, selectedOrgFilter, inspectingAccount, searchNeedle]);
 
   // Overall Financial Stats (Aggregated only across primary physical containers to prevent double counting linked channels)
   const stats = useMemo(() => {
-    let totalBalance = 0;
-    let totalIn = 0;
-    let totalOut = 0;
-
     // An InstaPay channel linked to a bank account is a mirror of that bank's funds (dual
     // deduction keeps both in sync), so for macro-level liquidity totals (الرصيد الكلي، إجمالي
     // الوارد، إجمالي المنصرف) it must not be counted twice. E-wallets are standalone treasuries
@@ -244,25 +314,39 @@ export const TreasuryManagement: React.FC = () => {
       accountsToSum = filteredAccounts;
     }
 
+    // Totals per currency: amounts in different currencies are never added under one label.
+    // Total IN / OUT leave internal transfers out (they are not income or spending).
+    const byCurrency = new Map<string, { balance: number; totalIn: number; totalOut: number }>();
     accountsToSum.forEach(acc => {
-      totalBalance += Number(acc.currentBalance ?? acc.balance ?? 0);
-      totalIn += Number(acc.totalIn ?? 0);
-      totalOut += Number(acc.totalOut ?? 0);
+      const cur = currencyOf(acc.currency);
+      const row = byCurrency.get(cur) || { balance: 0, totalIn: 0, totalOut: 0 };
+      const moved = transferTotalsByAccount.get(acc.id);
+      row.balance = toMoney(row.balance + balanceOf(acc));
+      row.totalIn = toMoney(row.totalIn + Math.max(0, Number(acc.totalIn ?? 0) - (moved?.in || 0)));
+      row.totalOut = toMoney(row.totalOut + Math.max(0, Number(acc.totalOut ?? 0) - (moved?.out || 0)));
+      byCurrency.set(cur, row);
     });
+    // The company's own currency first, then the others alphabetically
+    const mainCurrency = currencyOf(activeOrg?.currency);
+    const currencies = Array.from(byCurrency.keys()).sort((a, b) =>
+      a === mainCurrency ? -1 : b === mainCurrency ? 1 : a.localeCompare(b)
+    );
+    const totals = currencies.map(currency => ({ currency, ...byCurrency.get(currency)! }));
+    const primary = totals[0] || { currency: mainCurrency, balance: 0, totalIn: 0, totalOut: 0 };
+    const otherCurrencies = totals.slice(1);
 
     const primaryCount = accountsToSum.length;
     const totalCount = filteredAccounts.length;
     const linkedCount = totalCount - primaryCount;
 
-    return { 
-      totalBalance, 
-      totalIn, 
-      totalOut, 
-      primaryCount, 
-      totalCount, 
-      linkedCount 
+    return {
+      primary,
+      otherCurrencies,
+      primaryCount,
+      totalCount,
+      linkedCount
     };
-  }, [filteredAccounts, linkedParentOf]);
+  }, [filteredAccounts, linkedParentOf, transferTotalsByAccount, activeOrg?.currency]);
 
   // Export Filtered Ledger Transactions to Excel / CSV with UTF-8 BOM
   const exportLedgerToExcel = () => {
@@ -292,7 +376,8 @@ export const TreasuryManagement: React.FC = () => {
       const acc = targetAccounts.find(a => a.id === tx.accountId);
       const txCurrency = acc?.currency || activeOrg?.currency || 'EGP';
       const typeText = tx.type === 'in' ? 'وارد / إيداع (+ IN)' : 'منصرف / سحب (- OUT)';
-      const dateFormatted = tx.createdAt ? tx.createdAt.replace('T', ' ').slice(0, 19) : '';
+      // Local time (as on every other screen), not the stored UTC
+      const dateFormatted = localDateTime(tx.createdAt, true);
 
       return [
         dateFormatted,
@@ -315,9 +400,9 @@ export const TreasuryManagement: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    const fileName = inspectingAccount 
-      ? `كشف_حساب_${inspectingAccount.name.replace(/[/\\?%*:|"<>]/g, '_')}_${new Date().toISOString().slice(0, 10)}.csv`
-      : `سجل_حركات_الخزينة_${new Date().toISOString().slice(0, 10)}.csv`;
+    const fileName = inspectingAccount
+      ? `كشف_حساب_${inspectingAccount.name.replace(/[/\\?%*:|"<>]/g, '_')}_${localDate()}.csv`
+      : `سجل_حركات_الخزينة_${localDate()}.csv`;
     link.setAttribute('download', fileName);
     document.body.appendChild(link);
     link.click();
@@ -332,9 +417,11 @@ export const TreasuryManagement: React.FC = () => {
     setAccType('instapay');
     setAccIdentifier('');
     setAccBankName('');
-    const targetOrg = selectedOrgFilter !== 'all' 
-      ? selectedOrgFilter 
-      : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (orgList[0]?.id || ''));
+    const preferredOrg = selectedOrgFilter !== 'all'
+      ? selectedOrgFilter
+      : (activeOrgId && activeOrgId !== 'all' ? activeOrgId : (creatableOrgs[0]?.id || ''));
+    // The super admin's picker lists active companies only: an archived default gives way to the first active one.
+    const targetOrg = isSuperAdmin && !creatableOrgs.some(o => o.id === preferredOrg) ? (creatableOrgs[0]?.id || '') : preferredOrg;
     const defaultBank = targetAccounts.find(a => a.orgId === targetOrg && a.type === 'bank');
     setAccParentAccountId(defaultBank?.id || '');
     setAccCurrency(activeOrg?.currency || 'EGP');
@@ -409,9 +496,51 @@ export const TreasuryManagement: React.FC = () => {
 
         accountGuard.rotateKey();
         setIsAccountModalOpen(false);
+        showNotice(editingAccount ? `تم حفظ تعديلات الحساب "${accName.trim()}".` : `تم إنشاء الحساب "${accName.trim()}" وتفعيله.`);
       } catch (err) {
         console.error(err);
         alert(errorText(err, 'حدث خطأ أثناء حفظ بيانات الحساب.'));
+      }
+    });
+  };
+
+  // Delete: only an account with no balance and no history (asks first)
+  const handleDeleteAccount = async (acc: PaymentAccount) => {
+    if (accountHasHistory(acc)) {
+      setNotice(null);
+      setActionError(`لا يمكن حذف الحساب "${acc.name}" لأن له رصيداً أو حركات مسجلة؛ يمكنك تعطيله بدلاً من الحذف.`);
+      return;
+    }
+    if (!window.confirm(`هل أنت متأكد من حذف الحساب "${acc.name}" نهائياً؟ لا يمكن التراجع عن هذا الإجراء.`)) return;
+    await accountActions.run(`delete:${acc.id}`, async () => {
+      try {
+        setActionError(null);
+        await deletePaymentAccount(acc.id);
+        if (inspectingAccount?.id === acc.id) setInspectingAccount(null);
+        showNotice(`تم حذف الحساب "${acc.name}".`);
+      } catch (err) {
+        console.error(err);
+        setNotice(null);
+        setActionError(errorText(err, 'حدث خطأ أثناء حذف الحساب.'));
+      }
+    });
+  };
+
+  // Deactivate / reactivate: keeps the balance and the full ledger (asks first)
+  const handleToggleAccountActive = async (acc: PaymentAccount, active: boolean) => {
+    const question = active
+      ? `إعادة تفعيل الحساب "${acc.name}"؟ سيظهر مجدداً في قوائم الإيداع والسحب والتحويل والصرف.`
+      : `تعطيل الحساب "${acc.name}"؟ يبقى رصيده (${fmtMoney(balanceOf(acc))} ${currencyOf(acc.currency)}) وكشف حركاته كما هو، ولن يُستخدم في أي عملية جديدة حتى تعيد تفعيله.`;
+    if (!window.confirm(question)) return;
+    await accountActions.run(`toggle:${acc.id}`, async () => {
+      try {
+        setActionError(null);
+        await togglePaymentAccountStatus(acc.id, active);
+        showNotice(active ? `تم إعادة تفعيل الحساب "${acc.name}".` : `تم تعطيل الحساب "${acc.name}"؛ رصيده وكشف حركاته محفوظان.`);
+      } catch (err) {
+        console.error(err);
+        setNotice(null);
+        setActionError(errorText(err, 'حدث خطأ أثناء تغيير حالة الحساب.'));
       }
     });
   };
@@ -437,6 +566,24 @@ export const TreasuryManagement: React.FC = () => {
     ? targetAccounts.find(a => a.id === adjustmentTargetAccount.id) || adjustmentTargetAccount
     : null;
   const isCustodyReturnMode = adjustmentType === 'in' && depositMode === 'custody';
+
+  // No account may go below zero: a withdrawal needs the account — and the bank behind an
+  // InstaPay channel — to cover it (same rule as transfers and the domain's movement batch).
+  const adjustmentParent = linkedParentOf(adjustmentAccount);
+  const adjustmentAvailable = adjustmentAccount
+    ? adjustmentParent
+      ? Math.min(balanceOf(adjustmentAccount), balanceOf(adjustmentParent))
+      : balanceOf(adjustmentAccount)
+    : 0;
+  const adjustmentAmountNum = toMoney(parseFloat(adjustmentAmount) || 0);
+  const withdrawExceedsBalance = adjustmentType === 'out' && adjustmentAmountNum > 0 && adjustmentAmountNum > adjustmentAvailable;
+  const insufficientWithdrawMessage = (acc: PaymentAccount) => {
+    const cur = currencyOf(acc.currency);
+    const limitedByBank = adjustmentParent && balanceOf(adjustmentParent) < balanceOf(acc);
+    return `الرصيد غير كافٍ: المتاح للسحب ${fmtMoney(adjustmentAvailable)} ${cur}${
+      limitedByBank ? ` (محدود برصيد الحساب البنكي المرتبط "${adjustmentParent?.name}")` : ''
+    } والمبلغ المطلوب ${fmtMoney(adjustmentAmountNum)} ${cur}. لا يُسمح بأن يصبح رصيد أي حساب بالسالب؛ قم بإيداع رصيد في الحساب أولاً ثم أعد المحاولة.`;
+  };
 
   // Custodies whose remaining cash can go back into the deposit window's account:
   // same company and currency as that account, something still left with the employee.
@@ -512,9 +659,9 @@ export const TreasuryManagement: React.FC = () => {
         const res = await returnCustodyRemainders(ids, account.id, custodyReturnNotes.trim(), { idempotencyKey });
         custodyReturnGuard.rotateKey();
         setIsAdjustmentModalOpen(false);
-        setNotice(
+        showNotice(
           res.returnedCount > 0
-            ? `تم استرداد المتبقي من ${res.returnedCount} عهدة بإجمالي ${res.totalReturned.toLocaleString()} ${currencyOf(account.currency)} وإيداعه في "${account.name}".` +
+            ? `تم استرداد المتبقي من ${res.returnedCount} عهدة بإجمالي ${res.totalReturned.toLocaleString('en-US')} ${currencyOf(account.currency)} وإيداعه في "${account.name}".` +
               (res.skippedCount > 0 ? ` (تم تخطي ${res.skippedCount} عهدة لم يعد بها متبقٍ أو سبق ردها.)` : '')
             : 'تم تنفيذ عملية الاسترداد هذه مسبقاً ولم تتكرر.'
         );
@@ -532,21 +679,39 @@ export const TreasuryManagement: React.FC = () => {
       await handleReturnCustodies();
       return;
     }
-    const amountNum = parseFloat(adjustmentAmount);
-    if (!amountNum || amountNum <= 0) return;
+    const amountNum = adjustmentAmountNum;
+    if (!amountNum || amountNum <= 0) {
+      setAdjustmentError('يرجى إدخال مبلغ صحيح أكبر من الصفر.');
+      return;
+    }
+    const account = adjustmentAccount || adjustmentTargetAccount;
+    if (account.active === false) {
+      setAdjustmentError(`الحساب "${account.name}" معطل؛ أعد تفعيله أولاً أو اختر حساباً آخر.`);
+      return;
+    }
+    if (adjustmentType === 'out' && amountNum > adjustmentAvailable) {
+      setAdjustmentError(insufficientWithdrawMessage(account));
+      return;
+    }
+    const type = adjustmentType;
 
     await adjustmentGuard.run(async (idempotencyKey) => {
       try {
         setAdjustmentError('');
         await recordManualAccountAdjustment(
-          adjustmentTargetAccount.id,
-          adjustmentType,
+          account.id,
+          type,
           amountNum,
           adjustmentReason.trim(),
           { idempotencyKey }
         );
         adjustmentGuard.rotateKey();
         setIsAdjustmentModalOpen(false);
+        showNotice(
+          type === 'in'
+            ? `تم إيداع ${fmtMoney(amountNum)} ${currencyOf(account.currency)} في "${account.name}" بنجاح.`
+            : `تم سحب ${fmtMoney(amountNum)} ${currencyOf(account.currency)} من "${account.name}" بنجاح.`
+        );
       } catch (err) {
         console.error(err);
         setAdjustmentError(errorText(err, 'حدث خطأ أثناء حفظ الحركة المالية.'));
@@ -604,7 +769,7 @@ export const TreasuryManagement: React.FC = () => {
   const transferOptionLabel = (acc: PaymentAccount) => {
     // Across companies ("all" view of the platform owner) the company code tells same-named accounts apart
     const org = isSuperAdmin && selectedOrgFilter === 'all' ? orgList.find(o => o.id === acc.orgId) : undefined;
-    return `${acc.name} (${ACCOUNT_TYPE_SHORT[acc.type] || acc.type})${org ? ` [${org.code}]` : ''} — الرصيد: ${balanceOf(acc).toLocaleString()} ${currencyOf(acc.currency)}`;
+    return `${acc.name} (${accountTypeShort(acc.type)})${org ? ` [${org.code}]` : ''} — الرصيد: ${fmtMoney(balanceOf(acc))} ${currencyOf(acc.currency)}`;
   };
 
   const handleChangeTransferFrom = (fromId: string) => {
@@ -625,7 +790,7 @@ export const TreasuryManagement: React.FC = () => {
       return;
     }
     if (transferExceedsBalance) {
-      setTransferError(`المبلغ أكبر من الرصيد المتاح للتحويل (${transferAvailable.toLocaleString()} ${currencyOf(transferFrom.currency)}).`);
+      setTransferError(`المبلغ أكبر من الرصيد المتاح للتحويل (${transferAvailable.toLocaleString('en-US')} ${currencyOf(transferFrom.currency)}).`);
       return;
     }
     const from = transferFrom;
@@ -639,9 +804,9 @@ export const TreasuryManagement: React.FC = () => {
         setIsTransferModalOpen(false);
         // Describe the transfer the server actually stored: a retry with the same key after the
         // form was edited returns the original transfer (money never moves twice).
-        const summary = `${res.amount.toLocaleString()} ${currencyOf(from.currency)} من "${res.fromAccountName || from.name}" إلى "${res.toAccountName || to.name}"`;
+        const summary = `${res.amount.toLocaleString('en-US')} ${currencyOf(from.currency)} من "${res.fromAccountName || from.name}" إلى "${res.toAccountName || to.name}"`;
         const number = res.transferNumber ? ` برقم ${res.transferNumber}` : '';
-        setNotice(
+        showNotice(
           res.changed
             ? `تم تحويل ${summary} بنجاح${number}.`
             : `تم تنفيذ هذا التحويل مسبقاً${number} (${summary}) ولم يتكرر.`
@@ -654,7 +819,6 @@ export const TreasuryManagement: React.FC = () => {
   };
 
   // Handlers for detaching a legacy linked wallet (فصل المحفظة عن البنك)
-  const canDetachWallets = isSuperAdmin || currentRole === 'org_admin';
   const legacyLinkedWallets = useMemo(() => filteredAccounts.filter(a => isLegacyLinkedWallet(a)), [filteredAccounts]);
   const detachWallet = detachWalletId ? targetAccounts.find(a => a.id === detachWalletId) || null : null;
   const detachBank = linkedParentOf(detachWallet);
@@ -702,12 +866,12 @@ export const TreasuryManagement: React.FC = () => {
         const res = await detachLegacyWallet(wallet.id, correction, detachTotals, detachNote.trim(), { idempotencyKey });
         detachGuard.rotateKey();
         setDetachWalletId('');
-        setNotice(
+        showNotice(
           !res.changed
             ? `المحفظة "${wallet.name}" مفصولة بالفعل عن البنك.`
             : correction === 0
             ? `تم فصل المحفظة "${wallet.name}" عن "${bankName}" بدون تعديل رصيد البنك؛ أصبحت خزينة مستقلة.`
-            : `تم فصل المحفظة "${wallet.name}" عن "${bankName}" وتصحيح رصيد البنك بمبلغ ${correction > 0 ? '+' : '-'}${Math.abs(correction).toLocaleString()} ${currencyOf(wallet.currency)}؛ أصبحت خزينة مستقلة.`
+            : `تم فصل المحفظة "${wallet.name}" عن "${bankName}" وتصحيح رصيد البنك بمبلغ ${correction > 0 ? '+' : '-'}${Math.abs(correction).toLocaleString('en-US')} ${currencyOf(wallet.currency)}؛ أصبحت خزينة مستقلة.`
         );
       } catch (err) {
         console.error(err);
@@ -739,10 +903,30 @@ export const TreasuryManagement: React.FC = () => {
       case 'bank':
         return '🏛️ حساب بنكي';
       case 'cash':
-      default:
         return '💵 خزينة كاش (Petty Cash)';
+      default:
+        return '🗂️ حساب آخر';
     }
   };
+
+  // Treasury data is readable only by the money roles (firestore.rules); anyone else would see
+  // empty lists that look like "no accounts yet", and every button would end in a refusal.
+  if (!canViewTreasury) {
+    return (
+      <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center shadow-xs">
+        <div className="h-16 w-16 rounded-2xl bg-slate-100 text-slate-500 flex items-center justify-center mx-auto mb-3">
+          <Lock className="h-8 w-8" />
+        </div>
+        <h3 className="font-bold text-slate-800 text-sm">الخزائن وحسابات الدفع متاحة للمسؤول المالي ومدير الشركة فقط</h3>
+        <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+          حسابك لا يملك صلاحية الاطلاع على الأرصدة أو تنفيذ حركات مالية. تواصل مع مدير الشركة إذا كنت تحتاج هذه الصلاحية.
+        </p>
+      </div>
+    );
+  }
+
+  // Where the header's quick deposit starts: the first active account of the current view
+  const firstActiveAccount = filteredAccounts.find(a => a.active !== false) || orgScopedAccounts.find(a => a.active !== false);
 
   return (
     <div className="space-y-6">
@@ -767,21 +951,16 @@ export const TreasuryManagement: React.FC = () => {
 
         {/* Action Buttons */}
         <div className="flex items-center gap-2 flex-wrap">
-          <button
-            type="button"
-            onClick={() => {
-              const defaultAcc = filteredAccounts[0] || targetAccounts[0];
-              if (defaultAcc) {
-                handleOpenAdjustment(defaultAcc, 'in');
-              } else {
-                handleOpenAddAccount();
-              }
-            }}
-            className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl font-bold text-xs shadow-md transition cursor-pointer"
-          >
-            <ArrowDownLeft className="h-4 w-4" />
-            <span>⚡ إيداع وتغذية رصيد خزينة / بنك (+ IN)</span>
-          </button>
+          {canMoveMoney && firstActiveAccount && (
+            <button
+              type="button"
+              onClick={() => handleOpenAdjustment(firstActiveAccount, 'in')}
+              className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl font-bold text-xs shadow-md transition cursor-pointer"
+            >
+              <ArrowDownLeft className="h-4 w-4" />
+              <span>⚡ إيداع وتغذية رصيد خزينة / بنك (+ IN)</span>
+            </button>
+          )}
 
           {canMoveMoney && (
             <button
@@ -805,7 +984,7 @@ export const TreasuryManagement: React.FC = () => {
             <span>تصدير كشف الحسابات (Excel)</span>
           </button>
 
-          {(isSuperAdmin || currentRole === 'org_admin') && (
+          {canCreateAccounts && (
             <button
               type="button"
               onClick={handleOpenAddAccount}
@@ -818,7 +997,25 @@ export const TreasuryManagement: React.FC = () => {
         </div>
       </div>
 
-      {/* Success notice (transfer / custody return) */}
+      {/* Error of a card action (delete / deactivate) */}
+      {actionError && (
+        <div role="alert" className="flex items-start justify-between gap-3 bg-rose-50 border border-rose-200 text-rose-800 p-3.5 rounded-2xl text-xs font-bold shadow-2xs">
+          <div className="flex items-start gap-2">
+            <Info className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+            <span className="leading-relaxed">{actionError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="text-rose-500 hover:text-rose-800 p-1 hover:bg-rose-100 rounded-lg transition cursor-pointer shrink-0"
+            title="إخفاء"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Success notice (deposit / withdrawal / transfer / custody return / account changes) */}
       {notice && (
         <div className="flex items-start justify-between gap-3 bg-emerald-50 border border-emerald-200 text-emerald-900 p-3.5 rounded-2xl text-xs font-bold shadow-2xs">
           <div className="flex items-start gap-2">
@@ -870,8 +1067,13 @@ export const TreasuryManagement: React.FC = () => {
           <div className="relative z-10">
             <span className="text-emerald-100 text-xs font-bold block mb-1">الرصيد الكلي المتوفر (Total Balance)</span>
             <div className="text-2xl sm:text-3xl font-black tracking-tight">
-              {stats.totalBalance.toLocaleString()} <span className="text-xs font-normal opacity-80">{activeOrg?.currency || 'EGP'}</span>
+              {fmtMoney(stats.primary.balance)} <span className="text-xs font-normal opacity-80">{stats.primary.currency}</span>
             </div>
+            {stats.otherCurrencies.map(row => (
+              <div key={row.currency} className="text-sm font-black text-emerald-50/95 mt-0.5">
+                + {fmtMoney(row.balance)} <span className="text-[10px] font-normal opacity-80">{row.currency}</span>
+              </div>
+            ))}
             <div className="text-[11px] text-emerald-100/90 mt-2 flex items-center justify-between gap-1 flex-wrap">
               <span>
                 عبر {stats.primaryCount} أوعية مالية رئيسية
@@ -899,23 +1101,33 @@ export const TreasuryManagement: React.FC = () => {
             </span>
           </div>
           <div className="text-2xl font-black text-emerald-700">
-            +{stats.totalIn.toLocaleString()} <span className="text-xs font-bold text-slate-400">{activeOrg?.currency || 'EGP'}</span>
+            +{fmtMoney(stats.primary.totalIn)} <span className="text-xs font-bold text-slate-400">{stats.primary.currency}</span>
           </div>
-          <span className="text-[11px] text-slate-400 mt-1 block">توريدات، تحصيلات عملاء، وإيداعات نقدية رئيسية</span>
+          {stats.otherCurrencies.map(row => (
+            <div key={row.currency} className="text-sm font-black text-emerald-700/90 mt-0.5">
+              +{fmtMoney(row.totalIn)} <span className="text-[10px] font-bold text-slate-400">{row.currency}</span>
+            </div>
+          ))}
+          <span className="text-[11px] text-slate-400 mt-1 block">توريدات وإيداعات ومردودات عُهد (بدون التحويلات الداخلية بين الحسابات)</span>
         </div>
 
         {/* Total OUT */}
         <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs relative overflow-hidden">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-slate-500 text-xs font-bold">إجمالي المنصرف والتحويلات (Total OUT)</span>
+            <span className="text-slate-500 text-xs font-bold">إجمالي المنصرف (Total OUT)</span>
             <span className="p-1.5 bg-rose-50 text-rose-600 rounded-xl">
               <TrendingDown className="h-4 w-4" />
             </span>
           </div>
           <div className="text-2xl font-black text-rose-700">
-            -{stats.totalOut.toLocaleString()} <span className="text-xs font-bold text-slate-400">{activeOrg?.currency || 'EGP'}</span>
+            -{fmtMoney(stats.primary.totalOut)} <span className="text-xs font-bold text-slate-400">{stats.primary.currency}</span>
           </div>
-          <span className="text-[11px] text-slate-400 mt-1 block">طلبات صرف معتمدة، تحويلات، وعُهد منصرفة (فعلية)</span>
+          {stats.otherCurrencies.map(row => (
+            <div key={row.currency} className="text-sm font-black text-rose-700/90 mt-0.5">
+              -{fmtMoney(row.totalOut)} <span className="text-[10px] font-bold text-slate-400">{row.currency}</span>
+            </div>
+          ))}
+          <span className="text-[11px] text-slate-400 mt-1 block">طلبات صرف، عُهد، ومسحوبات فعلية (بدون التحويلات الداخلية بين الحسابات)</span>
         </div>
       </div>
 
@@ -964,9 +1176,11 @@ export const TreasuryManagement: React.FC = () => {
               className="w-full pr-8 pl-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl outline-hidden focus:border-emerald-500 focus:bg-white"
             />
             {searchQuery && (
-              <button 
+              <button
+                type="button"
                 onClick={() => setSearchQuery('')}
                 className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                title="مسح البحث"
               >
                 <X className="h-3 w-3" />
               </button>
@@ -992,34 +1206,62 @@ export const TreasuryManagement: React.FC = () => {
       {/* Main Tab 1: Accounts Cards Grid */}
       {activeTab === 'accounts' && (
         <>
-          {filteredAccounts.length === 0 ? (
+          {filteredAccounts.length === 0 && searchNeedle && orgScopedAccounts.length > 0 ? (
+            // The search matched nothing (accounts DO exist): never the "add your first account" state
+            <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center shadow-xs">
+              <div className="h-16 w-16 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto mb-3">
+                <Search className="h-8 w-8" />
+              </div>
+              <h3 className="font-bold text-slate-800 text-sm">لا نتائج مطابقة لـ «{searchQuery.trim()}»</h3>
+              <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+                لا يوجد حساب يطابق هذا البحث بالاسم أو الرقم / المعرف أو البنك أو النوع ({orgScopedAccounts.length} حساب مسجل).
+              </p>
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="mt-4 px-4 py-2 bg-slate-800 text-white rounded-xl font-bold text-xs hover:bg-slate-900 transition cursor-pointer"
+              >
+                مسح البحث وعرض كل الحسابات
+              </button>
+            </div>
+          ) : filteredAccounts.length === 0 ? (
             <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center shadow-xs">
               <div className="h-16 w-16 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-3">
                 <Wallet className="h-8 w-8" />
               </div>
               <h3 className="font-bold text-slate-800 text-sm">لا توجد حسابات أو خزائن مسجلة بعد</h3>
               <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                ابدأ بإضافة حساب إنستاباي، محفظة إلكترونية، حساب بنكي، أو خزينة كاش لتتمكن من ضبط حركات الصرف والتوريد.
+                {canCreateAccounts
+                  ? 'ابدأ بإضافة حساب إنستاباي، محفظة إلكترونية، حساب بنكي، أو خزينة كاش لتتمكن من ضبط حركات الصرف والتوريد.'
+                  : 'إضافة الحسابات والخزائن متاحة لمدير الشركة؛ تواصل معه لإنشاء أول حساب.'}
               </p>
-              <button
-                type="button"
-                onClick={handleOpenAddAccount}
-                className="mt-4 px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs hover:bg-emerald-700 transition"
-              >
-                + إضافة الحساب الأول الآن
-              </button>
+              {canCreateAccounts && (
+                <button
+                  type="button"
+                  onClick={handleOpenAddAccount}
+                  className="mt-4 px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs hover:bg-emerald-700 transition cursor-pointer"
+                >
+                  + إضافة الحساب الأول الآن
+                </button>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredAccounts.map(acc => {
-                const curBal = Number(acc.currentBalance ?? acc.balance ?? 0);
+                const curBal = balanceOf(acc);
                 const accOrg = orgList.find(o => o.id === acc.orgId);
                 const cardParent = linkedParentOf(acc);
+                const isInactive = acc.active === false;
+                const hasHistory = accountHasHistory(acc);
+                const isDeleting = accountActions.isPending(`delete:${acc.id}`);
+                const isToggling = accountActions.isPending(`toggle:${acc.id}`);
 
                 return (
-                  <div 
+                  <div
                     key={acc.id}
-                    className="bg-white rounded-3xl border border-slate-200/90 p-5 shadow-xs hover:shadow-md transition flex flex-col justify-between group"
+                    className={`bg-white rounded-3xl border p-5 shadow-xs hover:shadow-md transition flex flex-col justify-between group ${
+                      isInactive ? 'border-slate-300 bg-slate-50/60' : 'border-slate-200/90'
+                    } ${isDeleting ? 'opacity-60 pointer-events-none' : ''}`}
                   >
                     <div>
                       {/* Top Row: Type Badge + Org Badge + Actions */}
@@ -1035,36 +1277,58 @@ export const TreasuryManagement: React.FC = () => {
                             <h3 className="font-extrabold text-slate-900 text-sm leading-tight mt-0.5">
                               {acc.name}
                             </h3>
+                            {isInactive && (
+                              <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-200 text-slate-700">
+                                <PowerOff className="h-3 w-3" />
+                                معطل — لا يُستخدم في عمليات جديدة
+                              </span>
+                            )}
                           </div>
                         </div>
 
-                        {/* Edit & Delete */}
+                        {/* Edit / Delete or Deactivate (an account with a balance or history is never deleted) */}
                         <div className="flex items-center gap-1 opacity-80 group-hover:opacity-100 transition">
-                          <button
-                            type="button"
-                            onClick={() => handleOpenEditAccount(acc)}
-                            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
-                            title="تعديل بيانات الحساب"
-                          >
-                            <Edit3 className="h-3.5 w-3.5" />
-                          </button>
-                          {(isSuperAdmin || currentRole === 'org_admin') && (
+                          {canEditAccounts && (
                             <button
                               type="button"
-                              onClick={async () => {
-                                if (confirm(`هل أنت متأكد من حذف الحساب "${acc.name}"؟`)) {
-                                  try {
-                                    await deletePaymentAccount(acc.id);
-                                  } catch (err) {
-                                    console.error(err);
-                                    alert(errorText(err, 'حدث خطأ أثناء حذف الحساب.'));
-                                  }
-                                }
-                              }}
-                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                              title="حذف الحساب"
+                              onClick={() => handleOpenEditAccount(acc)}
+                              className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                              title="تعديل بيانات الحساب"
                             >
-                              <Trash2 className="h-3.5 w-3.5" />
+                              <Edit3 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {canDeleteAccounts && isInactive && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleAccountActive(acc, true)}
+                              disabled={isToggling}
+                              className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+                              title={isToggling ? 'جاري إعادة التفعيل...' : 'إعادة تفعيل الحساب'}
+                            >
+                              <Power className={`h-3.5 w-3.5 ${isToggling ? 'animate-pulse' : ''}`} />
+                            </button>
+                          )}
+                          {canDeleteAccounts && !isInactive && hasHistory && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleAccountActive(acc, false)}
+                              disabled={isToggling}
+                              className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+                              title={isToggling ? 'جاري التعطيل...' : 'تعطيل الحساب (له رصيد أو حركات مسجلة فلا يمكن حذفه)'}
+                            >
+                              <PowerOff className={`h-3.5 w-3.5 ${isToggling ? 'animate-pulse' : ''}`} />
+                            </button>
+                          )}
+                          {canDeleteAccounts && !hasHistory && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteAccount(acc)}
+                              disabled={isDeleting}
+                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+                              title={isDeleting ? 'جاري الحذف...' : 'حذف الحساب (بدون رصيد أو حركات)'}
+                            >
+                              <Trash2 className={`h-3.5 w-3.5 ${isDeleting ? 'animate-pulse' : ''}`} />
                             </button>
                           )}
                         </div>
@@ -1143,39 +1407,45 @@ export const TreasuryManagement: React.FC = () => {
                       {/* Current Balance Display */}
                       <div className="p-3.5 bg-emerald-50/50 rounded-2xl border border-emerald-100 mb-4">
                         <span className="text-[10px] font-bold text-emerald-700 block mb-0.5">الرصيد المتاح الحالي (Balance)</span>
-                        <div className="text-xl font-black text-emerald-950">
-                          {curBal.toLocaleString()} <span className="text-xs font-semibold text-emerald-700">{acc.currency || 'EGP'}</span>
+                        <div className={`text-xl font-black ${curBal < 0 ? 'text-rose-700' : 'text-emerald-950'}`}>
+                          {fmtMoney(curBal)} <span className="text-xs font-semibold text-emerald-700">{currencyOf(acc.currency)}</span>
                         </div>
                         <div className="flex items-center justify-between text-[10px] text-slate-500 mt-2 pt-2 border-t border-emerald-100/70">
-                          <span className="text-emerald-700 font-bold">الوارد (+): {Number(acc.totalIn || 0).toLocaleString()}</span>
-                          <span className="text-rose-700 font-bold">المنصرف (-): {Number(acc.totalOut || 0).toLocaleString()}</span>
+                          <span className="text-emerald-700 font-bold">الوارد (+): {fmtMoney(acc.totalIn || 0)}</span>
+                          <span className="text-rose-700 font-bold">المنصرف (-): {fmtMoney(acc.totalOut || 0)}</span>
                         </div>
                       </div>
                     </div>
 
                     {/* Bottom Actions */}
                     <div className="space-y-2 pt-2 border-t border-slate-100">
-                      <div className="grid grid-cols-2 gap-2">
-                        {/* Quick IN */}
-                        <button
-                          type="button"
-                          onClick={() => handleOpenAdjustment(acc, 'in')}
-                          className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-2xs transition cursor-pointer"
-                        >
-                          <ArrowDownLeft className="h-3.5 w-3.5" />
-                          <span>إيداع (+ IN)</span>
-                        </button>
+                      {canMoveMoney && (
+                        <div className="grid grid-cols-2 gap-2">
+                          {/* Quick IN */}
+                          <button
+                            type="button"
+                            onClick={() => handleOpenAdjustment(acc, 'in')}
+                            disabled={isInactive}
+                            className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-2xs transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                            title={isInactive ? 'الحساب معطل؛ أعد تفعيله أولاً' : 'إيداع مبلغ أو استرداد متبقي عهد في هذا الحساب'}
+                          >
+                            <ArrowDownLeft className="h-3.5 w-3.5" />
+                            <span>إيداع (+ IN)</span>
+                          </button>
 
-                        {/* Quick OUT */}
-                        <button
-                          type="button"
-                          onClick={() => handleOpenAdjustment(acc, 'out')}
-                          className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold shadow-2xs transition cursor-pointer"
-                        >
-                          <ArrowUpRight className="h-3.5 w-3.5 text-rose-400" />
-                          <span>سحب (- OUT)</span>
-                        </button>
-                      </div>
+                          {/* Quick OUT */}
+                          <button
+                            type="button"
+                            onClick={() => handleOpenAdjustment(acc, 'out')}
+                            disabled={isInactive}
+                            className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold shadow-2xs transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                            title={isInactive ? 'الحساب معطل؛ أعد تفعيله أولاً' : 'سحب مبلغ من رصيد هذا الحساب'}
+                          >
+                            <ArrowUpRight className="h-3.5 w-3.5 text-rose-400" />
+                            <span>سحب (- OUT)</span>
+                          </button>
+                        </div>
+                      )}
 
                       {/* Transfer from this account */}
                       {canMoveMoney && (
@@ -1201,7 +1471,7 @@ export const TreasuryManagement: React.FC = () => {
                         className="w-full flex items-center justify-center gap-1.5 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-semibold border border-slate-200 transition cursor-pointer"
                       >
                         <History className="h-3.5 w-3.5 text-slate-400" />
-                        <span>عرض كشف وحركات الحساب ({cleanTargetTransactions.filter(t => t.accountId === acc.id).length})</span>
+                        <span>عرض كشف وحركات الحساب ({ledgerCountByAccount.get(acc.id) || 0})</span>
                       </button>
                     </div>
                   </div>
@@ -1248,8 +1518,23 @@ export const TreasuryManagement: React.FC = () => {
           </div>
 
           {filteredTransactions.length === 0 ? (
-            <div className="p-12 text-center text-slate-400 text-xs">
-              لا توجد حركات مالية مسجلة بعد. عند تنفيذ وصرف أي طلب أو إجراء إيداع/سحب ستظهر هنا فوراً.
+            <div className="p-12 text-center text-slate-400 text-xs space-y-3">
+              {searchNeedle ? (
+                <>
+                  <p className="font-bold text-slate-600">لا نتائج مطابقة لـ «{searchQuery.trim()}» في دفتر الحركات.</p>
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    className="px-3.5 py-1.5 bg-slate-800 text-white rounded-xl font-bold hover:bg-slate-900 transition cursor-pointer"
+                  >
+                    مسح البحث
+                  </button>
+                </>
+              ) : inspectingAccount ? (
+                <p>لا توجد حركات مسجلة على هذا الحساب بعد.</p>
+              ) : (
+                <p>لا توجد حركات مالية مسجلة بعد. عند تنفيذ وصرف أي طلب أو إجراء إيداع/سحب ستظهر هنا فوراً.</p>
+              )}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -1273,8 +1558,8 @@ export const TreasuryManagement: React.FC = () => {
 
                     return (
                       <tr key={tx.id} className="hover:bg-slate-50/70 transition">
-                        <td className="p-3.5 text-slate-400 font-mono whitespace-nowrap text-[11px]">
-                          {tx.createdAt.replace('T', ' ').slice(0, 16)}
+                        <td className="p-3.5 text-slate-400 font-mono whitespace-nowrap text-[11px]" dir="ltr">
+                          {localDateTime(tx.createdAt)}
                         </td>
                         <td className="p-3.5 font-bold text-slate-800 whitespace-nowrap">
                           {tx.accountName}
@@ -1299,13 +1584,13 @@ export const TreasuryManagement: React.FC = () => {
                           )}
                         </td>
                         <td className={`p-3.5 font-black whitespace-nowrap ${isTxIn ? 'text-emerald-700' : 'text-rose-700'}`}>
-                          {isTxIn ? '+' : '-'}{tx.amount.toLocaleString()}
+                          {isTxIn ? '+' : '-'}{fmtMoney(tx.amount)}
                         </td>
                         <td className="p-3.5 text-slate-400 font-mono whitespace-nowrap">
-                          {tx.balanceBefore.toLocaleString()}
+                          {fmtMoney(tx.balanceBefore)}
                         </td>
                         <td className="p-3.5 font-bold text-slate-800 font-mono whitespace-nowrap">
-                          {tx.balanceAfter.toLocaleString()}
+                          {fmtMoney(tx.balanceAfter)}
                         </td>
                         <td className="p-3.5 text-slate-600 max-w-xs truncate" title={tx.description}>
                           {tx.referenceNumber && (
@@ -1363,7 +1648,7 @@ export const TreasuryManagement: React.FC = () => {
                     onChange={(e) => setAccOrgId(e.target.value)}
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-semibold"
                   >
-                    {orgList.map(o => (
+                    {orgList.filter(o => !isArchivedOrg(o) || o.id === editingAccount?.orgId).map(o => (
                       <option key={o.id} value={o.id}>{o.name} ({o.code})</option>
                     ))}
                   </select>
@@ -1498,7 +1783,7 @@ export const TreasuryManagement: React.FC = () => {
                       .filter(a => a.orgId === (accOrgId || (selectedOrgFilter !== 'all' ? selectedOrgFilter : '') || (activeOrgId !== 'all' ? activeOrgId : '') || orgList[0]?.id) && a.type === 'bank' && (!editingAccount || a.id !== editingAccount.id))
                       .map(bank => (
                         <option key={bank.id} value={bank.id}>
-                          🏦 {bank.name} ({bank.accountIdentifier}) — الرصيد: {Number(bank.currentBalance ?? bank.balance ?? 0).toLocaleString()} {bank.currency}
+                          🏦 {bank.name} ({bank.accountIdentifier}) — الرصيد: {Number(bank.currentBalance ?? bank.balance ?? 0).toLocaleString('en-US')} {bank.currency}
                         </option>
                       ))}
                   </select>
@@ -1652,18 +1937,33 @@ export const TreasuryManagement: React.FC = () => {
                   >
                     {targetAccounts.filter(a => a.active !== false || a.id === adjustmentAccount.id).map(acc => (
                       <option key={acc.id} value={acc.id}>
-                        {acc.name} ({acc.bankName || acc.type}) - الرصيد: {Number(acc.currentBalance ?? acc.balance ?? 0).toLocaleString()} {acc.currency}
+                        {transferOptionLabel(acc)}{acc.bankName ? ` — ${acc.bankName}` : ''}
                       </option>
                     ))}
                   </select>
                 </div>
 
-                {/* Current balance reminder */}
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between">
-                  <span className="text-slate-500 font-medium">الرصيد الحالي للحساب:</span>
-                  <span className="font-bold text-slate-900 font-mono text-sm">
-                    {balanceOf(adjustmentAccount).toLocaleString()} {adjustmentAccount.currency}
-                  </span>
+                {/* Current balance reminder (+ what a withdrawal may take: the bank behind an InstaPay limits it too) */}
+                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">الرصيد الحالي للحساب:</span>
+                    <span className="font-bold text-slate-900 font-mono text-sm">
+                      {fmtMoney(balanceOf(adjustmentAccount))} {currencyOf(adjustmentAccount.currency)}
+                    </span>
+                  </div>
+                  {adjustmentType === 'out' && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500 font-medium">المتاح للسحب:</span>
+                      <span className={`font-bold font-mono text-sm ${adjustmentAvailable > 0 ? 'text-slate-900' : 'text-rose-700'}`}>
+                        {fmtMoney(adjustmentAvailable)} {currencyOf(adjustmentAccount.currency)}
+                      </span>
+                    </div>
+                  )}
+                  {adjustmentType === 'out' && adjustmentParent && (
+                    <p className="text-[10.5px] text-blue-700 font-semibold leading-relaxed">
+                      {adjustmentAccount.type === 'wallet' ? 'محفظة ما زالت مربوطة بالحساب البنكي' : 'قناة إنستاباي على الحساب البنكي'} ({adjustmentParent.name}) — رصيد البنك: {fmtMoney(balanceOf(adjustmentParent))}؛ يُخصم المبلغ من الاثنين معاً.
+                    </p>
+                  )}
                 </div>
 
                 {isCustodyReturnMode ? (
@@ -1718,7 +2018,7 @@ export const TreasuryManagement: React.FC = () => {
                                   </span>
                                 </div>
                                 <span className="font-black text-emerald-700 font-mono whitespace-nowrap">
-                                  {toMoney(c.remainingAmount).toLocaleString()}
+                                  {toMoney(c.remainingAmount).toLocaleString('en-US')}
                                 </span>
                               </label>
                             );
@@ -1742,13 +2042,13 @@ export const TreasuryManagement: React.FC = () => {
                         <div className="flex items-center justify-between">
                           <span className="text-emerald-800 font-semibold">إجمالي المبلغ المسترد:</span>
                           <span className="font-black text-emerald-950 font-mono text-sm">
-                            +{selectedReturnTotal.toLocaleString()} {currencyOf(adjustmentAccount.currency)}
+                            +{selectedReturnTotal.toLocaleString('en-US')} {currencyOf(adjustmentAccount.currency)}
                           </span>
                         </div>
                         <div className="flex items-center justify-between pt-1.5 border-t border-emerald-200/70">
                           <span className="text-emerald-800 font-semibold">رصيد الحساب بعد الاسترداد:</span>
                           <span className="font-bold text-emerald-950 font-mono">
-                            {toMoney(balanceOf(adjustmentAccount) + selectedReturnTotal).toLocaleString()} {currencyOf(adjustmentAccount.currency)}
+                            {toMoney(balanceOf(adjustmentAccount) + selectedReturnTotal).toLocaleString('en-US')} {currencyOf(adjustmentAccount.currency)}
                           </span>
                         </div>
                         {linkedParentOf(adjustmentAccount) && (
@@ -1779,7 +2079,7 @@ export const TreasuryManagement: React.FC = () => {
                     {/* Amount */}
                     <div className="space-y-1.5">
                       <label className="block font-bold text-slate-700">
-                        المبلغ المراد {adjustmentType === 'in' ? 'إيداعه' : 'سحبه'} ({adjustmentAccount.currency}) *
+                        المبلغ المراد {adjustmentType === 'in' ? 'إيداعه' : 'سحبه'} ({currencyOf(adjustmentAccount.currency)}) *
                       </label>
                       <input
                         type="text"
@@ -1787,12 +2087,22 @@ export const TreasuryManagement: React.FC = () => {
                         inputMode="decimal"
                         value={adjustmentAmount}
                         onKeyDown={handleNumericKeyDown}
-                        onChange={(e) => setAdjustmentAmount(sanitizeAmount(e.target.value))}
+                        onChange={(e) => {
+                          setAdjustmentAmount(sanitizeAmount(e.target.value));
+                          setAdjustmentError('');
+                        }}
                         placeholder="0.00"
                         className={`w-full p-2.5 bg-slate-50 border rounded-xl font-bold font-mono text-base ${
-                          adjustmentType === 'in' ? 'focus:border-emerald-500 text-emerald-800' : 'focus:border-rose-500 text-rose-800'
+                          withdrawExceedsBalance
+                            ? 'border-rose-400 focus:border-rose-500 text-rose-800'
+                            : adjustmentType === 'in' ? 'focus:border-emerald-500 text-emerald-800' : 'focus:border-rose-500 text-rose-800'
                         }`}
                       />
+                      {withdrawExceedsBalance && (
+                        <p className="text-[11px] text-rose-700 font-bold leading-relaxed">
+                          {insufficientWithdrawMessage(adjustmentAccount)}
+                        </p>
+                      )}
                       {/* Quick Amount Chips */}
                       <div className="flex items-center gap-1.5 flex-wrap pt-1">
                         <span className="text-[11px] text-slate-500 font-semibold">مبالغ سريعة:</span>
@@ -1803,10 +2113,11 @@ export const TreasuryManagement: React.FC = () => {
                             onClick={() => {
                               const current = parseFloat(adjustmentAmount) || 0;
                               setAdjustmentAmount(String(current + amt));
+                              setAdjustmentError('');
                             }}
                             className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 rounded-lg text-[11px] font-bold transition cursor-pointer"
                           >
-                            +{amt.toLocaleString()}
+                            +{amt.toLocaleString('en-US')}
                           </button>
                         ))}
                         {adjustmentAmount && (
@@ -1910,13 +2221,13 @@ export const TreasuryManagement: React.FC = () => {
                   >
                     {isAdjusting
                       ? 'جاري الاسترداد...'
-                      : `تأكيد استرداد (${selectedReturnCustodies.length}) عهد بإجمالي ${selectedReturnTotal.toLocaleString()} ${currencyOf(adjustmentAccount.currency)}`}
+                      : `تأكيد استرداد (${selectedReturnCustodies.length}) عهد بإجمالي ${selectedReturnTotal.toLocaleString('en-US')} ${currencyOf(adjustmentAccount.currency)}`}
                   </button>
                 ) : (
                   <button
                     type="submit"
-                    disabled={isAdjusting || !adjustmentAmount}
-                    className={`px-5 py-2.5 text-white rounded-xl font-bold shadow-md transition cursor-pointer active:scale-98 ${
+                    disabled={isAdjusting || !adjustmentAmount || withdrawExceedsBalance}
+                    className={`px-5 py-2.5 text-white rounded-xl font-bold shadow-md transition cursor-pointer active:scale-98 disabled:opacity-50 disabled:cursor-not-allowed ${
                       adjustmentType === 'in'
                         ? 'bg-emerald-600 hover:bg-emerald-700'
                         : 'bg-rose-600 hover:bg-rose-700'
@@ -1982,12 +2293,12 @@ export const TreasuryManagement: React.FC = () => {
                       <div className="flex items-center justify-between">
                         <span className="text-slate-500 font-medium">الرصيد المتاح للتحويل:</span>
                         <span className={`font-bold font-mono text-sm ${transferAvailable > 0 ? 'text-slate-900' : 'text-rose-700'}`}>
-                          {transferAvailable.toLocaleString()} {currencyOf(transferFrom.currency)}
+                          {transferAvailable.toLocaleString('en-US')} {currencyOf(transferFrom.currency)}
                         </span>
                       </div>
                       {transferFromParent && (
                         <p className="text-[10.5px] text-blue-700 font-semibold leading-relaxed">
-                          {transferFrom.type === 'wallet' ? 'محفظة ما زالت مربوطة بالحساب البنكي' : 'قناة إنستاباي على الحساب البنكي'} ({transferFromParent.name}) — رصيد البنك: {balanceOf(transferFromParent).toLocaleString()}؛ يُخصم المبلغ من الاثنين معاً.
+                          {transferFrom.type === 'wallet' ? 'محفظة ما زالت مربوطة بالحساب البنكي' : 'قناة إنستاباي على الحساب البنكي'} ({transferFromParent.name}) — رصيد البنك: {balanceOf(transferFromParent).toLocaleString('en-US')}؛ يُخصم المبلغ من الاثنين معاً.
                         </p>
                       )}
                     </div>
@@ -2066,7 +2377,7 @@ export const TreasuryManagement: React.FC = () => {
                   </div>
                   {transferExceedsBalance && transferFrom && (
                     <p className="text-[11px] text-rose-700 font-bold">
-                      المبلغ أكبر من الرصيد المتاح للتحويل ({transferAvailable.toLocaleString()} {currencyOf(transferFrom.currency)}).
+                      المبلغ أكبر من الرصيد المتاح للتحويل ({transferAvailable.toLocaleString('en-US')} {currencyOf(transferFrom.currency)}).
                     </p>
                   )}
                 </div>
@@ -2090,17 +2401,17 @@ export const TreasuryManagement: React.FC = () => {
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-slate-600 truncate">{transferFrom.name}</span>
                       <span className="font-mono font-bold whitespace-nowrap">
-                        <span className="text-slate-400">{transferFromBalance.toLocaleString()}</span>
+                        <span className="text-slate-400">{transferFromBalance.toLocaleString('en-US')}</span>
                         <span className="text-slate-400 mx-1">←</span>
-                        <span className="text-rose-700">{toMoney(transferFromBalance - transferAmountNum).toLocaleString()}</span>
+                        <span className="text-rose-700">{toMoney(transferFromBalance - transferAmountNum).toLocaleString('en-US')}</span>
                       </span>
                     </div>
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-slate-600 truncate">{transferTo.name}</span>
                       <span className="font-mono font-bold whitespace-nowrap">
-                        <span className="text-slate-400">{balanceOf(transferTo).toLocaleString()}</span>
+                        <span className="text-slate-400">{balanceOf(transferTo).toLocaleString('en-US')}</span>
                         <span className="text-slate-400 mx-1">←</span>
-                        <span className="text-emerald-700">{toMoney(balanceOf(transferTo) + transferAmountNum).toLocaleString()}</span>
+                        <span className="text-emerald-700">{toMoney(balanceOf(transferTo) + transferAmountNum).toLocaleString('en-US')}</span>
                       </span>
                     </div>
                     {(transferFromParent || transferToParent) && (
@@ -2170,19 +2481,19 @@ export const TreasuryManagement: React.FC = () => {
                 <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">رصيد المحفظة (لا يتغير):</span>
-                    <span className="font-mono font-bold text-slate-900">{balanceOf(detachWallet).toLocaleString()} {currencyOf(detachWallet.currency)}</span>
+                    <span className="font-mono font-bold text-slate-900">{balanceOf(detachWallet).toLocaleString('en-US')} {currencyOf(detachWallet.currency)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">الحساب البنكي المربوط:</span>
-                    <span className="font-bold text-slate-900">{detachBank ? `${detachBank.name} — ${balanceOf(detachBank).toLocaleString()} ${currencyOf(detachBank.currency)}` : 'غير موجود'}</span>
+                    <span className="font-bold text-slate-900">{detachBank ? `${detachBank.name} — ${balanceOf(detachBank).toLocaleString('en-US')} ${currencyOf(detachBank.currency)}` : 'غير موجود'}</span>
                   </div>
                   <div className="flex items-center justify-between pt-1.5 border-t border-slate-200/70">
                     <span className="text-slate-500">دخل المحفظة أثناء الربط:</span>
-                    <span className="font-mono font-bold text-emerald-700">+{detachTotals.totalIn.toLocaleString()}</span>
+                    <span className="font-mono font-bold text-emerald-700">+{detachTotals.totalIn.toLocaleString('en-US')}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">خرج من المحفظة أثناء الربط:</span>
-                    <span className="font-mono font-bold text-rose-700">-{detachTotals.totalOut.toLocaleString()}</span>
+                    <span className="font-mono font-bold text-rose-700">-{detachTotals.totalOut.toLocaleString('en-US')}</span>
                   </div>
                 </div>
 
@@ -2191,13 +2502,13 @@ export const TreasuryManagement: React.FC = () => {
                   لإلغاء هذا الأثر يُقترح{' '}
                   {detachSuggested === 0
                     ? <span className="font-bold">عدم تعديل رصيد البنك (الأثر الصافي صفر)</span>
-                    : <span className="font-bold">{detachSuggested > 0 ? 'إضافة' : 'خصم'} {Math.abs(detachSuggested).toLocaleString()} {currencyOf(detachWallet.currency)} {detachSuggested > 0 ? 'إلى' : 'من'} رصيد البنك</span>}.
+                    : <span className="font-bold">{detachSuggested > 0 ? 'إضافة' : 'خصم'} {Math.abs(detachSuggested).toLocaleString('en-US')} {currencyOf(detachWallet.currency)} {detachSuggested > 0 ? 'إلى' : 'من'} رصيد البنك</span>}.
                   إن كنت صححت رصيد البنك يدوياً من قبل، اختر الفصل بدون تعديل.
                 </p>
 
                 <div className="space-y-1.5">
                   {([
-                    ['suggested', detachSuggested === 0 ? 'الفصل (لا يلزم تعديل رصيد البنك)' : `تطبيق التصحيح المقترح (${detachSuggested > 0 ? '+' : '-'}${Math.abs(detachSuggested).toLocaleString()})`],
+                    ['suggested', detachSuggested === 0 ? 'الفصل (لا يلزم تعديل رصيد البنك)' : `تطبيق التصحيح المقترح (${detachSuggested > 0 ? '+' : '-'}${Math.abs(detachSuggested).toLocaleString('en-US')})`],
                     ['custom', 'تحديد مبلغ تصحيح آخر'],
                     ['none', 'الفصل فقط بدون تعديل رصيد البنك'],
                   ] as const).map(([mode, label]) => (
@@ -2257,9 +2568,9 @@ export const TreasuryManagement: React.FC = () => {
                   <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 flex items-center justify-between gap-2">
                     <span className="font-bold text-amber-900 truncate">رصيد {detachBank.name} بعد التصحيح:</span>
                     <span className="font-mono font-bold whitespace-nowrap">
-                      <span className="text-slate-400">{balanceOf(detachBank).toLocaleString()}</span>
+                      <span className="text-slate-400">{balanceOf(detachBank).toLocaleString('en-US')}</span>
                       <span className="text-slate-400 mx-1">←</span>
-                      <span className={detachCorrection > 0 ? 'text-emerald-700' : 'text-rose-700'}>{toMoney(balanceOf(detachBank) + detachCorrection).toLocaleString()}</span>
+                      <span className={detachCorrection > 0 ? 'text-emerald-700' : 'text-rose-700'}>{toMoney(balanceOf(detachBank) + detachCorrection).toLocaleString('en-US')}</span>
                     </span>
                   </div>
                 )}

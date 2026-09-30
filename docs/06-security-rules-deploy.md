@@ -58,6 +58,17 @@
   promote/demote), and the built-in super admins. Missing lists are filled once by
   the app when a super admin, or that org's admin, opens it.
 
+### Uniqueness keys
+
+- `uniqueKeys` ids are now `<scope>__<orgId>__<value base64url>` (`uniqueKeyDocId`): the
+  company id is in clear, so the rules let only that company's members (and super admins)
+  read a key, whether it exists or not. Before, a missing key was readable by anyone and an
+  existing one was not, so anyone could probe which emails, provider names and account
+  numbers another company has. A key can only be created under its own company's id.
+- Keys in the old id format (company base64-encoded) are readable by super admins only.
+  The owner moves them once (step 4 below). Until then, a duplicate of a value held by a
+  record created before this version is not caught by the in-transaction check.
+
 ### Revocation and suspension
 
 - Removing a member now also detaches the profiles that carried that membership:
@@ -108,5 +119,10 @@
    `npx firebase-tools deploy --only firestore:rules --project expenses-project-ce1f9`.
    Between steps 1 and 3, org admins cannot remove members: the old rules refuse to
    detach the profile. Super admins can.
-4. The in-app "Firebase config" modal no longer embeds rules to copy. Its old
+   Never publish these rules before the new frontend is live: they refuse the old-format
+   `uniqueKeys` ids that the previous frontend reads, so creating any record with a unique
+   value (member, provider, department, service, account) would fail.
+4. **Move the old uniqueness keys** (once, as the owner): Settings → الاتصال السحابي وقاعدة
+   البيانات → «ترحيل المفاتيح». Running it again is safe (nothing is left to move).
+5. The in-app "Firebase config" modal no longer embeds rules to copy. Its old
    snippets (including an `allow read, write: if true` one) must never be published.

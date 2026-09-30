@@ -11,29 +11,36 @@ import {
   Check, 
   Search, 
   Plus,
-  ArrowDownLeft,
   Smartphone,
   Building,
-  DollarSign,
   ShieldCheck,
   Receipt,
   Pencil,
-  Download,
   Eye
 } from 'lucide-react';
 import { ExpenseRequest } from '../types';
 import { NewRequestModal } from './NewRequestModal';
 import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
 import { useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import {
+  fmtMoney,
+  formatLocalDate,
+  formatLocalDateTime,
+  incomeMethodLabel,
+  localizePaymentMethodText,
+  paymentMethodLabel,
+  resolveRequestPaymentMethod,
+} from '../utils/requestUi';
 
 interface RequesterTrackerProps {
   onOpenNewRequest: () => void;
   onSelectRequest: (request: ExpenseRequest) => void;
 }
 
-export const RequesterTracker: React.FC<RequesterTrackerProps> = ({ 
-  onOpenNewRequest, 
-  onSelectRequest 
+export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
+  onOpenNewRequest,
+  // Part of the screen's contract (App passes it); the tracker shows details inline.
+  onSelectRequest: _onSelectRequest,
 }) => {
   const { requests, currentUser, currentRole, replyClarification, activeOrg } = useApp();
 
@@ -45,6 +52,9 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
   const [previewInvoice, setPreviewInvoice] = useState<InvoiceViewerAttachment | null>(null);
   // Submit lock + idempotency key per request (scope `reply:${requestId}`)
   const replyGuard = useKeyedSubmitGuard();
+  // The request whose clarification reply was just sent (confirmation shown under it)
+  const [replySentFor, setReplySentFor] = useState<string | null>(null);
+  const [replyError, setReplyError] = useState<string | null>(null);
 
   // Strictly filter to personal requests with absolute deduplication (Zero duplicates, Zero data leakage)
   const myRequests = React.useMemo(() => {
@@ -77,26 +87,32 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
     return matchStatus && matchSearch;
   });
 
-  // Selected request for deep tracking
-  const activeRequest = selectedReqId 
-    ? myRequests.find(r => r.id === selectedReqId) || filteredRequests[0]
-    : filteredRequests[0];
+  // Selected request for deep tracking — always one of the listed (filtered) requests, so
+  // a request the status tab hides is not kept on screen.
+  const activeRequest = (selectedReqId && filteredRequests.find(r => r.id === selectedReqId)) || filteredRequests[0];
 
   const handleSendClarification = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeRequest || !replyText.trim()) return;
+    if (!activeRequest) return;
+    if (!replyText.trim()) {
+      setReplyError('يرجى كتابة ردك على الاستيضاح.');
+      return;
+    }
+    setReplyError(null);
 
     const requestId = activeRequest.id;
     const scope = `reply:${requestId}`;
     await replyGuard.run(scope, async (idempotencyKey) => {
       try {
-        await replyClarification(requestId, replyText, undefined, { idempotencyKey });
+        await replyClarification(requestId, replyText.trim(), undefined, { idempotencyKey });
         replyGuard.rotateKey(scope);
         setReplyText('');
+        setReplySentFor(requestId);
+        window.setTimeout(() => setReplySentFor(cur => (cur === requestId ? null : cur)), 8000);
       } catch (err: any) {
         // Keep the text and the idempotency key so the user can retry safely
         console.error('[RequesterTracker] replyClarification failed:', err);
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        setReplyError(err?.message || 'تعذر إرسال الرد، يرجى المحاولة مرة أخرى.');
       }
     });
   };
@@ -152,12 +168,16 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
     }
   };
 
-  const getMethodBadge = (method?: string) => {
+  // The payout method badge: the same resolved method (and label) as the requests list,
+  // the detail window and the edit form, also for older records that have none stored.
+  const getMethodBadge = (req: ExpenseRequest) => {
+    const method = resolveRequestPaymentMethod(req);
+    const label = paymentMethodLabel(method);
     if (method === 'instapay') {
       return (
         <span className="inline-flex items-center gap-1 text-[11px] font-bold text-teal-700 bg-teal-50 px-2 py-0.5 rounded-md border border-teal-200">
           <Smartphone className="h-3 w-3" />
-          <span>انستاباي (InstaPay)</span>
+          <span>{label}</span>
         </span>
       );
     }
@@ -165,14 +185,22 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
       return (
         <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-200">
           <Smartphone className="h-3 w-3" />
-          <span>محفظة إلكترونية</span>
+          <span>{label}</span>
+        </span>
+      );
+    }
+    if (method === 'cash' || method === 'cheque') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
+          <CreditCard className="h-3 w-3" />
+          <span>{label}</span>
         </span>
       );
     }
     return (
       <span className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
         <Building className="h-3 w-3" />
-        <span>تحويل بنكي / IBAN</span>
+        <span>{label}</span>
       </span>
     );
   };
@@ -214,7 +242,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
             <span className="text-[11px] text-slate-400 block mb-1">إجمالي المبالغ المحولة بنجاح</span>
             <div className="flex items-baseline gap-1.5 text-xl font-black text-emerald-400">
-              <span>{totalDisbursed.toLocaleString()}</span>
+              <span>{fmtMoney(totalDisbursed)}</span>
               <span className="text-xs text-slate-400 font-semibold">{currency}</span>
             </div>
           </div>
@@ -222,7 +250,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
             <span className="text-[11px] text-slate-400 block mb-1">مبالغ قيد المراجعة والاعتماد</span>
             <div className="flex items-baseline gap-1.5 text-xl font-black text-amber-400">
-              <span>{totalPending.toLocaleString()}</span>
+              <span>{fmtMoney(totalPending)}</span>
               <span className="text-xs text-slate-400 font-semibold">{currency}</span>
             </div>
           </div>
@@ -264,9 +292,11 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                 { id: 'pending', label: 'قيد المراجعة' },
                 { id: 'approved', label: 'معتمد' },
                 { id: 'disbursed', label: 'تم التحويل ✓' },
+                { id: 'rejected', label: 'مرفوض' },
               ].map((pill) => (
                 <button
                   key={pill.id}
+                  type="button"
                   onClick={() => setFilterStatus(pill.id)}
                   className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer ${
                     filterStatus === pill.id
@@ -349,7 +379,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
 
                   <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100 text-xs">
                     <div className="flex items-center gap-1.5">
-                      {getMethodBadge(req.preferredPaymentMethod)}
+                      {getMethodBadge(req)}
                       {req.requestType === 'income' && (
                         <span className="text-[10px] font-bold bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-full border border-emerald-200">
                           📥 توريد
@@ -357,7 +387,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                       )}
                     </div>
                     <span className={`font-black text-sm ${req.requestType === 'income' ? 'text-emerald-700' : 'text-slate-900'}`}>
-                      {req.requestType === 'income' ? '+' : '-'}{req.amount.toLocaleString()} {req.currency}
+                      {req.requestType === 'income' ? '+' : '-'}{fmtMoney(req.amount)} {req.currency}
                     </span>
                   </div>
                 </div>
@@ -380,14 +410,14 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
             <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xs p-6 sm:p-7 space-y-6">
               
               {/* Header Info */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
-                <div>
-                  <div className="flex items-center gap-2">
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 pb-4 border-b border-slate-100">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-mono text-xs font-bold text-slate-400">{activeRequest.requestNumber}</span>
-                    <span className="text-xs text-slate-400">• تاريخ التقديم: {activeRequest.createdAt.split('T')[0]}</span>
+                    <span className="text-xs text-slate-400">• تاريخ التقديم: {formatLocalDate(activeRequest.createdAt)}</span>
                   </div>
-                  <div className="flex items-center gap-2 mt-1">
-                    <h2 className="text-lg font-bold text-slate-900">{activeRequest.title}</h2>
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                    <h2 className="text-lg font-bold text-slate-900 break-words min-w-0">{activeRequest.title}</h2>
                     <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
                       activeRequest.requestType === 'income'
                         ? 'bg-emerald-100 text-emerald-800'
@@ -398,9 +428,9 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                   </div>
                 </div>
 
-                <div className="text-left shrink-0">
-                  <div className={`text-2xl font-black ${activeRequest.requestType === 'income' ? 'text-emerald-700' : 'text-slate-900'}`}>
-                    {activeRequest.requestType === 'income' ? '+' : '-'}{activeRequest.amount.toLocaleString()} <span className="text-sm font-semibold text-slate-500">{activeRequest.currency}</span>
+                <div className="text-left min-w-0 sm:max-w-[55%]">
+                  <div className={`text-2xl font-black whitespace-nowrap ${activeRequest.requestType === 'income' ? 'text-emerald-700' : 'text-slate-900'}`}>
+                    {activeRequest.requestType === 'income' ? '+' : '-'}{fmtMoney(activeRequest.amount)} <span className="text-sm font-semibold text-slate-500">{activeRequest.currency}</span>
                   </div>
                   <div className="mt-1 flex items-center justify-end gap-2 flex-wrap">
                     {(activeRequest.status === 'pending' || activeRequest.status === 'clarification_requested') ? (
@@ -454,6 +484,8 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                           ? 'bg-rose-500 text-white animate-pulse'
                           : activeRequest.status === 'pending'
                           ? 'bg-amber-500 text-white'
+                          : activeRequest.status === 'rejected'
+                          ? 'bg-slate-400 text-white'
                           : 'bg-emerald-600 text-white'
                       }`}>
                         {activeRequest.status === 'pending' ? (
@@ -467,7 +499,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                       <span className="text-xs font-bold text-slate-800 mt-2">مراجعة الإدارة</span>
                       <span className="text-[10px] text-slate-400 font-medium">
                         {activeRequest.status === 'clarification_requested' ? 'مطلوب توضيح' :
-                         activeRequest.status === 'pending' ? 'جاري الفحص' : 'معتمد'}
+                         activeRequest.status === 'pending' ? 'جاري الفحص' : 'تمت المراجعة'}
                       </span>
                     </div>
 
@@ -544,10 +576,9 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                     <div className="bg-white/80 p-3 rounded-xl border border-emerald-100">
                       <span className="text-slate-500 block mb-0.5">طريقة التحويل:</span>
                       <span className="font-bold text-slate-900">
-                        {activeRequest.disbursement.paymentMethod === 'instapay' ? 'انستاباي (InstaPay)' :
-                         activeRequest.disbursement.paymentMethod === 'bank_transfer' ? 'تحويل بنكي' :
-                         activeRequest.disbursement.paymentMethod === 'digital_wallet' ? 'محفظة إلكترونية' :
-                         activeRequest.disbursement.paymentMethod === 'cash' ? 'نقداً / خزينة' : 'شيك'}
+                        {activeRequest.requestType === 'income'
+                          ? incomeMethodLabel(activeRequest.disbursement.paymentMethod)
+                          : paymentMethodLabel(activeRequest.disbursement.paymentMethod)}
                       </span>
                     </div>
                     <div className="bg-white/80 p-3 rounded-xl border border-emerald-100">
@@ -565,7 +596,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                     <div className="bg-white/80 p-3 rounded-xl border border-emerald-100">
                       <span className="text-slate-500 block mb-0.5">تاريخ وساعة الصرف:</span>
                       <span className="font-bold text-slate-900">
-                        {activeRequest.disbursement.disbursedAt}
+                        {formatLocalDateTime(activeRequest.disbursement.disbursedAt)}
                       </span>
                     </div>
                   </div>
@@ -576,6 +607,14 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                       {activeRequest.disbursement.notes}
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Confirmation after a clarification reply was sent */}
+              {replySentFor === activeRequest.id && (
+                <div role="status" className="bg-emerald-50 border border-emerald-300 rounded-2xl p-4 text-xs text-emerald-900 font-bold flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+                  <span>تم إرسال ردك للمدير بنجاح، وعاد الطلب إلى قائمة المراجعة والاعتماد.</span>
                 </div>
               )}
 
@@ -610,19 +649,42 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                       rows={3}
                       required
                       value={replyText}
-                      onChange={(e) => setReplyText(e.target.value)}
+                      onChange={(e) => {
+                        setReplyText(e.target.value);
+                        if (replyError) setReplyError(null);
+                      }}
                       placeholder="اكتب التوضيح المفصل هنا..."
+                      aria-invalid={Boolean(replyError)}
                       className="w-full p-3 bg-white border border-rose-300 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-rose-500/20 text-slate-900"
                     />
+
+                    <div className="flex items-start gap-2 p-2.5 bg-white/70 border border-rose-200 rounded-xl text-[11px] text-rose-900">
+                      <Pencil className="h-3.5 w-3.5 text-rose-600 shrink-0 mt-0.5" />
+                      <span>
+                        هل طُلب منك مستند (مثل عرض سعر أو فاتورة)؟ أضفه للطلب من{' '}
+                        <button
+                          type="button"
+                          onClick={() => setEditingRequest(activeRequest)}
+                          className="font-bold underline text-rose-800 hover:text-rose-950 cursor-pointer"
+                        >
+                          تعديل الطلب وإرفاق المستند
+                        </button>
+                        {' '}ثم أرسل ردك هنا.
+                      </span>
+                    </div>
+
+                    {replyError && (
+                      <p role="alert" className="text-[11px] font-bold text-rose-700">⚠️ {replyError}</p>
+                    )}
 
                     <div className="flex justify-end">
                       <button
                         type="submit"
                         disabled={replyGuard.isPending(`reply:${activeRequest.id}`)}
-                        className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                        className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                       >
                         <Send className="h-3.5 w-3.5" />
-                        <span>إرسال التوضيح للمدير</span>
+                        <span>{replyGuard.isPending(`reply:${activeRequest.id}`) ? 'جاري إرسال التوضيح...' : 'إرسال التوضيح للمدير'}</span>
                       </button>
                     </div>
                   </form>
@@ -647,11 +709,11 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs bg-slate-50 p-4 rounded-2xl border border-slate-100">
                 <div>
                   <span className="text-slate-400 block mb-0.5">طريقة التحويل المطلوبة:</span>
-                  <div className="mt-1">{getMethodBadge(activeRequest.preferredPaymentMethod)}</div>
+                  <div className="mt-1">{getMethodBadge(activeRequest)}</div>
                 </div>
                 <div>
                   <span className="text-slate-400 block mb-0.5">بيانات الحساب / عنوان التحويل:</span>
-                  <span className="font-mono font-bold text-slate-800">
+                  <span className="font-mono font-bold text-slate-800 break-all">
                     {activeRequest.paymentAccountDetails || 'الحساب المسجل لدى الإدارة'}
                   </span>
                   {activeRequest.beneficiaryName && (
@@ -1019,9 +1081,9 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                     <div key={event.id} className="relative">
                       <div className="absolute -right-[21px] top-1 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-4 ring-white"></div>
                       <div className="text-xs font-bold text-slate-800">{event.title}</div>
-                      <p className="text-xs text-slate-600 mt-0.5">{event.description}</p>
+                      <p className="text-xs text-slate-600 mt-0.5 break-words">{localizePaymentMethodText(event.description)}</p>
                       <div className="text-[10px] text-slate-400 mt-1 font-mono">
-                        {event.actorName} • {event.timestamp}
+                        {event.actorName} • {formatLocalDateTime(event.timestamp)}
                       </div>
                     </div>
                   ))}

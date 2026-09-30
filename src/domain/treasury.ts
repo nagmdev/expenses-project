@@ -10,10 +10,14 @@ import { idFromKey } from '../utils/ids';
 import {
   COL,
   DomainError,
+  accountTypeLabel,
+  assertOrgWritable,
   assertRole,
   auditIdFor,
   claimUniqueKey,
+  formatAmount,
   isKeyTakenByOther,
+  localDate,
   pad,
   readCounter,
   readUniqueKey,
@@ -110,6 +114,28 @@ export interface MovementResult {
   parentLedger: LedgerEntry | null;
 }
 
+// No money operation takes an account below zero (manual withdrawal, custody issue and
+// replenishment, visa payment, request disbursement, transfer). The only exception is the
+// owner-confirmed bank correction when a legacy wallet is detached (detachLegacyWallet).
+const DEPOSIT_FIRST = 'يرجى إيداع المبلغ في الحساب أولاً (إيداع وتغذية رصيد + IN) أو اختيار حساب آخر.';
+
+export function insufficientFunds(account: Pick<PaymentAccount, 'name' | 'currency'>, available: number, amount: number) {
+  const cur = currencyOf(account.currency);
+  return new DomainError(
+    'insufficient_funds',
+    `رصيد الحساب "${account.name}" غير كافٍ لإتمام العملية: الرصيد المتوفر (${formatAmount(available)} ${cur}) أقل من المبلغ المطلوب (${formatAmount(amount)} ${cur}). ${DEPOSIT_FIRST}`,
+  );
+}
+
+/** An InstaPay channel (or a not-yet-detached legacy wallet) spends its bank's money: that bank must cover it too. */
+export function insufficientParentFunds(parent: Pick<PaymentAccount, 'name' | 'currency'>, via: Pick<PaymentAccount, 'name'>, available: number, amount: number) {
+  const cur = currencyOf(parent.currency);
+  return new DomainError(
+    'insufficient_funds',
+    `رصيد الحساب البنكي المرتبط "${parent.name}" غير كافٍ لإتمام الخصم عبر "${via.name}": الرصيد المتوفر (${formatAmount(available)} ${cur}) أقل من المبلغ المطلوب (${formatAmount(amount)} ${cur}). يرجى إيداع المبلغ في الحساب البنكي أولاً أو اختيار حساب آخر.`,
+  );
+}
+
 interface RunningAccount {
   doc: AccountDoc;
   balance: number;
@@ -156,10 +182,7 @@ export function createMovementBatch() {
     const acc = stateOf(account);
     const before = acc.balance;
     if (!input.allowOverdraft && type === 'out' && before < amount) {
-      throw new DomainError(
-        'insufficient_funds',
-        `رصيد الحساب غير كافٍ لإتمام الصرف: الرصيد المتوفر (${before.toLocaleString()} ${account.currency || ''}) أقل من المبلغ المطلوب (${amount.toLocaleString()}).`,
-      );
+      throw insufficientFunds(account, before, amount);
     }
     const after = toMoney(type === 'in' ? before + amount : before - amount);
 
@@ -169,7 +192,7 @@ export function createMovementBatch() {
     if (parent && par) {
       parentBefore = par.balance;
       if (!input.allowOverdraft && type === 'out' && parentBefore < amount) {
-        throw new DomainError('insufficient_funds', `رصيد الحساب البنكي الأم (${parent.name}) غير كافٍ لإتمام الخصم المرتبط.`);
+        throw insufficientParentFunds(parent, account, parentBefore, amount);
       }
       parentAfter = toMoney(type === 'in' ? parentBefore + amount : parentBefore - amount);
     }
@@ -321,6 +344,7 @@ export async function createPaymentAccount(
   return store.runTransaction(async tx => {
     const existing = await tx.get<PaymentAccount>(COL.paymentAccounts, id);
     if (existing) return { value: existing, changed: false, reason: 'duplicate_operation' };
+    await assertOrgWritable(tx, input.orgId);
 
     const key = await readUniqueKey(tx, 'account_identifier', input.orgId, input.accountIdentifier);
     if (isKeyTakenByOther(key, id)) {
@@ -344,7 +368,7 @@ export async function createPaymentAccount(
         entityId: id,
         entityName: account.name,
         orgId: account.orgId,
-        details: `تم إنشاء وسيلة وخزينة دفع جديدة: "${account.name}" (${account.type}) برصيد افتتاحي ${toMoney(account.initialBalance).toLocaleString()} ${account.currency}`,
+        details: `تم إنشاء وسيلة وخزينة دفع جديدة: "${account.name}" (${accountTypeLabel(account.type)}) برصيد افتتاحي ${formatAmount(toMoney(account.initialBalance))} ${account.currency}`,
       },
       auditIdFor(operationKey),
       nowIso,
@@ -432,12 +456,30 @@ export async function updatePaymentAccount(
   });
 }
 
+/**
+ * A treasury account with a balance or any history (opening balance, money in or out)
+ * is part of the books: deleting it would orphan its ledger and change the totals.
+ * Such an account can only be deactivated (firestore.rules refuse the delete as well).
+ */
+export const paymentAccountHasHistory = (a: Partial<PaymentAccount>) =>
+  [a.currentBalance, a.balance, a.initialBalance, a.totalIn, a.totalOut].some(v => toMoney(v) !== 0);
+
+export function assertPaymentAccountDeletable(account: Partial<PaymentAccount> & { name?: string }) {
+  if (paymentAccountHasHistory(account)) {
+    throw new DomainError(
+      'account_has_history',
+      `لا يمكن حذف الحساب "${account.name || ''}" لأن له رصيداً أو حركات مالية مسجلة (الرصيد الحالي ${formatAmount(balanceOf(account))} ${currencyOf(account.currency)}). يمكنك تعطيله بدلاً من الحذف مع الاحتفاظ بسجله المالي.`,
+    );
+  }
+}
+
 export async function deletePaymentAccount(store: DataStore, actor: Actor, accountId: string, operationKey: string, now: Date = new Date()) {
   assertRole(actor, ['super_admin', 'org_admin'], 'حذف الحسابات المالية متاح لمدير الشركة فقط.');
   const nowIso = now.toISOString();
   return store.runTransaction(async tx => {
     const account = await tx.get<PaymentAccount>(COL.paymentAccounts, accountId);
     if (!account) return { value: null, changed: false };
+    assertPaymentAccountDeletable(account);
     const key = await readUniqueKey(tx, 'account_identifier', account.orgId, account.accountIdentifier || '');
     tx.delete(COL.paymentAccounts, accountId);
     releaseUniqueKey(tx, key, accountId);
@@ -485,7 +527,8 @@ export async function adjustAccountBalance(
       parent,
       type: input.type,
       amount,
-      allowOverdraft: true,
+      // A withdrawal never takes the account (or the bank behind an InstaPay) below zero.
+      allowOverdraft: false,
       ledgerId,
       referenceType: 'manual_adjustment',
       description,
@@ -503,7 +546,7 @@ export async function adjustAccountBalance(
         entityId: account.id,
         entityName: account.name,
         orgId: account.orgId,
-        details: `${input.type === 'in' ? 'إيداع وتغذية رصيد (+ IN)' : 'سحب وتسوية رصيد (- OUT)'} بقيمة ${amount.toLocaleString()} ${account.currency}. الرصيد: ${movement.balanceBefore.toLocaleString()} -> ${movement.balanceAfter.toLocaleString()}. البيان: ${description}`,
+        details: `${input.type === 'in' ? 'إيداع وتغذية رصيد (+ IN)' : 'سحب وتسوية رصيد (- OUT)'} بقيمة ${formatAmount(amount)} ${account.currency}. الرصيد: ${formatAmount(movement.balanceBefore)} -> ${formatAmount(movement.balanceAfter)}. البيان: ${description}`,
       },
       auditIdFor(operationKey),
       nowIso,
@@ -577,7 +620,7 @@ export async function detachLegacyWallet(
       });
       batch.write(tx);
       correctionLedger = moved.ledger;
-      bankLine = ` وتصحيح رصيد "${bank.name}" بمبلغ ${correction > 0 ? '+' : '-'}${Math.abs(correction).toLocaleString()} ${bank.currency || ''} (${moved.balanceBefore.toLocaleString()} -> ${moved.balanceAfter.toLocaleString()})`;
+      bankLine = ` وتصحيح رصيد "${bank.name}" بمبلغ ${correction > 0 ? '+' : '-'}${formatAmount(Math.abs(correction))} ${bank.currency || ''} (${formatAmount(moved.balanceBefore)} -> ${formatAmount(moved.balanceAfter)})`;
     }
     tx.update(COL.paymentAccounts, wallet.id, { parentAccountId: '', parentAccountName: '', updatedAt: nowIso });
     writeAudit(
@@ -633,6 +676,9 @@ export async function issueCustody(
     if (account.orgId && input.orgId && account.orgId !== input.orgId) {
       throw new DomainError('cross_org', 'لا يمكن صرف عهدة من حساب تابع لشركة أخرى.');
     }
+    if (account.active === false) throw new DomainError('inactive_account', `الحساب "${account.name}" معطل ولا يمكن الصرف منه.`);
+    const custodyOrgId = input.orgId || account.orgId;
+    if (custodyOrgId) await assertOrgWritable(tx, custodyOrgId);
     const counter = await readCounter(tx, `custodies-${year}`);
     const custodyNumber = `CUS-${year}-${pad(counter.next, 5)}`;
 
@@ -641,7 +687,7 @@ export async function issueCustody(
       parent,
       type: 'out',
       amount,
-      allowOverdraft: true,
+      allowOverdraft: false,
       ledgerId: `tx-${operationKey}`,
       referenceType: 'custody',
       referenceId: custodyId,
@@ -685,7 +731,7 @@ export async function issueCustody(
         entityName: `${custodyNumber} - ${input.employeeName}`,
         orgId: input.orgId,
         orgName: input.orgName,
-        details: `صرف عهدة نقدية للموظف ${input.employeeName} بقيمة ${amount} ${custody.currency} من خزينة/حساب "${account.name}"`,
+        details: `صرف عهدة نقدية للموظف ${input.employeeName} بقيمة ${formatAmount(amount)} ${custody.currency} من خزينة/حساب "${account.name}"`,
       },
       auditIdFor(operationKey),
       nowIso,
@@ -746,7 +792,7 @@ export async function settleCustodyItem(
       serviceCategoryName: input.serviceCategoryName || '',
       vendorName: input.vendorName || '',
       invoiceNumber: input.invoiceNumber || '',
-      invoiceDate: input.invoiceDate || nowIso.split('T')[0],
+      invoiceDate: input.invoiceDate || localDate(now),
       description: input.description.trim() || 'فاتورة تسوية عهدة',
       receiptUrl: input.receiptUrl || '',
       status: 'approved',
@@ -771,7 +817,7 @@ export async function settleCustodyItem(
         entityName: `${custody.custodyNumber} - ${custody.employeeName}`,
         orgId: custody.orgId,
         orgName: input.orgName,
-        details: `تسجيل فاتورة تصفية عهدة بمبلغ ${amount} ${custody.currency} (فاتورة #${input.invoiceNumber || 'بدون'}) للموظف ${custody.employeeName}`,
+        details: `تسجيل فاتورة تصفية عهدة بمبلغ ${formatAmount(amount)} ${custody.currency} (فاتورة #${input.invoiceNumber || 'بدون'}) للموظف ${custody.employeeName}`,
       },
       auditIdFor(operationKey),
       nowIso,
@@ -802,12 +848,13 @@ export async function replenishCustody(
     if (account.orgId && custody.orgId && account.orgId !== custody.orgId) {
       throw new DomainError('cross_org', 'لا يمكن الاستعاضة من حساب تابع لشركة أخرى.');
     }
+    if (account.active === false) throw new DomainError('inactive_account', `الحساب "${account.name}" معطل ولا يمكن الصرف منه.`);
     const movement = applyMovement({
       account,
       parent,
       type: 'out',
       amount,
-      allowOverdraft: true,
+      allowOverdraft: false,
       ledgerId,
       referenceType: 'custody',
       referenceId: custody.id,
@@ -836,7 +883,7 @@ export async function replenishCustody(
         entityName: `${custody.custodyNumber} - ${custody.employeeName}`,
         orgId: custody.orgId,
         orgName: input.orgName,
-        details: `استعاضة عهدة بقيمة ${amount} ${custody.currency} للموظف ${custody.employeeName} من حساب ${account.name}`,
+        details: `استعاضة عهدة بقيمة ${formatAmount(amount)} ${custody.currency} للموظف ${custody.employeeName} من حساب ${account.name}`,
       },
       auditIdFor(operationKey),
       nowIso,
@@ -1010,7 +1057,7 @@ export async function returnCustodyRemainders(
           entityName: `${custody.custodyNumber} - ${custody.employeeName}`,
           orgId: custody.orgId,
           orgName: input.orgName,
-          details: `رد المتبقي من عهدة الموظف ${custody.employeeName} بقيمة ${amount.toLocaleString()} ${currencyOf(custody.currency)} وإيداعه في خزينة/حساب "${account.name}". رصيد الحساب: ${movement.balanceBefore.toLocaleString()} -> ${movement.balanceAfter.toLocaleString()}${notes ? `. ملاحظات: ${notes}` : ''}`,
+          details: `رد المتبقي من عهدة الموظف ${custody.employeeName} بقيمة ${formatAmount(amount)} ${currencyOf(custody.currency)} وإيداعه في خزينة/حساب "${account.name}". رصيد الحساب: ${formatAmount(movement.balanceBefore)} -> ${formatAmount(movement.balanceAfter)}${notes ? `. ملاحظات: ${notes}` : ''}`,
         },
         auditIdFor(operationKey, custody.id),
         nowIso,
@@ -1103,16 +1150,10 @@ export async function transferBetweenAccounts(
       );
     }
     // No overdraft for transfers: the source (and the bank behind an InstaPay source) must cover it.
+    // Checked before a transfer number is read, so a refused transfer never burns a number.
     const available = balanceOf(from.account);
-    if (available < amount) {
-      throw new DomainError(
-        'insufficient_funds',
-        `رصيد الحساب "${from.account.name}" غير كافٍ لإتمام التحويل: الرصيد المتوفر (${available.toLocaleString()} ${fromCurrency}) أقل من المبلغ المطلوب (${amount.toLocaleString()}).`,
-      );
-    }
-    if (from.parent && balanceOf(from.parent) < amount) {
-      throw new DomainError('insufficient_funds', `رصيد الحساب البنكي الأم (${from.parent.name}) المرتبط بـ "${from.account.name}" غير كافٍ لإتمام التحويل.`);
-    }
+    if (available < amount) throw insufficientFunds(from.account, available, amount);
+    if (from.parent && balanceOf(from.parent) < amount) throw insufficientParentFunds(from.parent, from.account, balanceOf(from.parent), amount);
     const counter = await readCounter(tx, `transfers-${year}`);
     const transferNumber = `TRF-${year}-${pad(counter.next, 6)}`;
 
@@ -1163,7 +1204,7 @@ export async function transferBetweenAccounts(
         entityName: `تحويل ${transferNumber} من (${from.account.name}) إلى (${to.account.name})`,
         orgId: from.account.orgId,
         orgName: input.orgName,
-        details: `تحويل مبلغ ${amount.toLocaleString()} ${fromCurrency} من "${from.account.name}" (${out.balanceBefore.toLocaleString()} -> ${out.balanceAfter.toLocaleString()}) إلى "${to.account.name}" (${inn.balanceBefore.toLocaleString()} -> ${inn.balanceAfter.toLocaleString()}) برقم ${transferNumber}${description ? `. البيان: ${description}` : ''}`,
+        details: `تحويل مبلغ ${formatAmount(amount)} ${fromCurrency} من "${from.account.name}" (${formatAmount(out.balanceBefore)} -> ${formatAmount(out.balanceAfter)}) إلى "${to.account.name}" (${formatAmount(inn.balanceBefore)} -> ${formatAmount(inn.balanceAfter)}) برقم ${transferNumber}${description ? `. البيان: ${description}` : ''}`,
       },
       auditIdFor(operationKey),
       nowIso,

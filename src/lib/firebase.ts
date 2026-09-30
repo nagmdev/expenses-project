@@ -1,4 +1,4 @@
-import { initializeApp, getApps, getApp, deleteApp, type FirebaseApp, type FirebaseOptions } from 'firebase/app';
+import { initializeApp, getApps, deleteApp, type FirebaseApp, type FirebaseOptions } from 'firebase/app';
 import {
   getAuth,
   connectAuthEmulator,
@@ -346,14 +346,15 @@ export async function changeUserPassword(currentPassword: string, newPassword: s
 }
 
 /**
- * Update current user's profile
+ * Update current user's Auth profile. Only the fields given are sent: the photo is left
+ * as it is unless a new URL is passed (sending `photoURL: null` for a user without a photo
+ * made accounts:update fail with "photoUrl must be string").
  */
 export async function updateUserProfile(displayName: string, photoURL?: string): Promise<void> {
   if (!auth.currentUser) throw new Error('لا يوجد مستخدم مسجل حالياً.');
-  await updateProfile(auth.currentUser, { 
-    displayName: displayName.trim(), 
-    photoURL: photoURL || auth.currentUser.photoURL 
-  });
+  const changes: { displayName: string; photoURL?: string } = { displayName: displayName.trim() };
+  if (typeof photoURL === 'string' && photoURL.trim()) changes.photoURL = photoURL.trim();
+  await updateProfile(auth.currentUser, changes);
 }
 
 /**

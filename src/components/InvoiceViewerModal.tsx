@@ -1,17 +1,17 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  X, 
-  ZoomIn, 
-  ZoomOut, 
-  RotateCw, 
-  RotateCcw, 
-  Download, 
-  ExternalLink, 
-  FileText, 
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  X,
+  ZoomIn,
+  ZoomOut,
+  RotateCw,
+  Download,
+  ExternalLink,
+  FileText,
   Receipt,
   Maximize2
 } from 'lucide-react';
 import { openFileSafely, downloadFileSafely, dataUrlToBlob } from '../utils/fileUpload';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 export interface InvoiceViewerAttachment {
   url?: string;
@@ -29,20 +29,34 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
   const [zoom, setZoom] = useState<number>(1);
   const [rotation, setRotation] = useState<number>(0);
 
-  // Reset zoom & rotation when attachment changes
-  useEffect(() => {
+  // Reset zoom & rotation when another document is shown (adjusted while rendering,
+  // so the new document never flashes with the previous one's zoom).
+  const [shownUrl, setShownUrl] = useState(attachment?.url);
+  if (shownUrl !== attachment?.url) {
+    setShownUrl(attachment?.url);
     setZoom(1);
     setRotation(0);
-  }, [attachment?.url]);
+  }
 
-  // Keyboard shortcut support: Esc to close, +, -, 0
+  const isOpen = Boolean(attachment?.url);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const onCloseRef = useRef(onClose);
   useEffect(() => {
-    if (!attachment) return;
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
+  // Esc closes ONLY this preview (it is the top-most dialog): the form or detail
+  // window behind it stays open with everything typed in it.
+  useEscapeToClose(isOpen, onClose, dialogRef);
+
+  // Zoom shortcuts: +, -, 0
+  useEffect(() => {
+    if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      } else if (e.key === '+' || e.key === '=') {
+      // Ctrl/Cmd + '+' / '-' / '0' is the browser's own page zoom.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === '+' || e.key === '=') {
         setZoom(prev => Math.min(prev + 0.25, 3.5));
       } else if (e.key === '-' || e.key === '_') {
         setZoom(prev => Math.max(prev - 0.25, 0.5));
@@ -51,28 +65,81 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
         setRotation(0);
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [attachment, onClose]);
+  }, [isOpen]);
+
+  // Keyboard focus: the preview takes it when it opens (so Esc works at once) and gives
+  // it back to whatever had it before when it closes.
+  useEffect(() => {
+    if (!isOpen) return;
+    const previous = document.activeElement as HTMLElement | null;
+    dialogRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (previous && document.contains(previous)) previous.focus({ preventScroll: true });
+    };
+  }, [isOpen]);
+
+  // A PDF is shown in an iframe. While the keyboard focus is inside it, key presses go
+  // to the browser's PDF viewer and never reach this page, so Esc would do nothing.
+  // Whenever the frame takes the focus (the viewer grabbing it on load, or a click in the
+  // document), hand it straight back to the preview: scrolling, the viewer's toolbar
+  // buttons and text selection work with the mouse as before, and Esc always closes the
+  // preview.
+  useEffect(() => {
+    if (!isOpen) return;
+    let timer: number | undefined;
+    const reclaimFocus = () => {
+      if (document.activeElement === iframeRef.current) dialogRef.current?.focus({ preventScroll: true });
+    };
+    const onWindowBlur = () => {
+      window.clearTimeout(timer);
+      // The frame becomes document.activeElement right after the window's blur event.
+      timer = window.setTimeout(reclaimFocus, 0);
+    };
+    window.addEventListener('blur', onWindowBlur);
+    const frame = iframeRef.current;
+    frame?.addEventListener('mouseleave', reclaimFocus);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('blur', onWindowBlur);
+      frame?.removeEventListener('mouseleave', reclaimFocus);
+    };
+  }, [isOpen, attachment?.url]);
+
+  // Same-origin documents (a PDF shown from a blob: URL) also get an Esc listener
+  // inside the frame; a cross-origin frame refuses access, which is fine.
+  const handleIframeLoad = () => {
+    try {
+      const inner = iframeRef.current?.contentWindow;
+      inner?.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key === 'Escape') onCloseRef.current();
+      });
+    } catch {
+      // cross-origin frame: covered by the focus handling above
+    }
+  };
 
   // Generate safe blob URL for PDFs if using base64 data URL
+  const docUrl = attachment?.url;
+  const docType = attachment?.type;
+  const docName = attachment?.name;
   const pdfBlobUrl = useMemo(() => {
-    if (!attachment?.url) return '';
-    const isPdf = attachment.type === 'pdf' || 
-      (attachment.name && attachment.name.toLowerCase().endsWith('.pdf')) ||
-      attachment.url.startsWith('data:application/pdf');
-    
-    if (isPdf && attachment.url.startsWith('data:')) {
+    if (!docUrl) return '';
+    const isPdf = docType === 'pdf' ||
+      (docName && docName.toLowerCase().endsWith('.pdf')) ||
+      docUrl.startsWith('data:application/pdf');
+
+    if (isPdf && docUrl.startsWith('data:')) {
       try {
-        const blob = dataUrlToBlob(attachment.url);
+        const blob = dataUrlToBlob(docUrl);
         return URL.createObjectURL(blob);
       } catch (e) {
         console.error('Failed to convert PDF data URL to blob:', e);
       }
     }
-    return attachment.url;
-  }, [attachment?.url, attachment?.type, attachment?.name]);
+    return docUrl;
+  }, [docUrl, docType, docName]);
 
   // Clean up blob URL on unmount or URL change
   useEffect(() => {
@@ -108,8 +175,13 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
   };
 
   return (
-    <div 
-      className="fixed inset-0 z-[100] flex flex-col bg-slate-950/90 backdrop-blur-md animate-in fade-in duration-200 select-none"
+    <div
+      ref={dialogRef}
+      tabIndex={-1}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`معاينة المستند: ${fileName}`}
+      className="fixed inset-0 z-[100] flex flex-col bg-slate-950/90 backdrop-blur-md animate-in fade-in duration-200 select-none outline-none"
       onClick={onClose}
     >
       {/* Top Navigation & Toolbar */}
@@ -236,8 +308,10 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
             onClick={(e) => e.stopPropagation()}
           >
             <iframe
+              ref={iframeRef}
               src={pdfBlobUrl}
               title={fileName}
+              onLoad={handleIframeLoad}
               className="w-full flex-1 border-0"
             />
             <div className="p-3 bg-slate-900 border-t border-slate-800 flex items-center justify-between text-xs text-slate-300">
@@ -277,7 +351,11 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
       <div 
         className="py-1.5 px-4 bg-slate-900/60 border-t border-slate-800/60 text-center text-[11px] text-slate-400 shrink-0 pointer-events-none"
       >
-        <span>💡 اضغط <strong>Esc</strong> للإغلاق • استخدم <strong>+</strong> و <strong>-</strong> للتكبير والتصغير • المستند محفوظ بشكل دائم</span>
+        {isPdf ? (
+          <span>💡 اضغط <strong>Esc</strong> أو زر <strong>✕</strong> لإغلاق المعاينة فقط (تبقى النافذة التي خلفها كما هي) • للبحث والتنقل بلوحة المفاتيح داخل الملف استخدم «فتح في نافذة كاملة»</span>
+        ) : (
+          <span>💡 اضغط <strong>Esc</strong> لإغلاق المعاينة فقط • استخدم <strong>+</strong> و <strong>-</strong> للتكبير والتصغير • المستند محفوظ بشكل دائم</span>
+        )}
       </div>
     </div>
   );

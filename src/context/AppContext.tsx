@@ -64,7 +64,7 @@ import type { Query, DocumentData } from 'firebase/firestore';
 import { arrayRemove, arrayUnion, updateDoc } from 'firebase/firestore';
 import { createFirestoreStore } from '../domain/firestoreStore';
 import type { DataStore } from '../domain/store';
-import { COL, DomainError, isDomainError, normalizeEmail, normalizeKeyValue, type Actor } from '../domain/common';
+import { COL, DomainError, PAYOUT_FIELDS, formatAmount, isDomainError, normalizeEmail, normalizeKeyValue, timelineTimestamp, type Actor } from '../domain/common';
 import {
   createExpenseRequest,
   disburseExpenseRequest,
@@ -75,10 +75,12 @@ import {
 } from '../domain/requests';
 import {
   adjustAccountBalance,
+  assertPaymentAccountDeletable,
   createPaymentAccount,
   deletePaymentAccount as deletePaymentAccountOp,
   issueCustody as issueCustodyOp,
   linkedParentIdOf,
+  paymentAccountHasHistory,
   replenishCustody as replenishCustodyOp,
   returnCustodyRemainders as returnCustodyRemaindersOp,
   settleCustodyItem as settleCustodyItemOp,
@@ -96,6 +98,12 @@ import {
 import {
   PLATFORM_OWNER_EMAILS,
   SUPER_ADMIN_OWNER_ONLY_MESSAGE,
+  assertMemberRemovable,
+  assertMemberUpdatable,
+  effectiveMemberChanges,
+  movePayoutToProfile,
+  syncOwnMembership,
+  type EntityRemoval,
   createEntity,
   createEntityInOrgs,
   createMember,
@@ -105,6 +113,7 @@ import {
   ensureOrgNotificationRecipients,
   entityIdInOrg,
   isRealUid,
+  migrateLegacyUniqueKeys,
   normalizeOrgIds,
   profileMembershipState,
   reusableProvisionedAccount,
@@ -114,6 +123,8 @@ import {
   updateEntity,
   updateMemberRecord,
   updateOrganization as updateOrganizationOp,
+  uniqueKeyOwnersOf,
+  type UniqueKeyMigration,
 } from '../domain/directory';
 import {
   buildOutboxEvent,
@@ -124,6 +135,7 @@ import {
 } from '../domain/outbox';
 import { newOperationKey } from '../utils/ids';
 import { singleFlight } from '../utils/singleFlight';
+import { HOME_TAB, canOpenTab } from '../utils/permissions';
 
 export {
   signInWithGoogle,
@@ -152,6 +164,13 @@ export interface MultiOrgAddResult {
   skipped: MultiOrgSkip[];
 }
 export type { MultiOrgSkip };
+
+/** The platform owner's uniqueness-key migration in this session: running, then its result or error. */
+export interface KeyMigrationState {
+  pending: boolean;
+  result?: UniqueKeyMigration;
+  error?: string;
+}
 
 export interface DisburseOutcome {
   changed: boolean;
@@ -374,6 +393,11 @@ interface AppContextType {
   setActiveTab: (tab: string) => void;
   openFirebaseModal: () => void;
   closeFirebaseModal: () => void;
+  /**
+   * Re-reads the user's profile and memberships once. true = linked to a company; false =
+   * the database answered and there is no usable membership. THROWS when the database could
+   * not be reached (offline / unavailable): that is "could not check", never "not linked".
+   */
   forceRefreshUserState: () => Promise<boolean>;
   /** The account is suspended (active: false) in its org; the security rules deny it all org data. */
   isAccountSuspended: boolean;
@@ -452,14 +476,16 @@ interface AppContextType {
   // Services
   addService: (service: Omit<ServiceCategory, 'id' | 'spentAmount'>, opts?: MutationOptions) => Promise<void>;
   updateService: (service: ServiceCategory) => Promise<void>;
-  deleteService: (serviceId: string) => Promise<void>;
+  /** In use (requests, custody settlements, spending, other companies) → deactivated instead of deleted. */
+  deleteService: (serviceId: string) => Promise<EntityRemoval>;
 
   // Providers
   addProvider: (provider: Omit<ServiceProvider, 'id' | 'totalPaid'>, opts?: MutationOptions) => Promise<void>;
   /** One provider document per selected company (own orgId and totals), in ONE operation; companies where the name exists are skipped. */
   addProviderToOrgs: (provider: Omit<ServiceProvider, 'id' | 'totalPaid' | 'orgId'>, orgIds: string[], opts?: MutationOptions) => Promise<MultiOrgAddResult>;
   updateProvider: (provider: ServiceProvider) => Promise<void>;
-  deleteProvider: (providerId: string) => Promise<void>;
+  /** In use (requests, visas, payments) → deactivated instead of deleted. */
+  deleteProvider: (providerId: string) => Promise<EntityRemoval>;
 
   createRequest: (data: CreateRequestData) => Promise<ExpenseRequest>;
   updateRequest: (requestId: string, updatedFields: Partial<ExpenseRequest>, opts?: MutationOptions) => Promise<void>;
@@ -561,7 +587,7 @@ interface AppContextType {
   /** One department document per selected company, in ONE operation; companies where the name exists are skipped. */
   addDepartmentToOrgs: (dept: Omit<Department, 'id' | 'createdAt' | 'orgId'>, orgIds: string[], opts?: MutationOptions) => Promise<MultiOrgAddResult>;
   updateDepartment: (deptId: string, updates: Partial<Department>) => Promise<void>;
-  deleteDepartment: (deptId: string) => Promise<void>;
+  deleteDepartment: (deptId: string) => Promise<EntityRemoval>;
 
   // Audit Trail & Logging
   auditLogs: AuditLogEntry[];
@@ -583,15 +609,21 @@ interface AppContextType {
   emailLogs: EmailLogEntry[];
   sendTestEmail: (recipientEmail: string, templateType?: EmailEventType) => Promise<{ success: boolean; message: string }>;
   clearEmailLogs: () => Promise<void>;
+  /** Platform owner: moves the uniqueness keys of existing records to the current id format (once, after the rules update). */
+  migrateUniqueKeys: () => Promise<UniqueKeyMigration>;
+  /** The last migration of this session (running / result / error): kept here so leaving Settings mid-run does not lose it. */
+  keyMigration: KeyMigrationState | null;
 
   // Visa Issuance & Expense Management (طلبات وإصدار التأشيرات ومصروفاتها)
   visaRequests: VisaRequest[];
   allVisaRequests: VisaRequest[];
   createVisaRequest: (data: Omit<VisaRequest, 'id' | 'requestNumber' | 'status' | 'paidAmount' | 'remainingBalance' | 'payments' | 'createdAt' | 'updatedAt'>, opts?: MutationOptions) => Promise<VisaRequest>;
   updateVisaRequest: (id: string, updates: Partial<VisaRequest>) => Promise<void>;
+  /** Recorded in the name of the signed-in user; `approverName` is ignored (kept for older callers). */
   approveVisaRequest: (id: string, approverName?: string) => Promise<void>;
   rejectVisaRequest: (id: string, reason: string, approverName?: string) => Promise<void>;
-  addVisaPayment: (visaId: string, payment: Omit<VisaPaymentRecord, 'id' | 'visaRequestId' | 'recordedBy' | 'recordedByName' | 'recordedAt'>, opts?: MutationOptions) => Promise<void>;
+  /** Resolves with the visa as stored after the payment (a retry of the same key returns it unchanged). */
+  addVisaPayment: (visaId: string, payment: Omit<VisaPaymentRecord, 'id' | 'visaRequestId' | 'recordedBy' | 'recordedByName' | 'recordedAt'>, opts?: MutationOptions) => Promise<VisaRequest>;
   deleteVisaRequest: (id: string) => Promise<void>;
 
   refreshData: () => Promise<void>;
@@ -621,6 +653,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [rawCustodies, setRawCustodies] = useState<PettyCashCustody[]>([]);
   const [rawCustodySettlements, setRawCustodySettlements] = useState<CustodySettlementItem[]>([]);
   const [rawDepartments, setRawDepartments] = useState<Department[]>([]);
+  const [keyMigration, setKeyMigration] = useState<KeyMigrationState | null>(null);
   const [outboxEvents, setOutboxEvents] = useState<OutboxEvent[]>([]);
   const [legacyEmailLogs, setLegacyEmailLogs] = useState<EmailLogEntry[]>([]);
   const [emailLogsClearedAt, setEmailLogsClearedAt] = useState<string>('');
@@ -759,8 +792,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // user's own profile document.
   const forceRefreshUserState = useCallback(async (): Promise<boolean> => {
     if (!firebaseUser) return false;
+    // "Could not reach the database" is never reported as "no membership": it THROWS, and the
+    // caller shows a connectivity message instead of "your account is not linked yet".
+    const unreachable = () =>
+      new DomainError('offline', 'تعذر الاتصال بقاعدة البيانات للتحقق من ربط حسابك. تحقق من الاتصال ثم أعد المحاولة.');
+    const isConnectivityError = (err: any) =>
+      ['unavailable', 'deadline-exceeded', 'offline'].includes(err?.code) || /offline|network|unavailable/i.test(String(err?.message || ''));
     const { db } = initFirebase();
-    if (!db) return false;
+    if (!db) throw unreachable();
 
     try {
       let profileData: any = null;
@@ -770,16 +809,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           profileData = userDocSnap.data();
           setUserDocProfile(profileData);
         }
-      } catch (e) {
+      } catch (e: any) {
+        if (isConnectivityError(e)) throw unreachable();
         console.warn('[forceRefresh] user doc check:', e);
       }
 
       const { combined, fallbacks } = buildMembershipQueries(db, firebaseUser);
+      // An empty answer served from the local cache (offline) says nothing about the server.
+      const cachedEmpty = (snap: { empty: boolean; metadata: { fromCache: boolean } }) => snap.empty && snap.metadata.fromCache;
       let found: OrganizationMember[] = [];
       try {
-        found = toMembers((await getDocs(combined)).docs);
-      } catch {
+        const snap = await getDocs(combined);
+        if (cachedEmpty(snap)) throw unreachable();
+        found = toMembers(snap.docs);
+      } catch (err: any) {
+        if (isDomainError(err)) throw err;
+        if (isConnectivityError(err)) throw unreachable();
         const results = await Promise.allSettled(fallbacks.map(q => getDocs(q)));
+        const answered = results.some(r => r.status === 'fulfilled' && !cachedEmpty(r.value));
+        const offline = results.some(r => (r.status === 'rejected' ? isConnectivityError(r.reason) : cachedEmpty(r.value)));
+        if (!answered && offline) throw unreachable();
         found = uniqueById(results.flatMap(r => (r.status === 'fulfilled' ? toMembers(r.value.docs) : [])));
       }
       setMyMemberships(found);
@@ -796,6 +845,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         try {
           await linkOwnProfile(db, firebaseUser, link);
         } catch (err: any) {
+          if (isConnectivityError(err)) throw unreachable();
           console.warn('[forceRefresh] profile link rejected:', err?.message || err);
           return false;
         }
@@ -804,6 +854,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setFirebaseSyncCounter(prev => prev + 1);
       return true;
     } catch (err) {
+      if (isDomainError(err)) throw err;
+      if (isConnectivityError(err)) throw unreachable();
       console.error('[forceRefreshUserState] Unexpected error:', err);
       return false;
     }
@@ -1047,18 +1099,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [firebaseUser, userDocProfile, trustedProfile, userMemberRecord, userEmail, resolvedRole, effectiveOrgId]);
 
-  // Adjust active tab on role switch (e.g. employee defaults to my-requests / tracker).
-  // Wait until the role is actually known, or a super admin gets bounced to "my requests"
-  // while their super-admin record is still loading.
+  // The pages a role may open come from TAB_ACCESS (src/utils/permissions.ts, the same map
+  // the sidebar lists): any other page sends the role to its HOME_TAB — or, for a link to the
+  // company-wide requests list, to the role's own requests. Waits until the role is actually
+  // known, or a super admin gets bounced while their super-admin record is still loading.
   useEffect(() => {
     if (!firebaseUser || !superAdminStatusResolved || !userDocLoaded || !membershipsLoaded) return;
-    if (resolvedRole === 'employee') {
-      if (['dashboard', 'services', 'providers', 'organizations', 'settings'].includes(activeTab)) setActiveTab('my-requests');
-    } else if (resolvedRole === 'data_entry') {
-      if (['dashboard', 'requests', 'settings'].includes(activeTab)) setActiveTab('providers');
-    } else if (resolvedRole === 'finance') {
-      if (['organizations', 'settings'].includes(activeTab)) setActiveTab('treasury');
-    }
+    if (canOpenTab(resolvedRole, activeTab)) return;
+    setActiveTab(activeTab === 'requests' && canOpenTab(resolvedRole, 'my-requests') ? 'my-requests' : HOME_TAB[resolvedRole] || 'profile');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedRole, firebaseUser, activeTab, superAdminStatusResolved, userDocLoaded, membershipsLoaded]);
 
@@ -1318,7 +1366,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setRawMembers(list);
       setMembersSnapshotScope(membersScope);
     }, notDummy);
-    listen<ServiceCategory>('Services', orgScoped('services'), setRawServices, notDummy);
+    // Services: the company's own, plus those another company shares with it (orgIds, set by
+    // the platform owner). Two queries, one slice of state: their union by id.
+    if (isSuperAdmin || !effectiveOrgId) {
+      listen<ServiceCategory>('Services', orgScoped('services'), setRawServices, notDummy);
+    } else {
+      const slots: [ServiceCategory[], ServiceCategory[]] = [[], []];
+      const publish = () => setRawServices(uniqueById([...slots[0], ...slots[1]]));
+      listen<ServiceCategory>('Services', orgScoped('services'), list => {
+        slots[0] = list;
+        publish();
+      }, notDummy);
+      // Readable once firestore.rules (inSharedOrgViaProfile) are published and the user's
+      // profile names this company. A refusal only means "no shared services here": it is
+      // logged, not reported as a refused data source (the company's own services load above).
+      unsubs.push(onSnapshot(query(collection(db, 'services'), where('orgIds', 'array-contains', effectiveOrgId)), snapshot => {
+        slots[1] = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as ServiceCategory)).filter(notDummy);
+        publish();
+      }, err => {
+        console.warn('[Firebase] Shared services listener:', err?.message || err);
+        slots[1] = [];
+        publish();
+      }));
+    }
     listen<ServiceProvider>('Providers', orgScoped('providers'), setRawProviders, notDummy);
     listen<Department>('Departments', orgScoped('departments'), setRawDepartments, notDummy);
 
@@ -1441,7 +1511,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return storeRef.current.store;
   };
 
-  const actor: Actor = { id: currentUser.id, name: currentUser.name, email: currentUser.email, role: resolvedRole };
+  // orgId: the company this user works in (not for a super admin, who works across companies),
+  // so the domain refuses at once an edit of another company's record (e.g. a shared service).
+  const actor: Actor = {
+    id: currentUser.id,
+    name: currentUser.name,
+    email: currentUser.email,
+    role: resolvedRole,
+    ...(isSuperAdmin || !effectiveOrgId || effectiveOrgId === 'all' ? {} : { orgId: effectiveOrgId }),
+  };
 
   /**
    * Every write goes through here:
@@ -1547,6 +1625,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [firebaseUser, isSuperAdmin, resolvedRole, effectiveOrgId, membersSnapshotScope, rawOrganizations, rawMembers]);
+
+  // Payout details that older versions copied into memberships (which every member of the
+  // company can list) are moved to the person's own users/{uid} profile and removed from the
+  // membership, one transaction per membership (movePayoutToProfile never overwrites a value
+  // the profile already has). One attempt per membership per session; a membership whose
+  // person has no profile yet keeps its values until they sign in and save their profile.
+  const payoutCleanupRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!firebaseUser || !(isSuperAdmin || resolvedRole === 'org_admin')) return;
+    const pending = rawMembers.filter(m =>
+      PAYOUT_FIELDS.some(f => f in m) && !payoutCleanupRef.current.has(m.id) && (isSuperAdmin || m.orgId === effectiveOrgId));
+    if (pending.length === 0) return;
+    pending.forEach(m => payoutCleanupRef.current.add(m.id));
+    (async () => {
+      for (const m of pending) {
+        try {
+          await movePayoutToProfile(getStore(), actor, m.id);
+        } catch (err: any) {
+          console.warn('[payout] membership not cleaned up:', m.id, err?.message || err);
+        }
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firebaseUser, isSuperAdmin, resolvedRole, effectiveOrgId, rawMembers]);
 
   // The platform recipient list must equal the CURRENT super admins as the rules define
   // them: the built-in owner, email-keyed records (their id) and UID-keyed records (their
@@ -1858,13 +1960,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteOrganization = async (orgId: string): Promise<{ success: boolean; message?: string }> => {
+    // Every company is created with its default treasury accounts: only an account with a
+    // balance or history counts as a financial record (the empty ones are deleted with it).
+    const orgAccounts = rawPaymentAccounts.filter(a => a.orgId === orgId);
     const hasFinancialRecords =
       rawRequests.some(r => r.orgId === orgId) ||
+      rawVisaRequests.some(v => v.orgId === orgId) ||
+      rawCustodies.some(c => c.orgId === orgId) ||
       rawTransactions.some(t => t.orgId === orgId) ||
-      rawPaymentAccounts.some(a => a.orgId === orgId);
+      orgAccounts.some(paymentAccountHasHistory);
+    // People, services, providers and departments that still belong to it keep it too (archived, not orphaned).
+    const hasDirectoryRecords =
+      rawMembers.some(m => m.orgId === orgId) ||
+      rawServices.some(s => s.orgId === orgId || (s.orgIds || []).includes(orgId)) ||
+      rawProviders.some(p => p.orgId === orgId) ||
+      rawDepartments.some(d => d.orgId === orgId);
+    const requested = hasFinancialRecords || hasDirectoryRecords ? 'archive' : 'delete';
     try {
-      await mutate('deleteOrganization', orgId, store =>
-        removeOrganization(store, actor, orgId, hasFinancialRecords ? 'archive' : 'delete', newOperationKey())
+      const res = await mutate('deleteOrganization', orgId, store =>
+        removeOrganization(store, actor, orgId, requested, newOperationKey(), undefined, orgAccounts.map(a => a.id))
       );
       if (activeOrgId === orgId) {
         const remaining = rawOrganizations.filter(o => o.id !== orgId && !o.archived);
@@ -1872,7 +1986,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return {
         success: true,
-        message: hasFinancialRecords ? 'تم أرشفة الشركة بنجاح والاحتفاظ ببياناتها المالية التاريخية.' : 'تم حذف الشركة بنجاح.',
+        message: res.mode === 'archive'
+          ? hasFinancialRecords || !hasDirectoryRecords
+            ? 'تم أرشفة الشركة بنجاح والاحتفاظ ببياناتها المالية التاريخية.'
+            : 'تم أرشفة الشركة بنجاح لأن لها موظفين أو بنود صرف أو موردين أو أقسام مسجلة.'
+          : 'تم حذف الشركة بنجاح.',
       };
     } catch (err) {
       return { success: false, message: toUserError(err).message };
@@ -1996,6 +2114,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const mem = rawMembers.find(m => m.id === memberId) || myMemberships.find(m => m.id === memberId);
     // Only a NEW grant is refused: saving a leftover record that already says super_admin stays possible.
     if (updates.role !== mem?.role) assertNoSuperAdminGrant(updates.role, updates.userEmail ?? mem?.userEmail);
+    // Refused at once (the platform owner's / one's own role or status, someone else's record
+    // for a non-admin, an empty name) — before the profile lookups below, which can be slow.
+    if (mem) assertMemberUpdatable(actor, mem, effectiveMemberChanges(mem, updates));
     await mutate('updateMember', fingerprint(memberId, updates), async store =>
       updateMemberRecord(store, actor, memberId, updates, await linkedProfileIds(mem), newOperationKey())
     );
@@ -2007,6 +2128,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const removeMember = async (memberId: string) => {
     const mem = rawMembers.find(m => m.id === memberId);
+    // Refused at once (role, the platform owner's or one's own membership) before the slow lookups.
+    if (mem) assertMemberRemovable(actor, mem);
+    else if (actor.role !== 'super_admin' && actor.role !== 'org_admin') throw new DomainError('forbidden', 'حذف الموظفين متاح لمدير الشركة فقط.');
     // Also offer the accounts behind the same person's other records (legacy duplicates
     // with the same email): the domain detaches a profile only if nothing backs it any more.
     const email = normalizeEmail(mem?.userEmail);
@@ -2051,7 +2175,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const opKey = opts?.idempotencyKey || newOperationKey();
     await mutate('addService', opts?.idempotencyKey || fingerprint(serviceData.orgId, serviceData.code, serviceData.name), store =>
       createEntity<ServiceCategory>(store, actor, 'service', id => ({ ...serviceData, id, spentAmount: 0 }),
-        s => `تم إنشاء بند صرف وتكلفة جديد: "${s.name}" بكود (${s.code}) وسقف ميزانية ${Number(s.budgetLimit || 0).toLocaleString()}`, opKey)
+        s => `تم إنشاء بند صرف وتكلفة جديد: "${s.name}" بكود (${s.code}) وسقف ميزانية ${formatAmount(s.budgetLimit || 0)}`, opKey)
     );
   };
 
@@ -2062,15 +2186,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const budgetChanged = before.budgetLimit !== after.budgetLimit;
         let details = `تم تعديل بند الصرف: "${after.name}"`;
         if (nameChanged) details += ` (إعادة التسمية من "${before.name}" إلى "${after.name}")`;
-        if (budgetChanged) details += ` (تعديل سقف الميزانية من ${Number(before.budgetLimit).toLocaleString()} إلى ${Number(after.budgetLimit).toLocaleString()})`;
+        if (budgetChanged) details += ` (تعديل سقف الميزانية من ${formatAmount(before.budgetLimit)} إلى ${formatAmount(after.budgetLimit)})`;
         return { actionType: nameChanged ? 'rename' : budgetChanged ? 'budget_change' : 'update', details };
       }, newOperationKey())
     );
   };
 
-  const deleteService = async (serviceId: string) => {
-    const inUse = rawRequests.some(r => r.serviceCategoryId === serviceId);
-    await mutate('deleteService', serviceId, store => deleteEntity(store, actor, 'service', serviceId, inUse ? 'deactivate' : 'delete', newOperationKey()));
+  /**
+   * A service used by a request or a custody settlement, one money was already spent on, or
+   * one shared with other companies (whose requests this user cannot see) is deactivated,
+   * never hard-deleted (the domain also refuses to delete one with spending).
+   */
+  const deleteService = async (serviceId: string): Promise<EntityRemoval> => {
+    const service = rawServices.find(s => s.id === serviceId);
+    const inUse =
+      rawRequests.some(r => r.serviceCategoryId === serviceId) ||
+      rawCustodySettlements.some(s => s.serviceCategoryId === serviceId) ||
+      Number(service?.spentAmount || 0) !== 0 ||
+      (service?.orgIds || []).some(orgId => orgId !== service?.orgId);
+    const res = await mutate('deleteService', serviceId, store => deleteEntity(store, actor, 'service', serviceId, inUse ? 'deactivate' : 'delete', newOperationKey()));
+    return res.removal || (inUse ? 'deactivated' : 'deleted');
   };
 
   const addProvider = async (providerData: Omit<ServiceProvider, 'id' | 'totalPaid'>, opts?: MutationOptions) => {
@@ -2139,9 +2274,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
-  const deleteProvider = async (providerId: string) => {
-    const inUse = rawRequests.some(r => r.providerId === providerId);
-    await mutate('deleteProvider', providerId, store => deleteEntity(store, actor, 'provider', providerId, inUse ? 'deactivate' : 'delete', newOperationKey()));
+  /** A provider used by a request or a visa (or already paid) is deactivated, never hard-deleted. */
+  const deleteProvider = async (providerId: string): Promise<EntityRemoval> => {
+    const provider = rawProviders.find(p => p.id === providerId);
+    const inUse =
+      rawRequests.some(r => r.providerId === providerId) ||
+      rawVisaRequests.some(v => v.serviceProviderId === providerId) ||
+      Number(provider?.totalPaid || 0) !== 0;
+    const res = await mutate('deleteProvider', providerId, store => deleteEntity(store, actor, 'provider', providerId, inUse ? 'deactivate' : 'delete', newOperationKey()));
+    return res.removal || (inUse ? 'deactivated' : 'deleted');
   };
 
   const addDepartment = async (deptData: Omit<Department, 'id' | 'createdAt'>, opts?: MutationOptions) => {
@@ -2190,8 +2331,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
-  const deleteDepartment = async (deptId: string) => {
-    await mutate('deleteDepartment', deptId, store => deleteEntity(store, actor, 'department', deptId, 'delete', newOperationKey()));
+  const deleteDepartment = async (deptId: string): Promise<EntityRemoval> => {
+    const res = await mutate('deleteDepartment', deptId, store => deleteEntity(store, actor, 'department', deptId, 'delete', newOperationKey()));
+    return res.removal || 'deleted';
   };
 
   // =========================================================================
@@ -2213,7 +2355,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  /**
+   * Only an account with no balance and no history may be deleted (the domain and the rules
+   * check its balance / totals; the loaded ledger is checked here as well, for older
+   * accounts whose totals were never kept). Otherwise: deactivate it.
+   */
   const deletePaymentAccount = async (accountId: string) => {
+    const account = rawPaymentAccounts.find(a => a.id === accountId);
+    if (account) {
+      assertPaymentAccountDeletable(account);
+      if (rawTransactions.some(t => t.accountId === accountId)) {
+        throw new DomainError(
+          'account_has_history',
+          `لا يمكن حذف الحساب "${account.name}" لأن له حركات مالية مسجلة في دفتر الخزينة. يمكنك تعطيله بدلاً من الحذف مع الاحتفاظ بسجله المالي.`,
+        );
+      }
+    }
     await mutate('deletePaymentAccount', accountId, store => deletePaymentAccountOp(store, actor, accountId, newOperationKey()));
   };
 
@@ -2314,7 +2471,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           orgName: orgById(custody?.orgId)?.name,
         }, opKey)
       );
-      return { success: true, message: `تم تسجيل فاتورة التصفية بنجاح بمبلغ ${res.value.amount} ${res.value.currency}` };
+      return { success: true, message: `تم تسجيل فاتورة التصفية بنجاح بمبلغ ${formatAmount(res.value.amount)} ${res.value.currency}` };
     } catch (err) {
       return { success: false, message: toUserError(err).message };
     }
@@ -2333,7 +2490,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const res = await mutate('replenishCustody', opts?.idempotencyKey || fingerprint(custodyId, amount, sourceAccountId, notes), store =>
         replenishCustodyOp(store, actor, { custodyId, amount, sourceAccountId, notes, orgName: orgById(custody?.orgId)?.name }, opKey)
       );
-      return { success: true, message: `تمت استعاضة العهدة بنجاح بمبلغ ${amount} ${res.value.currency}` };
+      return { success: true, message: `تمت استعاضة العهدة بنجاح بمبلغ ${formatAmount(amount)} ${res.value.currency}` };
     } catch (err) {
       return { success: false, message: toUserError(err).message };
     }
@@ -2367,7 +2524,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!targetOrgId) throw new Error('يرجى تحديد الشركة أو المؤسسة التابع لها الموظف لتقديم طلب الصرف.');
 
     const opKey = data.idempotencyKey || newOperationKey();
-    const ts = new Date().toISOString().replace('T', ' ').slice(0, 16);
+    const ts = timelineTimestamp(new Date()); // local time, like every other displayed time
     let attachments: RequestAttachment[] = data.attachments && data.attachments.length > 0
       ? [...data.attachments]
       : (data.attachmentNames || []).map((name, i) => ({ id: `att-${opKey}-${i}`, name, size: '1.2 MB', type: 'pdf', uploadedAt: ts }));
@@ -2397,8 +2554,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       providerName: isIncome
         ? (provider?.name || data.providerName || (data.paymentAccountDetails ? `المودع: ${data.paymentAccountDetails}` : 'توريد مباشر / عميل'))
         : (provider?.name || data.providerName || 'مورد عام'),
-      title: isIncome ? (data.title || `توريد مالي (+ IN) - ${data.amount.toLocaleString()} ${data.currency || 'EGP'}`) : data.title,
-      description: isIncome ? (data.description || `توريد وتحصيل مالي مباشر لخزينة وحساب الشركة بمبلغ ${data.amount.toLocaleString()} ${data.currency || 'EGP'}`) : data.description,
+      title: isIncome ? (data.title || `توريد مالي (+ IN) - ${formatAmount(data.amount)} ${data.currency || 'EGP'}`) : data.title,
+      description: isIncome ? (data.description || `توريد وتحصيل مالي مباشر لخزينة وحساب الشركة بمبلغ ${formatAmount(data.amount)} ${data.currency || 'EGP'}`) : data.description,
       justification: isIncome ? (data.justification || 'إيداع وتوريد مالي مباشر') : data.justification,
       amount: data.amount,
       currency: data.currency,
@@ -2501,15 +2658,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await mutate('updateVisa', fingerprint(id, updates), store => updateVisaRequestOp(store, actor, id, updates));
   };
 
-  const approveVisaRequest = async (id: string, approverName?: string) => {
+  // The decision is recorded in the name of the signed-in user (actor); a name passed by an
+  // older caller is ignored — it used to be a hard-coded 'محمود' for every approver.
+  const approveVisaRequest = async (id: string, _approverName?: string) => {
     await mutate('decideVisa', `${id}:approve`, store =>
-      decideVisaRequest(store, actor, id, { type: 'approve', approverName: approverName || currentUser.name }, newOperationKey())
+      decideVisaRequest(store, actor, id, { type: 'approve' }, newOperationKey())
     );
   };
 
-  const rejectVisaRequest = async (id: string, reason: string, approverName?: string) => {
+  const rejectVisaRequest = async (id: string, reason: string, _approverName?: string) => {
     await mutate('decideVisa', `${id}:reject`, store =>
-      decideVisaRequest(store, actor, id, { type: 'reject', reason, approverName: approverName || currentUser.name }, newOperationKey())
+      decideVisaRequest(store, actor, id, { type: 'reject', reason }, newOperationKey())
     );
   };
 
@@ -2519,9 +2678,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     opts?: MutationOptions
   ) => {
     const opKey = opts?.idempotencyKey || newOperationKey();
-    await mutate('visaPayment', opts?.idempotencyKey || fingerprint(visaId, paymentData), store =>
+    const res = await mutate('visaPayment', opts?.idempotencyKey || fingerprint(visaId, paymentData), store =>
       addVisaPaymentOp(store, actor, visaId, paymentData, opKey)
     );
+    return res.value;
   };
 
   const deleteVisaRequest = async (id: string) => {
@@ -2650,6 +2810,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setEmailLogsClearedAt(new Date().toISOString());
   };
 
+  // The platform owner loads every company's records (listeners above), so the list of
+  // records holding a uniqueness key is complete here.
+  // Its state lives here, not in the Settings page, so leaving the page mid-run keeps it.
+  const migrateUniqueKeys = async (): Promise<UniqueKeyMigration> => {
+    if (!isSuperAdmin) throw new DomainError('forbidden', 'ترحيل مفاتيح منع التكرار متاح للمشرف العام للمنصة فقط.');
+    const owners = uniqueKeyOwnersOf({
+      organizations: rawOrganizations,
+      members: rawMembers,
+      services: rawServices,
+      providers: rawProviders,
+      departments: rawDepartments,
+      paymentAccounts: rawPaymentAccounts,
+    });
+    setKeyMigration({ pending: true });
+    try {
+      const result = await mutate('migrateUniqueKeys', 'all', store => migrateLegacyUniqueKeys(store, actor, owners));
+      setKeyMigration({ pending: false, result });
+      return result;
+    } catch (err: any) {
+      setKeyMigration({ pending: false, error: err?.message || 'تعذر ترحيل المفاتيح. تحقق من الاتصال ثم أعد المحاولة.' });
+      throw err;
+    }
+  };
+
   // =========================================================================
   // AUTH & PROFILE
   // =========================================================================
@@ -2738,15 +2922,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (data[key] !== undefined && data[key] !== null) profile[key] = String(data[key]).trim();
     }
     if (!profile.name) return { success: false, error: 'يرجى إدخال الاسم.' };
+    const ownMemberships = myMemberships.filter(m => m.userId === firebaseUser.uid);
+    // Payout details an older version kept only in a membership (and not given in this save)
+    // move into the profile first, so removing them from the membership below loses nothing.
+    const carried: Record<string, string> = {};
+    for (const f of PAYOUT_FIELDS) {
+      if (profile[f] !== undefined || String(userDocProfile?.[f] ?? '').trim()) continue;
+      const fromMembership = ownMemberships.map(m => (m as Record<string, any>)[f]).find(v => typeof v === 'string' && v.trim());
+      if (fromMembership) carried[f] = fromMembership.trim();
+    }
     try {
-      await mutate('updateProfile', firebaseUser.uid, async () => {
+      await mutate('updateProfile', firebaseUser.uid, async store => {
         const db = getDb()!;
-        await updateUserProfile(profile.name).catch(() => {});
+        // The Auth display name is secondary (the app reads the profile document): a failure
+        // is logged, never shown as a failed save.
+        await updateUserProfile(profile.name).catch(err => console.warn('[UpdateProfile] Auth display name not updated:', err?.message || err));
         // The profile document is required (it is what other screens read) — failures surface.
-        await setDoc(doc(db, 'users', firebaseUser.uid), sanitizeForFirestore({ uid: firebaseUser.uid, ...profile, updatedAt: now }), { merge: true });
-        if (userMemberRecord) {
-          await setDoc(doc(db, 'members', userMemberRecord.id), sanitizeForFirestore({ userName: profile.name, ...profile, updatedAt: now }), { merge: true })
-            .catch(err => console.warn('[UpdateProfile] membership copy not updated:', err?.message || err));
+        // It is the ONLY place payout details are kept (readable by the user and their company's admins).
+        await setDoc(doc(db, 'users', firebaseUser.uid), sanitizeForFirestore({ uid: firebaseUser.uid, ...carried, ...profile, updatedAt: now }), { merge: true });
+        // The membership gets name and phone only — every member of the company can list
+        // memberships, so payout details are never copied there; ones an older version
+        // copied are removed now that the profile holds them.
+        for (const m of ownMemberships) {
+          const fields = m.id === userMemberRecord?.id ? { userName: profile.name, phone: profile.phone } : {};
+          if (m.id !== userMemberRecord?.id && !PAYOUT_FIELDS.some(f => f in m)) continue;
+          await syncOwnMembership(store, actor, m.id, fields)
+            .catch(err => console.warn('[UpdateProfile] membership copy not updated:', m.id, err?.message || err));
         }
         // Note: the profile is NOT copied into super_admins/{email} any more — any document
         // there grants super admin, so a routine profile save must never create one.
@@ -2878,6 +3079,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         emailLogs,
         sendTestEmail,
         clearEmailLogs,
+        migrateUniqueKeys,
+        keyMigration,
         refreshData,
         resetToSampleData,
       }}

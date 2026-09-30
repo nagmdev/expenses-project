@@ -3,20 +3,31 @@ import { encodeKeyPart, idFromKey } from '../utils/ids';
 import {
   COL,
   DomainError,
+  PAYOUT_FIELDS,
+  assertActorCompany,
+  assertOrgWritable,
   assertRole,
   auditIdFor,
   claimUniqueKey,
   isKeyTakenByOther,
+  legacyUniqueKeyDocId,
   normalizeEmail,
+  normalizeKeyValue,
   readUniqueKey,
   releaseUniqueKey,
+  roleLabel,
+  splitPayout,
+  toMoney,
+  uniqueKeyDocId,
   writeAudit,
   type Actor,
   type UniqueKeyRead,
   type UniqueScope,
+  formatAmount,
+  localDate,
 } from './common';
 import type { DataStore, TxContext } from './store';
-import { buildAccountDoc, writeNewAccount, type MutationOutcome } from './treasury';
+import { buildAccountDoc, paymentAccountHasHistory, writeNewAccount, type MutationOutcome } from './treasury';
 
 // ---------------------------------------------------------------------------
 // Organizations
@@ -84,7 +95,7 @@ export async function createOrganization(
         entityName: name,
         orgId: id,
         orgName: name,
-        details: `تم إنشاء شركة ومؤسسة جديدة: "${name}" بكود (${code}) وميزانية معتمدة ${Number(input.budget || 0).toLocaleString()} ${input.currency}`,
+        details: `تم إنشاء شركة ومؤسسة جديدة: "${name}" بكود (${code}) وميزانية معتمدة ${formatAmount(Number(input.budget || 0))} ${input.currency}`,
       },
       auditIdFor(operationKey),
       nowIso,
@@ -111,7 +122,7 @@ export async function updateOrganization(store: DataStore, actor: Actor, orgId: 
     const budgetChanged = clean.budget !== undefined && clean.budget !== org.budget;
     let details = `تم تعديل بيانات الشركة: "${updated.name}"`;
     if (nameChanged) details += ` (إعادة التسمية من "${org.name}" إلى "${updated.name}")`;
-    if (budgetChanged) details += ` (تعديل الميزانية من ${Number(org.budget).toLocaleString()} إلى ${Number(updated.budget).toLocaleString()} ${updated.currency})`;
+    if (budgetChanged) details += ` (تعديل الميزانية من ${formatAmount(Number(org.budget))} إلى ${formatAmount(Number(updated.budget))} ${updated.currency})`;
     writeAudit(
       tx,
       actor,
@@ -131,6 +142,13 @@ export async function updateOrganization(store: DataStore, actor: Actor, orgId: 
   });
 }
 
+/**
+ * Archives a company (its records stay), or deletes one that has none. A deleted company takes
+ * its treasury accounts with it (the default ones createOrganization always adds, plus
+ * `accountIds`) and releases their identifier keys, so nothing is left orphaned. If one of
+ * those accounts has a balance or history by the time this runs, the company is archived
+ * instead; `mode` in the result says which happened.
+ */
 export async function removeOrganization(
   store: DataStore,
   actor: Actor,
@@ -138,18 +156,32 @@ export async function removeOrganization(
   mode: 'archive' | 'delete',
   operationKey: string,
   now: Date = new Date(),
-) {
+  accountIds: readonly string[] = [],
+): Promise<{ value: Organization | null; changed: boolean; mode: 'archive' | 'delete' }> {
   assertRole(actor, ['super_admin'], 'حذف الشركات متاح للمشرف العام فقط.');
   const nowIso = now.toISOString();
   return store.runTransaction(async tx => {
     const org = await tx.get<Organization>(COL.organizations, orgId);
-    if (!org) return { value: null, changed: false };
+    if (!org) return { value: null, changed: false, mode };
     const codeKey = await readUniqueKey(tx, 'org_code', '-', org.code || '');
-    if (mode === 'archive') {
+    const ids = mode === 'delete' ? Array.from(new Set([...defaultAccountsFor(org).map(a => a.id!), ...accountIds])) : [];
+    const accounts = (await Promise.all(ids.map(id => tx.get<PaymentAccount>(COL.paymentAccounts, id)))).filter(
+      (a): a is PaymentAccount & { id: string } => Boolean(a && a.orgId === orgId),
+    );
+    const effectiveMode = mode === 'delete' && !accounts.some(paymentAccountHasHistory) ? 'delete' : 'archive';
+    const accountKeys =
+      effectiveMode === 'delete'
+        ? await Promise.all(accounts.map(a => readUniqueKey(tx, 'account_identifier', orgId, a.accountIdentifier || '')))
+        : [];
+    if (effectiveMode === 'archive') {
       tx.update(COL.organizations, orgId, { archived: true, status: 'archived', archivedAt: nowIso });
     } else {
       tx.delete(COL.organizations, orgId);
       releaseUniqueKey(tx, codeKey, orgId);
+      accounts.forEach((a, i) => {
+        tx.delete(COL.paymentAccounts, a.id);
+        releaseUniqueKey(tx, accountKeys[i], a.id);
+      });
     }
     writeAudit(
       tx,
@@ -162,14 +194,14 @@ export async function removeOrganization(
         orgId,
         orgName: org.name,
         details:
-          mode === 'archive'
+          effectiveMode === 'archive'
             ? `تمت أرشفة وتعطيل الشركة "${org.name}" (${org.code}) مع الحفاظ على سجلاتها المالية.`
-            : `تم حذف الشركة "${org.name}" (${org.code}) من النظام`,
+            : `تم حذف الشركة "${org.name}" (${org.code}) من النظام${accounts.length ? ` مع حساباتها الخالية من أي رصيد أو حركة (${accounts.length})` : ''}`,
       },
       auditIdFor(operationKey),
       nowIso,
     );
-    return { value: org, changed: true };
+    return { value: org, changed: true, mode: effectiveMode };
   });
 }
 
@@ -186,7 +218,18 @@ interface EntitySpec<T> {
   duplicateMessage: (value: string) => string;
   /** The value is taken in EVERY company of a multi-company operation. */
   duplicateInAllMessage: (value: string) => string;
+  /**
+   * Who may create / edit / delete, exactly as firestore.rules allow it (and
+   * src/utils/permissions.ts shows it): the domain refuses at once instead of the
+   * database refusing after a long wait.
+   */
+  roles: { create: readonly Role[]; update: readonly Role[]; delete: readonly Role[] };
+  forbidden: { create: string; update: string; delete: string };
 }
+
+const ADMIN_ROLES: readonly Role[] = ['super_admin', 'org_admin'];
+const MONEY_ROLES: readonly Role[] = ['super_admin', 'org_admin', 'finance'];
+const DIRECTORY_ADD_ROLES: readonly Role[] = ['super_admin', 'org_admin', 'data_entry'];
 
 const SPECS = {
   service: {
@@ -198,6 +241,13 @@ const SPECS = {
     auditType: 'service',
     duplicateMessage: (v: string) => `يوجد بند صرف بنفس الكود (${v}) في هذه الشركة.`,
     duplicateInAllMessage: (v: string) => `يوجد بند صرف بنفس الكود (${v}) في كل الشركات المختارة.`,
+    // rules → services: create/delete isOrgAdmin, update isOrgAdmin || isFinance
+    roles: { create: ADMIN_ROLES, update: MONEY_ROLES, delete: ADMIN_ROLES },
+    forbidden: {
+      create: 'إضافة بنود الصرف متاحة لمدير الشركة فقط.',
+      update: 'تعديل بنود الصرف متاح لمدير الشركة ومسؤولي المالية فقط.',
+      delete: 'حذف بنود الصرف متاح لمدير الشركة فقط.',
+    },
   } as EntitySpec<ServiceCategory>,
   provider: {
     collection: COL.providers,
@@ -208,6 +258,13 @@ const SPECS = {
     auditType: 'provider',
     duplicateMessage: (v: string) => `يوجد مورد مسجل بنفس الاسم (${v}) في هذه الشركة.`,
     duplicateInAllMessage: (v: string) => `يوجد مورد مسجل بنفس الاسم (${v}) في كل الشركات المختارة.`,
+    // rules → providers: create isOrgAdmin || isDataEntry, update isOrgAdmin || isFinance, delete isOrgAdmin
+    roles: { create: DIRECTORY_ADD_ROLES, update: MONEY_ROLES, delete: ADMIN_ROLES },
+    forbidden: {
+      create: 'إضافة الموردين متاحة لمدير الشركة ومدخلي البيانات فقط.',
+      update: 'تعديل بيانات الموردين متاح لمدير الشركة ومسؤولي المالية فقط.',
+      delete: 'حذف الموردين متاح لمدير الشركة فقط.',
+    },
   } as EntitySpec<ServiceProvider>,
   department: {
     collection: COL.departments,
@@ -218,6 +275,13 @@ const SPECS = {
     auditType: 'department',
     duplicateMessage: (v: string) => `يوجد قسم بنفس الاسم (${v}) في هذه الشركة.`,
     duplicateInAllMessage: (v: string) => `يوجد قسم بنفس الاسم (${v}) في كل الشركات المختارة.`,
+    // rules → departments: create isOrgAdmin || isDataEntry, update/delete isOrgAdmin
+    roles: { create: DIRECTORY_ADD_ROLES, update: ADMIN_ROLES, delete: ADMIN_ROLES },
+    forbidden: {
+      create: 'إضافة الأقسام متاحة لمدير الشركة ومدخلي البيانات فقط.',
+      update: 'تعديل الأقسام متاح لمدير الشركة فقط.',
+      delete: 'حذف الأقسام متاح لمدير الشركة فقط.',
+    },
   } as EntitySpec<Department>,
 };
 export type EntityKind = keyof typeof SPECS;
@@ -225,6 +289,22 @@ export type EntityKind = keyof typeof SPECS;
 async function readKeyIfAny(tx: TxContext, scope: UniqueScope, orgId: string, value: string) {
   return value ? readUniqueKey(tx, scope, orgId, value) : null;
 }
+
+/**
+ * The companies a service is shared with (orgIds) are set by the platform owner only:
+ * company staff may keep the list as it is, or name only their own company — never push
+ * their service into another tenant (firestore.rules → services, sharingUnchangedOrOwn()).
+ */
+function assertServiceSharing(actor: Actor, orgId: string, before: unknown, after: unknown) {
+  if (actor.role === 'super_admin' || after === undefined) return;
+  const list = Array.isArray(after) ? after.map(String) : [];
+  const same = JSON.stringify(after) === JSON.stringify(before ?? null);
+  if (same || list.length === 0 || (list.length === 1 && list[0] === orgId)) return;
+  throw new DomainError('forbidden', 'مشاركة بند الصرف مع شركات أخرى متاحة للمشرف العام فقط.');
+}
+
+/** A record that money already went through (a service budget used, a provider paid) is never hard-deleted. */
+const hasFinancialHistory = (entity: Record<string, any>) => toMoney(entity.spentAmount) !== 0 || toMoney(entity.totalPaid) !== 0;
 
 export async function createEntity<T extends { id: string; orgId: string }>(
   store: DataStore,
@@ -235,12 +315,13 @@ export async function createEntity<T extends { id: string; orgId: string }>(
   operationKey: string,
   now: Date = new Date(),
 ): Promise<MutationOutcome<T>> {
-  assertRole(actor, ['super_admin', 'org_admin', 'data_entry'], 'ليس لديك صلاحية الإضافة.');
   const spec = SPECS[kind] as unknown as EntitySpec<T>;
+  assertRole(actor, spec.roles.create, spec.forbidden.create);
   const id = idFromKey(spec.idPrefix, operationKey);
   const nowIso = now.toISOString();
   const entity = build(id, nowIso);
   if (!entity.orgId) throw new DomainError('missing_org', 'يرجى تحديد الشركة.');
+  if (kind === 'service') assertServiceSharing(actor, entity.orgId, null, (entity as any).orgIds);
 
   return store.runTransaction(async tx => {
     const existing = await tx.get<T>(spec.collection, id);
@@ -270,8 +351,8 @@ export async function updateEntity<T extends { id: string; orgId: string; name?:
   operationKey: string,
   now: Date = new Date(),
 ): Promise<MutationOutcome<T>> {
-  assertRole(actor, ['super_admin', 'org_admin', 'finance', 'data_entry'], 'ليس لديك صلاحية التعديل.');
   const spec = SPECS[kind] as unknown as EntitySpec<T>;
+  assertRole(actor, spec.roles.update, spec.forbidden.update);
   const clean: Record<string, any> = { ...updates };
   delete clean.id;
   delete clean.orgId;
@@ -283,6 +364,9 @@ export async function updateEntity<T extends { id: string; orgId: string; name?:
   return store.runTransaction(async tx => {
     const current = await tx.get<T>(spec.collection, id);
     if (!current) throw new DomainError('not_found', `${spec.label} غير موجود.`);
+    // e.g. a service another company shares with this one: usable here, edited only by its own company.
+    assertActorCompany(actor, current.orgId, `لا يمكن تعديل ${spec.label} "${current.name || id}" لأنه تابع لشركة أخرى (مشترك مع شركتك للاستخدام فقط).`);
+    if (kind === 'service') assertServiceSharing(actor, current.orgId, (current as any).orgIds, clean.orgIds);
     const after = { ...current, ...clean } as T;
     const oldValue = spec.keyOf(current);
     const newValue = spec.keyOf(after);
@@ -306,21 +390,33 @@ export async function updateEntity<T extends { id: string; orgId: string; name?:
   });
 }
 
+export type EntityRemoval = 'deleted' | 'deactivated';
+
+/**
+ * Removes a service / provider / department. `requestedMode` 'deactivate' keeps the record
+ * (active: false) — the caller asks for it when the record is in use (requests, visas,
+ * custody settlements). A record money already went through (spentAmount / totalPaid) is
+ * always deactivated, whatever was asked: deleting it would orphan its financial history.
+ * `removal` says what actually happened.
+ */
 export async function deleteEntity(
   store: DataStore,
   actor: Actor,
   kind: EntityKind,
   id: string,
-  mode: 'deactivate' | 'delete',
+  requestedMode: 'deactivate' | 'delete',
   operationKey: string,
   now: Date = new Date(),
-) {
-  assertRole(actor, ['super_admin', 'org_admin'], 'الحذف متاح لمدير الشركة فقط.');
+): Promise<{ value: any; changed: boolean; removal: EntityRemoval | null }> {
   const spec = SPECS[kind] as unknown as EntitySpec<any>;
+  assertRole(actor, spec.roles.delete, spec.forbidden.delete);
   const nowIso = now.toISOString();
   return store.runTransaction(async tx => {
     const current = await tx.get<any>(spec.collection, id);
-    if (!current) return { value: null, changed: false };
+    if (!current) return { value: null, changed: false, removal: null };
+    assertActorCompany(actor, current.orgId, `لا يمكن حذف ${spec.label} "${current.name || id}" لأنه تابع لشركة أخرى.`);
+    const mode = requestedMode === 'delete' && hasFinancialHistory(current) ? 'deactivate' : requestedMode;
+    if (mode === 'deactivate' && current.active === false) return { value: current, changed: false, removal: 'deactivated' as const };
     const key = await readKeyIfAny(tx, spec.scope, current.orgId, spec.keyOf(current));
     if (mode === 'deactivate') {
       tx.update(spec.collection, id, { active: false, updatedAt: nowIso });
@@ -340,12 +436,12 @@ export async function deleteEntity(
         details:
           mode === 'delete'
             ? `تم حذف ${spec.label} "${current.name}" من النظام`
-            : `تم تعطيل ${spec.label} "${current.name}" لوجود طلبات صرف سابقة مرتبطة به.`,
+            : `تم تعطيل ${spec.label} "${current.name}" بدلاً من حذفه لارتباطه بعمليات سابقة (طلبات صرف أو تأشيرات أو تسويات عهد أو مدفوعات)؛ يبقى في السجلات ولا يظهر في العمليات الجديدة.`,
       },
       auditIdFor(operationKey),
       nowIso,
     );
-    return { value: current, changed: true };
+    return { value: current, changed: true, removal: mode === 'delete' ? ('deleted' as const) : ('deactivated' as const) };
   });
 }
 
@@ -435,6 +531,97 @@ export async function ensureOrgNotificationRecipients(
 const profileCarriesMembership = (profile: Record<string, any> | null, mem: Pick<OrganizationMember, 'id' | 'orgId'>) =>
   Boolean(profile && profile.orgId === mem.orgId && (!profile.memberId || profile.memberId === mem.id));
 
+// ---------------------------------------------------------------------------
+// Protected memberships. An org admin can never delete, suspend or change the role of
+// the platform owner's membership, nor their own (firestore.rules → members,
+// isProtectedMembership). Only the platform owner (super admin) can.
+// ---------------------------------------------------------------------------
+/** Fields that decide what a membership grants, and to whom. */
+const GRANT_FIELDS = ['role', 'orgId', 'active', 'userId', 'userEmail'] as const;
+
+type MemberIdentity = Pick<OrganizationMember, 'userId' | 'userEmail' | 'orgId'>;
+
+export const isOwnMembership = (actor: Pick<Actor, 'id' | 'email'>, mem: Pick<OrganizationMember, 'userId' | 'userEmail'>) =>
+  mem.userId === actor.id || (Boolean(normalizeEmail(actor.email)) && normalizeEmail(mem.userEmail) === normalizeEmail(actor.email));
+
+/** 'owner' / 'self' when this actor may not delete, suspend or re-role the membership; null otherwise. */
+export function membershipProtection(actor: Actor, mem: Pick<OrganizationMember, 'userId' | 'userEmail'>): 'owner' | 'self' | null {
+  if (actor.role === 'super_admin') return null;
+  if (isPlatformOwnerEmail(mem.userEmail)) return 'owner';
+  if (isOwnMembership(actor, mem)) return 'self';
+  return null;
+}
+
+const PROTECTED_MEMBER_MESSAGES = {
+  owner: {
+    remove: 'لا يمكن حذف عضوية مالك المنصة من الشركة.',
+    change: 'لا يمكن تعليق أو تغيير صلاحية عضوية مالك المنصة.',
+  },
+  self: {
+    remove: 'لا يمكنك حذف عضويتك أنت من الشركة؛ يقوم بذلك مدير آخر أو مالك المنصة.',
+    change: 'لا يمكنك تغيير رتبتك أو تعليق حسابك بنفسك؛ يقوم بذلك مدير آخر أو مالك المنصة.',
+  },
+};
+
+/** Refuses at once (before any slow lookup) what removeMember / firestore.rules would refuse. */
+export function assertMemberRemovable(actor: Actor, mem: MemberIdentity) {
+  assertRole(actor, ADMIN_ROLES, 'حذف الموظفين متاح لمدير الشركة فقط.');
+  assertActorCompany(actor, mem.orgId, 'لا يمكن حذف موظف تابع لشركة أخرى.');
+  const protection = membershipProtection(actor, mem);
+  if (protection) throw new DomainError('protected_member', PROTECTED_MEMBER_MESSAGES[protection].remove);
+}
+
+const sameGrantValue = (field: (typeof GRANT_FIELDS)[number], a: unknown, b: unknown) =>
+  field === 'userEmail'
+    ? normalizeEmail(a as string) === normalizeEmail(b as string)
+    : field === 'active'
+    ? (a !== false) === (b !== false)
+    : String(a ?? '') === String(b ?? '');
+
+/**
+ * The fields of an update that actually change the membership. Forms send the whole record
+ * back (role, orgId, active…): an unchanged value is not a change, so it neither needs the
+ * admin role nor reaches the database (the rules compare what is written).
+ */
+export function effectiveMemberChanges(mem: Partial<OrganizationMember>, updates: Partial<OrganizationMember>): Record<string, any> {
+  const clean: Record<string, any> = { ...updates };
+  delete clean.id;
+  delete clean.joinedAt;
+  if (clean.userEmail !== undefined) clean.userEmail = normalizeEmail(clean.userEmail);
+  for (const f of GRANT_FIELDS) {
+    if (clean[f] !== undefined && sameGrantValue(f, clean[f], (mem as Record<string, unknown>)[f])) delete clean[f];
+  }
+  return clean;
+}
+
+/** Refuses at once what updateMemberRecord / firestore.rules would refuse (changes = effectiveMemberChanges). */
+export function assertMemberUpdatable(actor: Actor, mem: MemberIdentity, changes: Record<string, any>) {
+  const isAdmin = actor.role === 'super_admin' || actor.role === 'org_admin';
+  const isSelf = mem.userId === actor.id;
+  const touchesGrant = GRANT_FIELDS.some(f => changes[f] !== undefined);
+  if (!isAdmin && !isSelf) throw new DomainError('forbidden', 'ليس لديك صلاحية تعديل بيانات هذا الموظف.');
+  if (!isAdmin && touchesGrant) throw new DomainError('forbidden', 'لا يمكنك تعديل الرتبة أو الشركة أو حالة الحساب.');
+  if (isAdmin && !isSelf) assertActorCompany(actor, mem.orgId, 'لا يمكن تعديل موظف تابع لشركة أخرى.');
+  if (isAdmin && touchesGrant) {
+    const protection = membershipProtection(actor, mem);
+    if (protection) throw new DomainError('protected_member', PROTECTED_MEMBER_MESSAGES[protection].change);
+  }
+  // rules → members update: an org admin never moves a membership to another company.
+  if (isAdmin && changes.orgId !== undefined && actor.role !== 'super_admin') {
+    throw new DomainError('forbidden', 'نقل الموظف إلى شركة أخرى متاح للمشرف العام فقط.');
+  }
+  if (changes.role === 'super_admin' && actor.role !== 'super_admin') {
+    throw new DomainError('forbidden', 'لا يمكن منح صلاحية المشرف العام.');
+  }
+  if (changes.userName !== undefined && !String(changes.userName).trim()) {
+    throw new DomainError('invalid_input', 'يرجى إدخال اسم الموظف؛ لا يمكن حفظ الاسم فارغاً.');
+  }
+}
+
+const requireMemberName = (name?: string | null) => {
+  if (!String(name || '').trim()) throw new DomainError('invalid_input', 'يرجى إدخال اسم الموظف.');
+};
+
 export async function createMember(
   store: DataStore,
   actor: Actor,
@@ -447,6 +634,9 @@ export async function createMember(
   if (input.role === 'super_admin' && actor.role !== 'super_admin') {
     throw new DomainError('forbidden', 'لا يمكن منح صلاحية المشرف العام.');
   }
+  requireMemberName(input.userName);
+  // Payout details never go into a membership (every member of the company can list those).
+  input = splitPayout(input).rest as MemberInput;
   const email = normalizeEmail(input.userEmail);
   const userId = input.userId && !input.userId.startsWith('temp_') ? input.userId : email ? pendingUserIdForEmail(email) : idFromKey('usr', operationKey);
   const id = `${userId}_${input.orgId}`;
@@ -467,7 +657,7 @@ export async function createMember(
       id,
       userId,
       userEmail: email,
-      joinedAt: nowIso.split('T')[0],
+      joinedAt: localDate(now),
       active: input.active !== false,
       operationKey,
     };
@@ -500,7 +690,7 @@ export async function createMember(
         entityId: id,
         entityName: member.userName,
         orgId: member.orgId,
-        details: `تم إضافة وتعيين موظف جديد: "${member.userName}" (${member.userEmail || '-'} | ${member.jobTitle} - ${member.department}) برتبة ${member.role}`,
+        details: `تم إضافة وتعيين موظف جديد: "${member.userName}" (${member.userEmail || '-'} | ${member.jobTitle} - ${member.department}) برتبة ${roleLabel(member.role)}`,
       },
       auditIdFor(operationKey),
       nowIso,
@@ -635,24 +825,15 @@ export async function updateMemberRecord(
   operationKey: string,
   now: Date = new Date(),
 ): Promise<MutationOutcome<OrganizationMember>> {
-  const clean: Record<string, any> = { ...updates };
-  delete clean.id;
-  delete clean.joinedAt;
-  if (clean.userEmail !== undefined) clean.userEmail = normalizeEmail(clean.userEmail);
   const nowIso = now.toISOString();
 
   return store.runTransaction(async tx => {
     const mem = await tx.get<OrganizationMember>(COL.members, memberId);
     if (!mem) throw new DomainError('not_found', 'سجل الموظف غير موجود.');
-    const isSelf = mem.userId === actor.id;
-    const isAdmin = actor.role === 'super_admin' || actor.role === 'org_admin';
-    if (!isAdmin && !isSelf) throw new DomainError('forbidden', 'ليس لديك صلاحية تعديل بيانات هذا الموظف.');
-    if (!isAdmin && (clean.role !== undefined || clean.orgId !== undefined || clean.active !== undefined)) {
-      throw new DomainError('forbidden', 'لا يمكنك تعديل الرتبة أو الشركة أو حالة الحساب.');
-    }
-    if (clean.role === 'super_admin' && actor.role !== 'super_admin') {
-      throw new DomainError('forbidden', 'لا يمكن منح صلاحية المشرف العام.');
-    }
+    // Payout details provided here go to the person's own profile, never into the membership.
+    const { rest, payout } = splitPayout(effectiveMemberChanges(mem, updates));
+    const clean: Record<string, any> = rest;
+    assertMemberUpdatable(actor, mem, clean);
 
     const after = { ...mem, ...clean } as OrganizationMember;
     const emailChanged = clean.userEmail !== undefined && clean.userEmail !== normalizeEmail(mem.userEmail);
@@ -669,8 +850,9 @@ export async function updateMemberRecord(
       const profile = await tx.get(COL.users, uid);
       if (profile ? profileCarriesMembership(profile, mem) : uid === mem.userId) syncUids.push(uid);
     }
-    // A placeholder member (invited by email) is re-pointed at the real account.
-    if (!isRealUid(mem.userId) && syncUids[0]) clean.userId = syncUids[0];
+    // A placeholder member (invited by email) is re-pointed at the real account — not on a
+    // membership this actor may not re-assign (their own / the platform owner's, see rules).
+    if (!isRealUid(mem.userId) && syncUids[0] && !membershipProtection(actor, mem)) clean.userId = syncUids[0];
 
     const recipientEdits: RecipientEdits = new Map();
     editRecipients(recipientEdits, mem.orgId, mem, null);
@@ -692,12 +874,9 @@ export async function updateMemberRecord(
           name: after.userName,
           userName: after.userName,
           phone: after.phone || '',
-          instapay: after.instapay || '',
-          wallet: after.wallet || '',
-          walletProvider: after.walletProvider || '',
-          bankName: after.bankName || '',
-          iban: after.iban || '',
-          preferredPaymentMethod: after.preferredPaymentMethod || 'instapay',
+          // Only payout details given in THIS update; the profile's own ones are never overwritten
+          // from the membership (which no longer carries them).
+          ...payout,
           active: after.active !== false,
           updatedAt: nowIso,
         },
@@ -713,7 +892,7 @@ export async function updateMemberRecord(
     let details = `تم تعديل بيانات الموظف: "${after.userName}"`;
     if (statusChanged) details = `تم ${after.active ? 'تنشيط وتفعيل' : 'تعليق وإيقاف'} حساب الموظف "${after.userName}"`;
     if (nameChanged) details += ` (تعديل الاسم أو المسمى إلى "${after.userName} - ${after.jobTitle}")`;
-    if (roleChanged) details += ` (ترقية أو تعديل الرتبة إلى ${after.role})`;
+    if (roleChanged) details += ` (ترقية أو تعديل الرتبة إلى ${roleLabel(after.role)})`;
     writeAudit(
       tx,
       actor,
@@ -751,6 +930,7 @@ export async function removeMember(
   return store.runTransaction(async tx => {
     const mem = await tx.get<OrganizationMember>(COL.members, memberId);
     if (!mem) return { value: null, changed: false };
+    assertMemberRemovable(actor, mem);
     const key = mem.userEmail ? await readUniqueKey(tx, 'member_email', mem.orgId, mem.userEmail) : null;
     const detachUids: string[] = [];
     for (const uid of new Set(linkedUserIds.filter(isRealUid))) {
@@ -792,6 +972,80 @@ export async function removeMember(
       nowIso,
     );
     return { value: mem, changed: true };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Payout details live in users/{uid}, never in members/* (every member of a company
+// can list its memberships). Older versions copied them there on every profile save;
+// these two operations take them out again without losing them.
+// ---------------------------------------------------------------------------
+const hasPayoutValue = (v: unknown) => typeof v === 'string' ? v.trim() !== '' : v !== undefined && v !== null;
+const hasPayoutFields = (doc: Record<string, any>) => PAYOUT_FIELDS.some(f => f in doc);
+
+/**
+ * The signed-in user's own profile save, mirrored into their membership: name and phone
+ * are updated there, and any payout details a previous version copied into it are removed
+ * (the caller has just saved them in users/{uid}). Only the member's own login may do this
+ * (firestore.rules → members, self-service update).
+ */
+export async function syncOwnMembership(
+  store: DataStore,
+  actor: Actor,
+  memberId: string,
+  fields: { userName?: string; phone?: string },
+  now: Date = new Date(),
+): Promise<MutationOutcome<OrganizationMember | null>> {
+  const nowIso = now.toISOString();
+  return store.runTransaction(async tx => {
+    const mem = await tx.get<OrganizationMember>(COL.members, memberId);
+    if (!mem) return { value: null, changed: false };
+    if (mem.userId !== actor.id) throw new DomainError('forbidden', 'يمكن تحديث بيانات عضويتك أنت فقط.');
+    const userName = fields.userName?.trim();
+    const phone = fields.phone === undefined ? undefined : fields.phone.trim();
+    const nameChanges = Boolean(userName) && userName !== mem.userName;
+    const phoneChanges = phone !== undefined && phone !== (mem.phone || '');
+    if (!nameChanges && !phoneChanges && !hasPayoutFields(mem)) return { value: mem, changed: false };
+    const next = {
+      ...splitPayout(mem).rest,
+      ...(nameChanges ? { userName } : {}),
+      ...(phoneChanges ? { phone } : {}),
+      updatedAt: nowIso,
+    } as OrganizationMember;
+    // A full write (not a merge): that is what removes the payout fields.
+    tx.set(COL.members, memberId, next);
+    return { value: next, changed: true };
+  });
+}
+
+export type PayoutMoveOutcome = 'moved' | 'nothing_to_move' | 'no_profile';
+
+/**
+ * Admin clean-up of one membership that still carries payout details: the values the
+ * person's users/{uid} profile does not have yet are copied there, then the membership is
+ * rewritten without them — in one transaction, so nothing is ever lost. A membership whose
+ * person has no profile (never signed in) keeps its values until they sign in and save.
+ */
+export async function movePayoutToProfile(
+  store: DataStore,
+  actor: Actor,
+  memberId: string,
+  now: Date = new Date(),
+): Promise<MutationOutcome<PayoutMoveOutcome>> {
+  assertRole(actor, ADMIN_ROLES, 'نقل بيانات الاستحقاق متاح لمدير الشركة فقط.');
+  const nowIso = now.toISOString();
+  return store.runTransaction(async tx => {
+    const mem = await tx.get<OrganizationMember>(COL.members, memberId);
+    if (!mem || !hasPayoutFields(mem)) return { value: 'nothing_to_move' as const, changed: false };
+    assertActorCompany(actor, mem.orgId, 'لا يمكن تعديل موظف تابع لشركة أخرى.');
+    const { rest, payout } = splitPayout(mem);
+    const values = Object.fromEntries(Object.entries(payout).filter(([, v]) => hasPayoutValue(v)));
+    const profile = Object.keys(values).length > 0 && isRealUid(mem.userId) ? await tx.get<Record<string, any>>(COL.users, mem.userId) : null;
+    const missing = profile ? Object.fromEntries(Object.entries(values).filter(([f]) => !hasPayoutValue(profile[f]))) : values;
+    if (!profile && Object.keys(missing).length > 0) return { value: 'no_profile' as const, changed: false };
+    if (profile && Object.keys(missing).length > 0) tx.set(COL.users, mem.userId, { ...missing, updatedAt: nowIso }, { merge: true });
+    tx.set(COL.members, memberId, { ...rest, updatedAt: nowIso });
+    return { value: 'moved' as const, changed: true };
   });
 }
 
@@ -845,12 +1099,7 @@ export function normalizeOrgIds(orgIds: readonly string[]): string[] {
 export const entityIdInOrg = (kind: EntityKind, operationKey: string, orgId: string) =>
   `${idFromKey(SPECS[kind].idPrefix, operationKey)}-${orgId}`;
 
-async function readTargetOrg(tx: TxContext, orgId: string): Promise<Organization> {
-  const org = await tx.get<Organization>(COL.organizations, orgId);
-  if (!org) throw new DomainError('not_found', `الشركة المحددة غير موجودة (${orgId}).`);
-  if (org.archived || org.status === 'archived') throw new DomainError('archived_org', `الشركة "${org.name}" مؤرشفة ولا يمكن الإضافة إليها.`);
-  return org;
-}
+const readTargetOrg = assertOrgWritable;
 
 const inOrderOf = <T extends { orgId: string }>(targets: string[], list: T[]) =>
   [...list].sort((a, b) => targets.indexOf(a.orgId) - targets.indexOf(b.orgId));
@@ -870,6 +1119,8 @@ export async function createMemberInOrgs(
 ): Promise<MutationOutcome<MultiOrgResult<OrganizationMember>>> {
   assertRole(actor, ['super_admin', 'org_admin'], 'إضافة الموظفين متاحة لمدير الشركة فقط.');
   if (input.role === 'super_admin') throw new DomainError('forbidden', SUPER_ADMIN_OWNER_ONLY_MESSAGE);
+  requireMemberName(input.userName);
+  input = splitPayout(input).rest as Omit<MemberInput, 'orgId'>;
   const targets = normalizeOrgIds(orgIds);
   const email = normalizeEmail(input.userEmail);
   const userId = input.userId && !input.userId.startsWith('temp_') ? input.userId : email ? pendingUserIdForEmail(email) : idFromKey('usr', operationKey);
@@ -902,7 +1153,7 @@ export async function createMemberInOrgs(
       toCreate.push({
         org,
         key,
-        member: { ...input, id, orgId, userId, userEmail: email, joinedAt: nowIso.split('T')[0], active: input.active !== false, operationKey },
+        member: { ...input, id, orgId, userId, userEmail: email, joinedAt: localDate(now), active: input.active !== false, operationKey },
       });
     }
 
@@ -937,7 +1188,7 @@ export async function createMemberInOrgs(
           entityName: member.userName,
           orgId: member.orgId,
           orgName: org.name,
-          details: `تم إضافة وتعيين موظف جديد: "${member.userName}" (${member.userEmail || '-'} | ${member.jobTitle} - ${member.department}) برتبة ${member.role}${targets.length > 1 ? ` في "${org.name}" (إضافة واحدة إلى ${targets.length} شركات)` : ''}`,
+          details: `تم إضافة وتعيين موظف جديد: "${member.userName}" (${member.userEmail || '-'} | ${member.jobTitle} - ${member.department}) برتبة ${roleLabel(member.role)}${targets.length > 1 ? ` في "${org.name}" (إضافة واحدة إلى ${targets.length} شركات)` : ''}`,
         },
         auditIdFor(operationKey, member.orgId),
         nowIso,
@@ -962,8 +1213,8 @@ export async function createEntityInOrgs<T extends { id: string; orgId: string }
   operationKey: string,
   now: Date = new Date(),
 ): Promise<MutationOutcome<MultiOrgResult<T>>> {
-  assertRole(actor, ['super_admin', 'org_admin', 'data_entry'], 'ليس لديك صلاحية الإضافة.');
   const spec = SPECS[kind] as unknown as EntitySpec<T>;
+  assertRole(actor, spec.roles.create, spec.forbidden.create);
   const targets = normalizeOrgIds(orgIds);
   const nowIso = now.toISOString();
   const drafts = targets.map(orgId => {
@@ -1021,4 +1272,122 @@ export async function createEntityInOrgs<T extends { id: string; orgId: string }
     }
     return { value: { created: inOrderOf(targets, [...replayed, ...toCreate.map(c => c.entity)]), skipped }, changed: true };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Uniqueness keys: move the old id format to the current one (platform owner, once)
+// ---------------------------------------------------------------------------
+/** A record and the unique value it holds, i.e. the key that should name it. */
+export interface UniqueKeyOwner {
+  scope: UniqueScope;
+  orgId: string;
+  value: string;
+  collection: string;
+  id: string;
+}
+
+/** Every record that holds a uniqueness key, with the values the domain claims keys for. */
+export function uniqueKeyOwnersOf(data: {
+  organizations: Organization[];
+  members: OrganizationMember[];
+  services: ServiceCategory[];
+  providers: ServiceProvider[];
+  departments: Department[];
+  paymentAccounts: PaymentAccount[];
+}): UniqueKeyOwner[] {
+  return [
+    ...data.organizations.map(o => ({ scope: 'org_code' as const, orgId: '-', value: o.code || '', collection: COL.organizations, id: o.id })),
+    ...data.members.map(m => ({ scope: 'member_email' as const, orgId: m.orgId, value: normalizeEmail(m.userEmail), collection: COL.members, id: m.id })),
+    ...data.services.map(s => ({ scope: SPECS.service.scope, orgId: s.orgId, value: SPECS.service.keyOf(s), collection: COL.services, id: s.id })),
+    ...data.providers.map(p => ({ scope: SPECS.provider.scope, orgId: p.orgId, value: SPECS.provider.keyOf(p), collection: COL.providers, id: p.id })),
+    ...data.departments.map(d => ({ scope: SPECS.department.scope, orgId: d.orgId, value: SPECS.department.keyOf(d), collection: COL.departments, id: d.id })),
+    ...data.paymentAccounts.map(a => ({ scope: 'account_identifier' as const, orgId: a.orgId, value: a.accountIdentifier || '', collection: COL.paymentAccounts, id: a.id })),
+  ].filter(o => o.id && o.orgId);
+}
+
+export interface UniqueKeyMigration {
+  /** Keys moved to the current id format. */
+  moved: number;
+  /** Old-format keys already replaced by a current one for the same record (removed). */
+  replaced: number;
+  /** Old-format keys left as they are: they name another record (e.g. one renamed or deleted since). */
+  skipped: number;
+}
+
+const MIGRATION_CHUNK = 100;
+
+/**
+ * Moves the uniqueness keys of existing records from the old id format (legacyUniqueKeyDocId)
+ * to uniqueKeyDocId, so they keep protecting against duplicates now that the rules let only
+ * the key's own company read it. Platform owner only: nobody else can read an old-format key.
+ * A key moves only while it still names one of the records listed in `owners`; running it
+ * again finds nothing left to move.
+ */
+export async function migrateLegacyUniqueKeys(
+  store: DataStore,
+  actor: Actor,
+  owners: UniqueKeyOwner[],
+  now: Date = new Date(),
+): Promise<UniqueKeyMigration> {
+  assertRole(actor, ['super_admin'], 'ترحيل مفاتيح منع التكرار متاح للمشرف العام للمنصة فقط.');
+  const nowIso = now.toISOString();
+  // One entry per old-format key, with every record that holds its value.
+  const groups = new Map<string, { legacyId: string; currentId: string; owners: UniqueKeyOwner[] }>();
+  for (const o of owners) {
+    const legacyId = legacyUniqueKeyDocId(o.scope, o.orgId, o.value);
+    const currentId = uniqueKeyDocId(o.scope, o.orgId, o.value);
+    if (legacyId === currentId) continue;
+    const group = groups.get(legacyId) || { legacyId, currentId, owners: [] };
+    group.owners.push(o);
+    groups.set(legacyId, group);
+  }
+  const work = [...groups.values()];
+
+  const total: UniqueKeyMigration = { moved: 0, replaced: 0, skipped: 0 };
+  for (let i = 0; i < work.length; i += MIGRATION_CHUNK) {
+    const chunk = work.slice(i, i + MIGRATION_CHUNK);
+    const part = await store.runTransaction(async tx => {
+      type KeyDoc = { entityCollection?: string; entityId?: string; createdAt?: string };
+      // Old-format keys first, all at once (nobody else writes them). A current-format key is
+      // one every create of a member / provider / department / account reads and writes, so it
+      // is read only where an old key exists: with nothing left to move, the transaction holds
+      // no document another user's save is waiting for.
+      const legacyKeys = await Promise.all(chunk.map(g => tx.get<KeyDoc>(COL.uniqueKeys, g.legacyId)));
+      const currentKeys = await Promise.all(
+        chunk.map((g, n) => (legacyKeys[n] ? tx.get<KeyDoc>(COL.uniqueKeys, g.currentId) : Promise.resolve(null))),
+      );
+      const counts: UniqueKeyMigration = { moved: 0, replaced: 0, skipped: 0 };
+      chunk.forEach((g, n) => {
+        const legacy = legacyKeys[n];
+        const current = currentKeys[n];
+        if (!legacy) return;
+        const owner = g.owners.find(o => o.id === legacy.entityId);
+        if (!owner || (current && current.entityId !== owner.id)) {
+          counts.skipped += 1;
+          return;
+        }
+        if (current) {
+          tx.delete(COL.uniqueKeys, g.legacyId);
+          counts.replaced += 1;
+          return;
+        }
+        tx.set(COL.uniqueKeys, g.currentId, {
+          scope: owner.scope,
+          orgId: owner.orgId,
+          value: normalizeKeyValue(owner.value),
+          entityCollection: legacy.entityCollection || owner.collection,
+          entityId: owner.id,
+          createdAt: legacy.createdAt || nowIso,
+          movedAt: nowIso,
+        });
+        tx.delete(COL.uniqueKeys, g.legacyId);
+        counts.moved += 1;
+      });
+      return counts;
+    });
+    total.moved += part.moved;
+    total.replaced += part.replaced;
+    total.skipped += part.skipped;
+  }
+  return total;
 }

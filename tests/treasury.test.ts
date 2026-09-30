@@ -288,9 +288,17 @@ describe('movement batch', () => {
         const { account, parent } = await readAccountWithParent(tx, accountId);
         applyMovement({ ...base, account, parent, type: 'out', amount, allowOverdraft: false, ledgerId: 'tx-k2' }).write(tx);
       });
-    await expect(attempt('insta', 5000)).rejects.toMatchObject({ code: 'insufficient_funds', message: expect.stringContaining('رصيد الحساب غير كافٍ لإتمام الصرف') });
+    // Policy: no money operation takes an account below zero, and the refusal tells the user
+    // what to do (deposit first). The message names the account, both amounts and the fix.
+    await expect(attempt('insta', 5000)).rejects.toMatchObject({
+      code: 'insufficient_funds',
+      message: 'رصيد الحساب "Account insta" غير كافٍ لإتمام العملية: الرصيد المتوفر (200 EGP) أقل من المبلغ المطلوب (5,000 EGP). يرجى إيداع المبلغ في الحساب أولاً (إيداع وتغذية رصيد + IN) أو اختيار حساب آخر.',
+    });
     seedAccount(store, 'insta-rich', 5000, { type: 'instapay', parentAccountId: 'bank' });
-    await expect(attempt('insta-rich', 1000)).rejects.toMatchObject({ code: 'insufficient_funds', message: 'رصيد الحساب البنكي الأم (Account bank) غير كافٍ لإتمام الخصم المرتبط.' });
+    await expect(attempt('insta-rich', 1000)).rejects.toMatchObject({
+      code: 'insufficient_funds',
+      message: 'رصيد الحساب البنكي المرتبط "Account bank" غير كافٍ لإتمام الخصم عبر "Account insta-rich": الرصيد المتوفر (900 EGP) أقل من المبلغ المطلوب (1,000 EGP). يرجى إيداع المبلغ في الحساب البنكي أولاً أو اختيار حساب آخر.',
+    });
   });
 });
 
