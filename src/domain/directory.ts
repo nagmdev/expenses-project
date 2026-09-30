@@ -558,6 +558,66 @@ export function pickMembershipToLink(
   return eligible[0] ?? null;
 }
 
+/** The identity fields of a user's own users/{uid} profile. */
+export interface IdentityProfile {
+  orgId?: string | null;
+  role?: Role | null;
+  memberId?: string | null;
+  name?: string | null;
+  active?: boolean;
+}
+
+export interface ProfileMembershipState {
+  /** The profile's company/role still come from a membership that exists: safe to use. */
+  current: boolean;
+  /** The membership the profile should be (re)linked to now, if a write is needed. */
+  relinkTo: OrganizationMember | null;
+  /** The user was (re)added by email only and must verify it before the link is allowed. */
+  awaitingVerification: boolean;
+}
+
+/**
+ * A users/{uid} profile is a cache of ONE membership (company, role, memberId, name).
+ * When that membership is deleted, re-created (e.g. the person deleted and added again)
+ * or changed, the profile must stop deciding the user's name, role and company: the live
+ * membership wins and the profile is re-linked to it. Legacy profiles without memberId
+ * stay current while the user still has a live membership in that company.
+ */
+export function profileMembershipState(
+  profile: IdentityProfile | null,
+  memberships: OrganizationMember[],
+  identity: { uid: string; email?: string | null; emailVerified: boolean },
+): ProfileMembershipState {
+  const email = normalizeEmail(identity.email);
+  const mine = (m: OrganizationMember) => m.userId === identity.uid || (Boolean(email) && normalizeEmail(m.userEmail) === email);
+  const live = memberships.filter(m => Boolean(m.orgId?.trim()) && m.active !== false && mine(m));
+  const linkable = (m: OrganizationMember) =>
+    LINKABLE_ROLE_PRIORITY[m.role] !== undefined && (m.userId === identity.uid || (identity.emailVerified && normalizeEmail(m.userEmail) === email));
+  const byRole = (a: OrganizationMember, b: OrganizationMember) => (LINKABLE_ROLE_PRIORITY[b.role] ?? 0) - (LINKABLE_ROLE_PRIORITY[a.role] ?? 0);
+
+  const orgId = profile?.orgId?.trim() || '';
+  let current = false;
+  let backing: OrganizationMember | undefined;
+  if (orgId) {
+    backing = profile?.memberId
+      ? live.find(m => m.id === profile.memberId && m.orgId === orgId)
+      : live.filter(m => m.orgId === orgId).sort(byRole)[0];
+    current = Boolean(backing && backing.role === profile?.role);
+  }
+
+  let relinkTo: OrganizationMember | null = null;
+  if (current && backing) {
+    // Still the same membership: only resync a changed name, or a legacy profile's missing memberId.
+    if (linkable(backing) && ((backing.userName && backing.userName !== profile?.name) || !profile?.memberId)) relinkTo = backing;
+  } else {
+    // Prefer the same company, then the highest role — never a membership the rules would refuse.
+    const candidates = live.filter(linkable).sort(byRole);
+    relinkTo = candidates.find(m => m.orgId === orgId) ?? candidates[0] ?? null;
+  }
+  const awaitingVerification = !current && !relinkTo && !identity.emailVerified && live.some(m => m.userId !== identity.uid);
+  return { current, relinkTo, awaitingVerification };
+}
+
 /**
  * Updates a membership and the matching users/{uid} security profile(s) in ONE
  * transaction, so a role change can never be half-applied.
@@ -694,7 +754,18 @@ export async function removeMember(
     const key = mem.userEmail ? await readUniqueKey(tx, 'member_email', mem.orgId, mem.userEmail) : null;
     const detachUids: string[] = [];
     for (const uid of new Set(linkedUserIds.filter(isRealUid))) {
-      if (profileCarriesMembership(await tx.get(COL.users, uid), mem)) detachUids.push(uid);
+      const profile = await tx.get<Record<string, any>>(COL.users, uid);
+      if (profileCarriesMembership(profile, mem)) {
+        detachUids.push(uid);
+      } else if (
+        profile && profile.orgId === mem.orgId && profile.memberId && profile.memberId !== memberId &&
+        (uid === mem.userId || (Boolean(mem.userEmail) && normalizeEmail(profile.email) === normalizeEmail(mem.userEmail)))
+      ) {
+        // The same person's profile, linked to another record of this company that no longer
+        // exists (a duplicate deleted earlier): once this one goes, nothing backs the profile.
+        const linked = await tx.get<OrganizationMember>(COL.members, profile.memberId);
+        if (!linked || linked.orgId !== mem.orgId) detachUids.push(uid);
+      }
     }
     const recipientEdits: RecipientEdits = new Map();
     editRecipients(recipientEdits, mem.orgId, mem, null);

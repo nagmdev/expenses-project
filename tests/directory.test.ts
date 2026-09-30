@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { Actor } from '../src/domain/common';
-import { createMember, createOrganization, ensureOrgNotificationRecipients, pickMembershipToLink, removeMember, updateMemberRecord } from '../src/domain/directory';
+import { createMember, createOrganization, ensureOrgNotificationRecipients, pickMembershipToLink, profileMembershipState, removeMember, updateMemberRecord } from '../src/domain/directory';
 import type { OrganizationMember } from '../src/types';
 import { ORG, admin, freshStore, key } from './helpers';
 
@@ -64,6 +64,54 @@ describe('pickMembershipToLink', () => {
   });
 });
 
+describe('profileMembershipState — a profile never outlives the membership it came from', () => {
+  const profileOf = (m: OrganizationMember, extra: Record<string, unknown> = {}) => ({ orgId: m.orgId, role: m.role, memberId: m.id, name: m.userName, ...extra });
+
+  it('a profile that names a live membership with the same role is current (no write needed)', () => {
+    const m = member({ id: `${UID}_${ORG}`, userId: UID, role: 'finance', userName: 'مروة' });
+    expect(profileMembershipState(profileOf(m), [m], unverified)).toEqual({ current: true, relinkTo: null, awaitingVerification: false });
+  });
+
+  it('deleted and added again (Marwa): the old name/role are dropped and the profile re-links to the new record', () => {
+    // Profile still carries the deleted record (old English name, old role).
+    const stale = { orgId: ORG, role: 'org_admin' as const, memberId: 'mem-legacy-deleted', name: 'Marwa Hassan' };
+    const fresh = member({ id: `${UID}_${ORG}`, userId: UID, role: 'employee', userName: 'مروة نجيب' });
+    const state = profileMembershipState(stale, [fresh], unverified);
+    expect(state.current).toBe(false);
+    expect(state.relinkTo).toBe(fresh);
+  });
+
+  it('a detached profile (company cleared on delete) re-links to the new membership', () => {
+    const fresh = member({ id: `${UID}_${ORG}`, userId: UID, role: 'data_entry', userName: 'New name' });
+    const state = profileMembershipState({ orgId: '', role: 'employee', memberId: null, name: 'Old name' }, [fresh], unverified);
+    expect(state).toMatchObject({ current: false, relinkTo: fresh, awaitingVerification: false });
+  });
+
+  it('a role changed by the admin (profile not synced) is not trusted and gets re-linked', () => {
+    const m = member({ id: `${UID}_${ORG}`, userId: UID, role: 'employee' });
+    const state = profileMembershipState(profileOf(m, { role: 'org_admin' }), [m], unverified);
+    expect(state).toMatchObject({ current: false, relinkTo: m });
+  });
+
+  it('re-added by email only: verified email re-links; unverified asks for verification instead of keeping the old identity', () => {
+    const stale = { orgId: ORG, role: 'org_admin' as const, memberId: 'gone', name: 'Old' };
+    const byEmail = member({ id: `pending-x_${ORG}`, userName: 'Fresh', role: 'finance' });
+    expect(profileMembershipState(stale, [byEmail], verified)).toMatchObject({ current: false, relinkTo: byEmail, awaitingVerification: false });
+    expect(profileMembershipState(stale, [byEmail], unverified)).toEqual({ current: false, relinkTo: null, awaitingVerification: true });
+  });
+
+  it('a suspended or missing membership never keeps the profile current', () => {
+    const m = member({ id: `${UID}_${ORG}`, userId: UID, active: false });
+    expect(profileMembershipState(profileOf(m), [m], unverified).current).toBe(false);
+    expect(profileMembershipState(profileOf(m), [], unverified)).toEqual({ current: false, relinkTo: null, awaitingVerification: false });
+  });
+
+  it('a legacy profile without memberId stays current while the user still belongs to that company, and gains the link', () => {
+    const m = member({ id: `${UID}_${ORG}`, userId: UID, role: 'finance' });
+    expect(profileMembershipState({ orgId: ORG, role: 'finance', name: m.userName }, [m], unverified)).toEqual({ current: true, relinkTo: m, awaitingVerification: false });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Access revocation and notification recipients
 // ---------------------------------------------------------------------------
@@ -97,6 +145,35 @@ describe('removing a member revokes the access it carried', () => {
     await removeMember(store, admin, PENDING_ID, ['uidOtherOrg00000000000000001', 'uidOtherMember0000000000001'], key(), now);
     expect(store.read('users', 'uidOtherOrg00000000000000001')).toMatchObject({ orgId: 'org-other', role: 'org_admin' });
     expect(store.read('users', 'uidOtherMember0000000000001')).toMatchObject({ orgId: ORG, role: 'finance' });
+  });
+
+  it('duplicate records of the same person (English + Arabic): deleting both always detaches the profile', async () => {
+    const store = freshStore();
+    const REAL = 'uidMarwa00000000000000000001';
+    const english = `${REAL}_${ORG}`;
+    const arabic = 'mem-1789642366744'; // legacy duplicate, same email, other role
+    store.seed('members', english, member({ id: english, userId: REAL, userEmail: 'marwa@acme.test', userName: 'Marwa Hassan', role: 'org_admin' }));
+    store.seed('members', arabic, member({ id: arabic, userId: 'usr-legacy', userEmail: 'marwa@acme.test', userName: 'مروة', role: 'finance' }));
+    // The profile happens to be linked to the Arabic duplicate.
+    store.seed('users', REAL, { uid: REAL, email: 'marwa@acme.test', role: 'finance', orgId: ORG, memberId: arabic, name: 'مروة', active: true });
+
+    // Delete the Arabic one first (the app offers the same person's account as well) …
+    await removeMember(store, admin, arabic, [REAL], key(), now);
+    expect(store.read('users', REAL)).toMatchObject({ orgId: '', role: 'employee', memberId: null });
+    // … and re-link attempts never resurrect it: the English record is still there and gets deleted next.
+    await removeMember(store, admin, english, [REAL], key(), now);
+    expect(store.read('users', REAL)).toMatchObject({ orgId: '', role: 'employee', memberId: null });
+  });
+
+  it("a profile still pointing at a deleted duplicate is detached when the person's last record goes", async () => {
+    const store = freshStore();
+    const REAL = 'uidMarwa00000000000000000002';
+    const english = `${REAL}_${ORG}`;
+    store.seed('members', english, member({ id: english, userId: REAL, userEmail: 'marwa2@acme.test', userName: 'Marwa', role: 'org_admin' }));
+    // Linked to a duplicate that was already deleted (old versions did not detach it).
+    store.seed('users', REAL, { uid: REAL, email: 'marwa2@acme.test', role: 'org_admin', orgId: ORG, memberId: 'mem-already-deleted', name: 'Marwa', active: true });
+    await removeMember(store, admin, english, [REAL], key(), now);
+    expect(store.read('users', REAL)).toMatchObject({ orgId: '', role: 'employee', memberId: null });
   });
 });
 

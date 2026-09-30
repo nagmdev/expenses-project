@@ -58,6 +58,7 @@ const MainApp: React.FC = () => {
     forceRefreshUserState,
     isAccountSuspended,
     superAdminNeedsVerification,
+    membershipNeedsVerification,
     sendSuperAdminVerificationEmail,
     recheckSuperAdminVerification,
     permissionDeniedSources,
@@ -302,6 +303,40 @@ const MainApp: React.FC = () => {
                   + إنشاء الشركة الأولى الآن
                 </button>
               </div>
+            </div>
+          ) : membershipNeedsVerification ? (
+            <div className="bg-white rounded-3xl border border-amber-200 p-8 max-w-xl mx-auto text-center shadow-md my-10 animate-in fade-in duration-200">
+              <div className="h-16 w-16 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto mb-4 border border-amber-200">
+                <MailCheck className="h-8 w-8" />
+              </div>
+              <h2 className="text-lg font-bold text-slate-900">تفعيل البريد لإكمال ربط حسابك بالشركة</h2>
+              <p className="text-xs text-slate-600 mt-3 leading-relaxed">
+                تمت إضافتك إلى الشركة ببريدك <strong dir="ltr">{currentUser.email}</strong>، لكن البريد غير مُفعَّل بعد.
+                لحماية الحسابات، لا يُربط الحساب بصلاحياته الجديدة إلا بعد تفعيل البريد.
+              </p>
+              <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-3">
+                <button
+                  type="button"
+                  disabled={verifyGuard.pending}
+                  onClick={handleSendVerification}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition cursor-pointer flex items-center gap-2 shadow-sm"
+                >
+                  <MailCheck className="h-4 w-4" />
+                  إرسال رابط التفعيل إلى بريدي
+                </button>
+                <button
+                  type="button"
+                  disabled={verifyGuard.pending}
+                  onClick={handleRecheckVerification}
+                  className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition cursor-pointer flex items-center gap-2 shadow-sm"
+                >
+                  {verifyGuard.pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  فعّلت البريد — تحقق الآن
+                </button>
+              </div>
+              {verifyMessage && (
+                <p className={`text-xs mt-4 font-semibold ${verifyMessage.ok ? 'text-emerald-700' : 'text-rose-600'}`}>{verifyMessage.text}</p>
+              )}
             </div>
           ) : isAccountSuspended ? (
             <div className="bg-white rounded-3xl border border-slate-200 p-10 max-w-lg mx-auto text-center shadow-md my-12 animate-in fade-in duration-200">

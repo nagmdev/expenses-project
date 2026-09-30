@@ -106,7 +106,7 @@ import {
   entityIdInOrg,
   isRealUid,
   normalizeOrgIds,
-  pickMembershipToLink,
+  profileMembershipState,
   reusableProvisionedAccount,
   type MultiOrgSkip,
   removeMember as removeMemberOp,
@@ -173,6 +173,30 @@ export const resolveParentBankAccount = (
   if (!parentId) return null;
   return allAccounts.find(a => a.id === parentId) || null;
 };
+
+/**
+ * Points the signed-in user's own users/{uid} profile at a membership an admin created
+ * for them. The rules accept a self-written role/orgId only when they match the
+ * membership named in memberId, so all three come from the same record.
+ */
+const linkOwnProfile = (db: NonNullable<ReturnType<typeof getDb>>, user: FirebaseUser, m: OrganizationMember) =>
+  setDoc(
+    doc(db, 'users', user.uid),
+    sanitizeForFirestore({
+      id: user.uid,
+      // Only a verified address may be written to one's own profile.
+      ...(user.emailVerified ? { email: normalizeEmail(user.email) } : {}),
+      name: m.userName || user.displayName || 'موظف',
+      role: m.role,
+      orgId: m.orgId,
+      memberId: m.id,
+      department: m.department || '',
+      phone: m.phone || '',
+      active: true,
+      updatedAt: new Date().toISOString(),
+    }),
+    { merge: true },
+  );
 
 // Only per-viewer UI preferences live in localStorage. Business data is NEVER
 // persisted there: it is not transactional, not multi-tab safe, user-editable and
@@ -359,6 +383,11 @@ interface AppContextType {
    * database refuses to serve it until the email is verified.
    */
   superAdminNeedsVerification: boolean;
+  /**
+   * The user was (re)added to a company by email only and their email is not verified,
+   * so the rules do not let their account take that membership yet (see profileMembershipState).
+   */
+  membershipNeedsVerification: boolean;
   sendSuperAdminVerificationEmail: () => Promise<{ success: boolean; message: string }>;
   recheckSuperAdminVerification: () => Promise<{ verified: boolean; error?: string }>;
   /** Data sources the database refused to serve (permission-denied), shown to the user instead of silently empty lists. */
@@ -691,6 +720,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     name?: string;
     role?: Role;
     orgId?: string;
+    memberId?: string | null;
     active?: boolean;
     department?: string;
     phone?: string;
@@ -755,34 +785,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setMyMemberships(found);
       setMembershipsLoaded(true);
 
-      // Link the user's own profile to the membership an admin created for them. The
-      // security rules accept a self-written role/orgId only when it matches the
-      // membership named in memberId, so all three come from the same record.
-      const link = profileData?.orgId
-        ? null
-        : pickMembershipToLink(found, { uid: firebaseUser.uid, email: firebaseUser.email, emailVerified: firebaseUser.emailVerified });
-      const resolvedOrg = profileData?.orgId || link?.orgId || '';
+      // Link the user's own profile to the membership an admin created for them — also
+      // when the profile still names a deleted / re-created membership (profileMembershipState).
+      const state = profileMembershipState(profileData, found, { uid: firebaseUser.uid, email: firebaseUser.email, emailVerified: firebaseUser.emailVerified });
+      const link = state.relinkTo;
+      const resolvedOrg = link?.orgId || (state.current ? profileData?.orgId : '') || '';
       if (!resolvedOrg) return false;
 
       if (link) {
         try {
-          await setDoc(
-            doc(db, 'users', firebaseUser.uid),
-            sanitizeForFirestore({
-              id: firebaseUser.uid,
-              // Only a verified address may be written to one's own profile.
-              ...(firebaseUser.emailVerified ? { email: normalizeEmail(firebaseUser.email) } : {}),
-              name: link.userName || firebaseUser.displayName || 'موظف',
-              role: link.role,
-              orgId: link.orgId,
-              memberId: link.id,
-              department: link.department || '',
-              phone: link.phone || '',
-              active: true,
-              updatedAt: new Date().toISOString(),
-            }),
-            { merge: true }
-          );
+          await linkOwnProfile(db, firebaseUser, link);
         } catch (err: any) {
           console.warn('[forceRefresh] profile link rejected:', err?.message || err);
           return false;
@@ -949,31 +961,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSuperAdminEmails(Array.from(new Set([...DEFAULT_SUPER_ADMINS, ...shown].filter(Boolean))));
   }, [superAdminRecords]);
 
+  // The profile decides name / role / company only while it still reflects a membership
+  // that exists. A person deleted and added again (or whose record changed) must never
+  // keep the old record's name or role: the live membership wins, and the profile is
+  // re-linked to it below.
+  const profileState = useMemo(
+    () => (firebaseUser ? profileMembershipState(userDocProfile, myMemberships, { uid: firebaseUser.uid, email: firebaseUser.email, emailVerified }) : null),
+    [firebaseUser, userDocProfile, myMemberships, emailVerified],
+  );
+  const trustedProfile = profileState?.current ? userDocProfile : null;
+  const membershipNeedsVerification = Boolean(firebaseUser && membershipsLoaded && userDocLoaded && !isSuperAdmin && profileState?.awaitingVerification);
+
+  // Keep the user's own profile linked to their live membership. One narrow, idempotent
+  // self-write that the rules accept only for a membership an admin granted; attempted
+  // once per target so a refusal never loops.
+  const relinkAttempt = useRef('');
+  useEffect(() => {
+    if (!firebaseUser || !superAdminStatusResolved || isSuperAdmin || !userDocLoaded || !membershipsLoaded) return;
+    const target = profileState?.relinkTo;
+    if (!target) return;
+    const attempt = [firebaseUser.uid, target.id, target.orgId, target.role, target.userName].join('|');
+    if (relinkAttempt.current === attempt) return;
+    relinkAttempt.current = attempt;
+    const db = getDb();
+    if (!db) return;
+    linkOwnProfile(db, firebaseUser, target).catch(err => console.warn('[identity] profile re-link rejected:', err?.message || err));
+  }, [firebaseUser, superAdminStatusResolved, isSuperAdmin, userDocLoaded, membershipsLoaded, profileState]);
+
   // Suspended accounts (active: false) get no org data under firestore.rules; the UI
   // says so instead of showing an empty or "awaiting assignment" screen.
   const isAccountSuspended = useMemo(() => {
     if (!firebaseUser || isSuperAdmin) return false;
-    if (userDocProfile?.orgId) return userDocProfile.active === false;
+    if (trustedProfile?.orgId) return trustedProfile.active === false;
     return myMemberships.length > 0 && myMemberships.every(m => m.active === false);
-  }, [firebaseUser, isSuperAdmin, userDocProfile, myMemberships]);
+  }, [firebaseUser, isSuperAdmin, trustedProfile, myMemberships]);
 
   const resolvedRole: Role = useMemo(() => {
     if (isSuperAdmin) return 'super_admin';
-    if (userDocProfile?.role && userDocProfile.role !== 'super_admin') return userDocProfile.role;
+    if (trustedProfile?.role && trustedProfile.role !== 'super_admin') return trustedProfile.role;
     if (userMemberRecord && userMemberRecord.role !== 'super_admin') return userMemberRecord.role;
     return 'employee';
-  }, [isSuperAdmin, userDocProfile, userMemberRecord]);
+  }, [isSuperAdmin, trustedProfile, userMemberRecord]);
 
   const effectiveOrgId = useMemo(() => {
     if (isSuperAdmin) {
       return activeOrgId || (rawOrganizations[0]?.id || '');
     }
-    if (userDocProfile?.orgId) return userDocProfile.orgId;
+    if (trustedProfile?.orgId) return trustedProfile.orgId;
     if (userMemberRecord?.orgId) return userMemberRecord.orgId;
     // A remembered org is only honoured if the user actually belongs to it.
     if (activeOrgId && myMemberships.some(m => m.orgId === activeOrgId)) return activeOrgId;
     return '';
-  }, [isSuperAdmin, activeOrgId, userDocProfile, userMemberRecord, myMemberships, rawOrganizations]);
+  }, [isSuperAdmin, activeOrgId, trustedProfile, userMemberRecord, myMemberships, rawOrganizations]);
 
   useEffect(() => {
     if (!isSuperAdmin && effectiveOrgId && effectiveOrgId !== activeOrgId) {
@@ -992,11 +1031,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return {
       id: firebaseUser.uid,
-      name: userDocProfile?.name || userMemberRecord?.userName || firebaseUser.displayName || defaultAdminName || 'مستخدم',
+      // A stale profile (deleted / re-created membership) must not show the old record's name.
+      name: trustedProfile?.name || userMemberRecord?.userName || firebaseUser.displayName || defaultAdminName || 'مستخدم',
       email: firebaseUser.email || userDocProfile?.email || userMemberRecord?.userEmail || '',
       role: resolvedRole,
       avatar: firebaseUser.photoURL || undefined,
-      phone: userDocProfile?.phone || userMemberRecord?.phone || firebaseUser.phoneNumber || '',
+      phone: trustedProfile?.phone || userMemberRecord?.phone || firebaseUser.phoneNumber || '',
       orgId: effectiveOrgId,
       instapay: userDocProfile?.instapay || userMemberRecord?.instapay || '',
       wallet: userDocProfile?.wallet || userMemberRecord?.wallet || '',
@@ -1005,7 +1045,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       iban: userDocProfile?.iban || userMemberRecord?.iban || '',
       preferredPaymentMethod: userDocProfile?.preferredPaymentMethod || userMemberRecord?.preferredPaymentMethod || 'instapay',
     };
-  }, [firebaseUser, userDocProfile, userMemberRecord, userEmail, resolvedRole, effectiveOrgId]);
+  }, [firebaseUser, userDocProfile, trustedProfile, userMemberRecord, userEmail, resolvedRole, effectiveOrgId]);
 
   // Adjust active tab on role switch (e.g. employee defaults to my-requests / tracker).
   // Wait until the role is actually known, or a super admin gets bounced to "my requests"
@@ -1967,9 +2007,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const removeMember = async (memberId: string) => {
     const mem = rawMembers.find(m => m.id === memberId);
-    await mutate('removeMember', memberId, async store =>
-      removeMemberOp(store, actor, memberId, await linkedProfileIds(mem), newOperationKey())
-    );
+    // Also offer the accounts behind the same person's other records (legacy duplicates
+    // with the same email): the domain detaches a profile only if nothing backs it any more.
+    const email = normalizeEmail(mem?.userEmail);
+    const samePerson = email
+      ? rawMembers.filter(m => m.id !== memberId && isRealUid(m.userId) && normalizeEmail(m.userEmail) === email)
+      : [];
+    await mutate('removeMember', memberId, async store => {
+      const ids = new Set(await linkedProfileIds(mem));
+      for (const other of samePerson) (await linkedProfileIds(other)).forEach(id => ids.add(id));
+      return removeMemberOp(store, actor, memberId, Array.from(ids), newOperationKey());
+    });
   };
 
   const adminResetUserPassword = async (email: string): Promise<{ success: boolean; message?: string }> => {
@@ -2726,6 +2774,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         forceRefreshUserState,
         isAccountSuspended,
         superAdminNeedsVerification,
+        membershipNeedsVerification,
         sendSuperAdminVerificationEmail,
         recheckSuperAdminVerification,
         permissionDeniedSources,

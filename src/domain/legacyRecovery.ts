@@ -158,7 +158,8 @@ export function buildBackupFile(snapshots: LegacyStoreSnapshot[], meta: Record<s
 
 export const markerId = (rec: Pick<LegacyRecord, 'store' | 'id'>) => `${rec.store.collection}__${rec.id}`.slice(0, 1400);
 
-export type RecordStatus = 'missing' | 'exists' | 'handled' | 'no_access' | 'error';
+/** 'not_checked': never looked up, because this user could not restore it anyway (see needsLookup). */
+export type RecordStatus = 'missing' | 'exists' | 'handled' | 'no_access' | 'error' | 'not_checked';
 
 /** Read-only check. "handled" = restored once before (even if deleted since): never offered again. */
 export async function checkRecord(store: DataStore, rec: LegacyRecord): Promise<RecordStatus> {
@@ -194,6 +195,16 @@ export function restoreBlock(ctx: RestoreContext, rec: LegacyRecord): BlockReaso
   }
   return actor.role === 'org_admin' ? null : 'no_permission';
 }
+
+/**
+ * Whether the scan should look a record up at all. Backup-only data and another company's
+ * data can never be restored by this user, and the rules refuse reading another company's
+ * existing documents: every such read only printed a permission-denied error in the console.
+ */
+export const needsLookup = (ctx: RestoreContext, rec: LegacyRecord) => {
+  const block = restoreBlock(ctx, rec);
+  return block !== 'backup_only' && block !== 'other_org';
+};
 
 export type RestoreOutcome = 'restored' | 'exists' | 'handled' | 'duplicate' | 'failed' | BlockReason;
 

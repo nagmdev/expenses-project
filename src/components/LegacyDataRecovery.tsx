@@ -6,6 +6,7 @@ import { createFirestoreStore } from '../domain/firestoreStore';
 import {
   buildBackupFile,
   checkRecord,
+  needsLookup,
   readBackupFile,
   readLegacySnapshot,
   restoreBlock,
@@ -105,6 +106,9 @@ export const LegacyDataRecovery: React.FC = () => {
     return () => window.removeEventListener(OPEN_LEGACY_RECOVERY_EVENT, onOpen);
   }, []);
 
+  const ctxRef = useRef(ctx);
+  ctxRef.current = ctx;
+
   const scan = useCallback(async (snap: LegacyStoreSnapshot[]) => {
     const db = getDb();
     if (!db) {
@@ -122,7 +126,13 @@ export const LegacyDataRecovery: React.FC = () => {
       const store = createFirestoreStore(db);
       const all = snap.flatMap(s => s.records);
       // Per-record errors become an 'error' status; one bad record never hides the rest.
-      const found = await mapLimit(all, 6, async rec => [statusKey(rec), await checkRecord(store, rec)] as const, () => run !== scanRunRef.current);
+      // Records this user can never restore are not looked up (no refused reads).
+      const found = await mapLimit(
+        all,
+        6,
+        async rec => [statusKey(rec), needsLookup(ctxRef.current, rec) ? await checkRecord(store, rec) : ('not_checked' as const)] as const,
+        () => run !== scanRunRef.current,
+      );
       if (run !== scanRunRef.current) return;
       const map = Object.fromEntries(found.filter(Boolean));
       setStatuses(map);
@@ -336,7 +346,8 @@ export const LegacyDataRecovery: React.FC = () => {
                 const count = (st: RecordStatus) => s.records.filter(r => statuses[statusKey(r)] === st).length;
                 const missing = s.records.filter(r => statuses[statusKey(r)] === 'missing');
                 const canDo = missing.filter(r => !restoreBlock(ctx, r));
-                const blocked = missing
+                const blocked = s.records
+                  .filter(r => statuses[statusKey(r)] === 'missing' || statuses[statusKey(r)] === 'not_checked')
                   .map(r => restoreBlock(ctx, r))
                   .filter((b): b is Exclude<BlockReason, 'backup_only'> => Boolean(b) && b !== 'backup_only');
                 const res = results?.[s.store.key];
@@ -363,14 +374,19 @@ export const LegacyDataRecovery: React.FC = () => {
                         </label>
                       )}
                       <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                        <span className={`px-2 py-0.5 rounded-full ${missing.length ? 'bg-amber-100 text-amber-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>ناقص: {missing.length}</span>
-                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">موجود: {count('exists')}</span>
+                        {!isBackup && (
+                          <>
+                            <span className={`px-2 py-0.5 rounded-full ${missing.length ? 'bg-amber-100 text-amber-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>ناقص: {missing.length}</span>
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">موجود: {count('exists')}</span>
+                          </>
+                        )}
+                        {!isBackup && count('not_checked') > 0 && <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">لم يُفحص (لشركة أخرى): {count('not_checked')}</span>}
                         {count('handled') > 0 && <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-700">استُرجع سابقاً: {count('handled')}</span>}
                         {count('no_access') > 0 && <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">بدون صلاحية: {count('no_access')}</span>}
                         {count('error') > 0 && <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700">تعذر الفحص: {count('error')}</span>}
                       </div>
                     </div>
-                    {isBackup && missing.length > 0 && (
+                    {isBackup && (
                       <p className="mt-2 text-[11px] text-slate-500">{s.store.backupReason} يتم الاحتفاظ بها في ملف النسخة الاحتياطية فقط لمراجعتها يدوياً.</p>
                     )}
                     {!isBackup && missing.length > 0 && !s.store.likelyLocalOnly && (
