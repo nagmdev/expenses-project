@@ -1,4 +1,16 @@
-import sqlite3 from 'sqlite3';
+import { createRequire } from 'module';
+
+const req = createRequire(import.meta.url);
+let sqlite3: any = null;
+try {
+  sqlite3 = req('sqlite3');
+} catch {
+  // Native addon unavailable on current platform/Node ABI
+}
+
+export function isSqliteAvailable(): boolean {
+  return sqlite3 != null;
+}
 
 export interface Queryable {
   run(sql: string, params?: any[]): Promise<{ lastID: number; changes: number }>;
@@ -21,8 +33,11 @@ export interface Database extends Queryable {
 }
 
 export function openDatabase(filename: string): Promise<Database> {
+  if (!sqlite3) {
+    return Promise.reject(new Error('SQLite3 native binding is not available in this environment.'));
+  }
   return new Promise((resolve, reject) => {
-    const raw = new sqlite3.Database(filename, err => {
+    const raw = new sqlite3.Database(filename, (err: any) => {
       if (err) return reject(err);
 
       const q: Queryable = {

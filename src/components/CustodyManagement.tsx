@@ -373,6 +373,7 @@ export const CustodyManagement: React.FC = () => {
     let finalEmpId = issueEmployeeId;
     let finalEmpName = issueEmployeeName.trim();
     let finalEmpPhone = issueEmployeePhone.trim();
+    let finalEmpEmail: string | undefined = undefined;
 
     if (issueEmployeeMode === 'select') {
       const selectedMember = availableMembers.find(m => m.id === issueEmployeeId || m.userId === issueEmployeeId);
@@ -383,12 +384,23 @@ export const CustodyManagement: React.FC = () => {
       finalEmpId = selectedMember.userId || selectedMember.id;
       finalEmpName = selectedMember.userName;
       finalEmpPhone = selectedMember.phone || '';
+      finalEmpEmail = selectedMember.userEmail || undefined;
     } else {
       if (!finalEmpName) {
         setIssueError('يرجى كتابة اسم الموظف أو المندوب.');
         return;
       }
-      if (!finalEmpId) {
+      const matchedMember = availableMembers.find(m =>
+        m.userName.trim().toLowerCase() === finalEmpName.toLowerCase() ||
+        (m.userEmail && finalEmpName.toLowerCase().includes(m.userEmail.toLowerCase()))
+      );
+      if (matchedMember) {
+        finalEmpId = matchedMember.userId || matchedMember.id;
+        finalEmpEmail = matchedMember.userEmail || undefined;
+        if (!finalEmpPhone && matchedMember.phone) {
+          finalEmpPhone = matchedMember.phone;
+        }
+      } else if (!finalEmpId) {
         finalEmpId = newId('emp');
       }
     }
@@ -413,7 +425,7 @@ export const CustodyManagement: React.FC = () => {
           amountNum,
           account.id,
           issueNotes.trim() || undefined,
-          { idempotencyKey }
+          { idempotencyKey, employeeEmail: finalEmpEmail }
         );
 
         if (!res || !res.success) {

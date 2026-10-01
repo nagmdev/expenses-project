@@ -547,7 +547,7 @@ interface AppContextType {
     amount: number,
     sourceAccountId: string,
     notes?: string,
-    opts?: MutationOptions
+    opts?: MutationOptions & { employeeEmail?: string }
   ) => Promise<{ success: boolean; message?: string }>;
   settleCustodyItem: (
     custodyId: string,
@@ -1215,10 +1215,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     if (!effectiveOrgId) return [];
     if (resolvedRole === 'employee') {
-      return rawCustodies.filter(c => c.orgId === effectiveOrgId && c.employeeId === currentUser.id);
+      const uEmail = (currentUser.email || firebaseUser.email || '').trim().toLowerCase();
+      const uName = (currentUser.name || '').trim().toLowerCase();
+      const uId = currentUser.id;
+      const fUid = firebaseUser.uid;
+      return rawCustodies.filter(c => {
+        if (c.orgId !== effectiveOrgId) return false;
+        if (c.employeeId === uId || c.employeeId === fUid) return true;
+        if (c.employeeEmail && uEmail && c.employeeEmail.trim().toLowerCase() === uEmail) return true;
+        if (c.employeeName && uName && c.employeeName.trim().toLowerCase() === uName) return true;
+        return false;
+      });
     }
     return rawCustodies.filter(c => c.orgId === effectiveOrgId);
-  }, [firebaseUser, resolvedRole, rawCustodies, effectiveOrgId, currentUser.id]);
+  }, [firebaseUser, resolvedRole, rawCustodies, effectiveOrgId, currentUser.id, currentUser.email, currentUser.name]);
 
   const scopedCustodySettlements = useMemo(() => {
     if (!firebaseUser) return [];
@@ -1227,10 +1237,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     if (!effectiveOrgId) return [];
     if (resolvedRole === 'employee') {
-      return rawCustodySettlements.filter(s => s.orgId === effectiveOrgId && s.employeeId === currentUser.id);
+      const uEmail = (currentUser.email || firebaseUser.email || '').trim().toLowerCase();
+      const uName = (currentUser.name || '').trim().toLowerCase();
+      const uId = currentUser.id;
+      const fUid = firebaseUser.uid;
+      return rawCustodySettlements.filter(s => {
+        if (s.orgId !== effectiveOrgId) return false;
+        if (s.employeeId === uId || s.employeeId === fUid) return true;
+        if (s.employeeEmail && uEmail && s.employeeEmail.trim().toLowerCase() === uEmail) return true;
+        if (s.employeeName && uName && s.employeeName.trim().toLowerCase() === uName) return true;
+        return false;
+      });
     }
     return rawCustodySettlements.filter(s => s.orgId === effectiveOrgId);
-  }, [firebaseUser, resolvedRole, rawCustodySettlements, effectiveOrgId, currentUser.id]);
+  }, [firebaseUser, resolvedRole, rawCustodySettlements, effectiveOrgId, currentUser.id, currentUser.email, currentUser.name]);
 
   const scopedDepartments = useMemo(() => {
     if (!firebaseUser) return [];
@@ -1436,9 +1456,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     listen<PaymentAccount>('Payment Accounts', financeScoped('paymentAccounts'), setRawPaymentAccounts, notDummy);
     listen<AccountTransaction>('Account Transactions', financeScoped('accountTransactions'), list => setRawTransactions([...list].sort(byCreatedDesc)), notDummy);
 
-    // 6. Custodies & settlements (employees: their own only)
+    // 6. Custodies & settlements (employees: their own only, scoped by org + filtered in UI)
     const employeeScoped = (col: string) =>
-      isSuperAdmin || isOrgStaff ? financeScoped(col) : query(collection(db, col), where('employeeId', '==', firebaseUser.uid));
+      isSuperAdmin || isOrgStaff
+        ? financeScoped(col)
+        : effectiveOrgId
+        ? query(collection(db, col), where('orgId', '==', effectiveOrgId))
+        : query(collection(db, col), where('employeeId', '==', firebaseUser.uid));
     listen<PettyCashCustody>('Custodies', employeeScoped('custodies'), list =>
       setRawCustodies([...list].sort((a, b) => new Date(b.createdAt || b.issuedAt).getTime() - new Date(a.createdAt || a.issuedAt).getTime())), notDummy);
     listen<CustodySettlementItem>('Custody Settlements', employeeScoped('custodySettlements'), list => setRawCustodySettlements([...list].sort(byCreatedDesc)), notDummy);
@@ -2427,12 +2451,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     amount: number,
     sourceAccountId: string,
     notes?: string,
-    opts?: MutationOptions
+    opts?: MutationOptions & { employeeEmail?: string }
   ): Promise<{ success: boolean; message?: string }> => {
     try {
       const opKey = opts?.idempotencyKey || newOperationKey();
       const res = await mutate('issueCustody', opts?.idempotencyKey || fingerprint(orgId, employeeId, amount, sourceAccountId), store =>
-        issueCustodyOp(store, actor, { orgId, orgName: orgById(orgId)?.name, employeeId, employeeName, employeePhone, amount, sourceAccountId, notes }, opKey)
+        issueCustodyOp(store, actor, { orgId, orgName: orgById(orgId)?.name, employeeId, employeeName, employeePhone, employeeEmail: opts?.employeeEmail, amount, sourceAccountId, notes }, opKey)
       );
       return {
         success: true,

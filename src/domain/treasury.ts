@@ -650,6 +650,7 @@ export interface IssueCustodyInput {
   employeeId: string;
   employeeName: string;
   employeePhone?: string;
+  employeeEmail?: string;
   amount: number;
   sourceAccountId: string;
   notes?: string;
@@ -705,6 +706,7 @@ export async function issueCustody(
       employeeId: input.employeeId,
       employeeName: input.employeeName,
       employeePhone: input.employeePhone || '',
+      employeeEmail: input.employeeEmail || '',
       totalAmount: amount,
       remainingAmount: amount,
       settledAmount: 0,
@@ -769,7 +771,10 @@ export async function settleCustodyItem(
     if (existing) return { value: existing, changed: false, reason: 'duplicate_operation' };
     const custody = await tx.get<PettyCashCustody>(COL.custodies, input.custodyId);
     if (!custody) throw new DomainError('not_found', 'العهدة غير موجودة أو تم حذفها.');
-    const isOwner = custody.employeeId === actor.id;
+    const isOwner =
+      custody.employeeId === actor.id ||
+      Boolean(custody.employeeEmail && actor.email && custody.employeeEmail.trim().toLowerCase() === actor.email.trim().toLowerCase()) ||
+      Boolean(actor.orgId && custody.orgId === actor.orgId && custody.employeeName && actor.name && custody.employeeName.trim().toLowerCase() === actor.name.trim().toLowerCase());
     if (!isOwner && !['super_admin', 'org_admin', 'finance'].includes(actor.role)) {
       throw new DomainError('forbidden', 'ليس لديك صلاحية تسوية هذه العهدة.');
     }
@@ -786,6 +791,7 @@ export async function settleCustodyItem(
       orgId: custody.orgId,
       employeeId: custody.employeeId,
       employeeName: custody.employeeName,
+      employeeEmail: custody.employeeEmail || actor.email || '',
       amount,
       currency: custody.currency || 'EGP',
       serviceCategoryId: input.serviceCategoryId || '',

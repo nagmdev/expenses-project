@@ -246,21 +246,91 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
   }, [targetCustodies, timeFilter, isDateInTimeFilter]);
 
   // Financial Metrics
+  const baseCurrency = activeOrg?.currency || 'EGP';
+  const currencyOf = (c?: string | null) => ((c || '').trim() || baseCurrency).toUpperCase();
+
+  const metricsByCurrency = useMemo(() => {
+    const map = new Map<string, {
+      currency: string;
+      disbursedRequests: number;
+      disbursedCount: number;
+      settledCustodies: number;
+      settledCount: number;
+      totalActual: number;
+      approvedRequests: number;
+      approvedCount: number;
+      pendingRequests: number;
+      pendingCount: number;
+    }>();
+
+    const getRow = (cur: string) => {
+      let row = map.get(cur);
+      if (!row) {
+        row = {
+          currency: cur,
+          disbursedRequests: 0,
+          disbursedCount: 0,
+          settledCustodies: 0,
+          settledCount: 0,
+          totalActual: 0,
+          approvedRequests: 0,
+          approvedCount: 0,
+          pendingRequests: 0,
+          pendingCount: 0,
+        };
+        map.set(cur, row);
+      }
+      return row;
+    };
+
+    filteredRequests.forEach(r => {
+      const cur = currencyOf(r.currency);
+      const row = getRow(cur);
+      if (r.status === 'disbursed') {
+        row.disbursedRequests += Number(r.amount || 0);
+        row.disbursedCount += 1;
+        row.totalActual += Number(r.amount || 0);
+      } else if (r.status === 'approved') {
+        row.approvedRequests += Number(r.amount || 0);
+        row.approvedCount += 1;
+      } else if (r.status === 'pending') {
+        row.pendingRequests += Number(r.amount || 0);
+        row.pendingCount += 1;
+      }
+    });
+
+    filteredSettlements.forEach(s => {
+      const cur = currencyOf(s.currency);
+      const row = getRow(cur);
+      row.settledCustodies += Number(s.amount || 0);
+      row.settledCount += 1;
+      row.totalActual += Number(s.amount || 0);
+    });
+
+    const mainCur = currencyOf(baseCurrency);
+    const sorted = Array.from(map.values()).sort((a, b) =>
+      a.currency === mainCur ? -1 : b.currency === mainCur ? 1 : a.currency.localeCompare(b.currency)
+    );
+    if (sorted.length === 0) {
+      sorted.push(getRow(mainCur));
+    }
+    return sorted;
+  }, [filteredRequests, filteredSettlements, baseCurrency]);
+
+  const primaryMetrics = metricsByCurrency[0];
+  const secondaryMetrics = metricsByCurrency.slice(1);
+
   const disbursedRequests = filteredRequests.filter(r => r.status === 'disbursed');
-  const totalDisbursedRequests = disbursedRequests.reduce((sum, r) => sum + r.amount, 0);
-
-  // Settled Custodies (مصروفات فواتير تسوية العهد النقدية الفعلية)
-  const totalSettledCustodies = filteredSettlements.reduce((sum, s) => sum + Number(s.amount || 0), 0);
-
-  // إجمالي المصروف الفعلي الحقيقي = طلبات الصرف المنفذة + فواتير تسوية العهد
-  const totalActualExpenses = totalDisbursedRequests + totalSettledCustodies;
+  const totalDisbursedRequests = primaryMetrics.disbursedRequests;
+  const totalSettledCustodies = primaryMetrics.settledCustodies;
+  const totalActualExpenses = primaryMetrics.totalActual;
 
   // Requests Pending & Approved
   const approvedRequests = filteredRequests.filter(r => r.status === 'approved');
-  const totalApprovedAwaitingDisbursement = approvedRequests.reduce((sum, r) => sum + r.amount, 0);
+  const totalApprovedAwaitingDisbursement = primaryMetrics.approvedRequests;
 
   const pendingRequests = filteredRequests.filter(r => r.status === 'pending');
-  const totalPending = pendingRequests.reduce((sum, r) => sum + r.amount, 0);
+  const totalPending = primaryMetrics.pendingRequests;
 
   const clarificationRequests = filteredRequests.filter(r => r.status === 'clarification_requested');
   const rejectedRequests = filteredRequests.filter(r => r.status === 'rejected');
@@ -282,7 +352,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
 
   const remainingBudget = Math.max(0, totalBudget - totalActualExpenses);
   const budgetUtilization = totalBudget > 0 ? Math.min(100, Math.round((totalActualExpenses / totalBudget) * 100)) : 0;
-  const currency = activeOrg?.currency || 'EGP';
+  const currency = primaryMetrics.currency;
 
   // Chart 1: Expenses by Service Category (Combines Requests + Custody Settlements)
   const serviceChartData = useMemo(() => {
@@ -727,6 +797,11 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
             <div className="text-2xl font-black text-slate-900">
               {fmtNum(totalActualExpenses)} <span className="text-sm font-semibold text-slate-500">{currency}</span>
             </div>
+            {secondaryMetrics.map(sm => sm.totalActual > 0 && (
+              <div key={sm.currency} className="text-sm font-bold text-emerald-800 mt-0.5">
+                + {fmtNum(sm.totalActual)} <span className="text-xs font-semibold">{sm.currency}</span>
+              </div>
+            ))}
             <div className="text-[11px] text-emerald-700 font-semibold mt-1.5 flex items-center gap-1.5 flex-wrap">
               <span>{disbursedRequests.length} طلبات صرف ({fmtNum(totalDisbursedRequests)} {currency})</span>
               {totalSettledCustodies > 0 && (
@@ -751,6 +826,11 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
             <div className="text-2xl font-black text-slate-900">
               {fmtNum(totalApprovedAwaitingDisbursement)} <span className="text-sm font-semibold text-slate-500">{currency}</span>
             </div>
+            {secondaryMetrics.map(sm => sm.approvedRequests > 0 && (
+              <div key={sm.currency} className="text-sm font-bold text-blue-800 mt-0.5">
+                + {fmtNum(sm.approvedRequests)} <span className="text-xs font-semibold">{sm.currency}</span>
+              </div>
+            ))}
             <div className="text-xs text-blue-600 font-semibold mt-1 flex items-center gap-1">
               <span>{approvedRequests.length} طلبات جاهزة للصرف المالي</span>
             </div>
@@ -770,6 +850,11 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
             <div className="text-2xl font-black text-slate-900">
               {fmtNum(totalPending)} <span className="text-sm font-semibold text-slate-500">{currency}</span>
             </div>
+            {secondaryMetrics.map(sm => sm.pendingRequests > 0 && (
+              <div key={sm.currency} className="text-sm font-bold text-amber-800 mt-0.5">
+                + {fmtNum(sm.pendingRequests)} <span className="text-xs font-semibold">{sm.currency}</span>
+              </div>
+            ))}
             <div className="text-xs text-amber-600 font-semibold mt-1 flex items-center gap-1">
               <span>{pendingRequests.length} طلبات جديدة تحت المراجعة</span>
             </div>

@@ -121,8 +121,10 @@ export function toMoney(value: unknown): number {
 }
 
 export function requirePositiveAmount(value: unknown, message = 'يرجى إدخال مبلغ صحيح أكبر من الصفر.'): number {
-  const n = toMoney(Math.abs(Number(value)));
-  if (!n || n <= 0) throw new DomainError('invalid_amount', message);
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) throw new DomainError('invalid_amount', message);
+  const n = toMoney(num);
+  if (n <= 0) throw new DomainError('invalid_amount', message);
   return n;
 }
 

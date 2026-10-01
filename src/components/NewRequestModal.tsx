@@ -530,9 +530,16 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
     markTouched();
 
+    const uploadOrgId = selectedOrgId || (activeOrgId && activeOrgId !== 'all' ? activeOrgId : '') || activeOrg?.id || (creatableOrgs[0]?.id || '');
+    if (!uploadOrgId) {
+      alert('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.');
+      e.target.value = '';
+      return;
+    }
+
     setIsUploadingInvoice(true);
     try {
-      const attachment = await processAndUploadInvoice(file, selectedOrgId || 'org-main');
+      const attachment = await processAndUploadInvoice(file, uploadOrgId);
       setInvoiceAttachment(attachment);
     } catch (err: any) {
       console.error('[FileUpload Error]', err);
@@ -554,9 +561,16 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
     markTouched();
 
+    const uploadOrgId = selectedOrgId || (activeOrgId && activeOrgId !== 'all' ? activeOrgId : '') || activeOrg?.id || (creatableOrgs[0]?.id || '');
+    if (!uploadOrgId) {
+      alert('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.');
+      e.target.value = '';
+      return;
+    }
+
     setIsUploadingVisaDoc(true);
     try {
-      const attachment = await processAndUploadInvoice(file, selectedOrgId || 'org-main');
+      const attachment = await processAndUploadInvoice(file, uploadOrgId);
       setVisaDocumentAttachment(attachment);
     } catch (err: any) {
       console.error('[VisaDocUpload Error]', err);
@@ -578,9 +592,16 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
     markTouched();
 
+    const uploadOrgId = selectedOrgId || (activeOrgId && activeOrgId !== 'all' ? activeOrgId : '') || activeOrg?.id || (creatableOrgs[0]?.id || '');
+    if (!uploadOrgId) {
+      alert('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.');
+      e.target.value = '';
+      return;
+    }
+
     setIsUploadingInstallmentTransfer(true);
     try {
-      const attachment = await processAndUploadInvoice(file, selectedOrgId || 'org-main');
+      const attachment = await processAndUploadInvoice(file, uploadOrgId);
       setInstallmentTransferAttachment(attachment);
     } catch (err: any) {
       console.error('[InstallmentTransferUpload Error]', err);
@@ -602,9 +623,16 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
     markTouched();
 
+    const uploadOrgId = selectedOrgId || (activeOrgId && activeOrgId !== 'all' ? activeOrgId : '') || activeOrg?.id || (creatableOrgs[0]?.id || '');
+    if (!uploadOrgId) {
+      alert('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.');
+      e.target.value = '';
+      return;
+    }
+
     setIsUploadingWalletTransfer(true);
     try {
-      const attachment = await processAndUploadInvoice(file, selectedOrgId || 'org-main');
+      const attachment = await processAndUploadInvoice(file, uploadOrgId);
       setWalletTransferAttachment(attachment);
     } catch (err: any) {
       console.error('[WalletTransferUpload Error]', err);

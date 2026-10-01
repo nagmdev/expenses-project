@@ -21,7 +21,7 @@ import {
 import { addVisaPayment, createVisaRequest, decideVisaRequest } from '../src/domain/visa';
 import { createOrganization } from '../src/domain/directory';
 import { createExpenseRequest, disburseExpenseRequest, transitionExpenseRequest } from '../src/domain/requests';
-import type { Actor } from '../src/domain/common';
+import { requirePositiveAmount, type Actor } from '../src/domain/common';
 import type { TxContext } from '../src/domain/store';
 import { ORG, admin, burst, draft, employee, finance, freshStore, key, notify, otherEmployee, seedAccount } from './helpers';
 
@@ -798,5 +798,78 @@ describe('transfer between accounts', () => {
     expect(outs.map(t => [t.balanceBefore, t.balanceAfter])).toEqual([[1000, 600], [600, 200]]);
     expect(new Set(store.dump('accountTransactions').map(t => t.referenceNumber)).size).toBe(2);
     expect(store.read('counters', 'transfers-2026')!.value).toBe(2);
+  });
+
+  it('requirePositiveAmount strictly rejects negative numbers, zero, and non-finite values', () => {
+    expect(() => requirePositiveAmount(-100)).toThrow();
+    expect(() => requirePositiveAmount(-0.01)).toThrow();
+    expect(() => requirePositiveAmount(0)).toThrow();
+    expect(() => requirePositiveAmount('not-a-number')).toThrow();
+    expect(requirePositiveAmount(100)).toBe(100);
+    expect(requirePositiveAmount('250.5')).toBe(250.5);
+  });
+
+  it('issueCustody records employeeEmail and settleCustodyItem allows settlement by matching email or name in org', async () => {
+    const store = freshStore();
+    seedAccount(store, 'cash', 5000);
+    const k = key();
+    const custodyRes = await issueCustody(
+      store,
+      finance,
+      {
+        orgId: ORG,
+        employeeId: 'emp_custom_hussein_99',
+        employeeName: 'حسين محمد',
+        employeeEmail: 'hussein@example.com',
+        amount: 1500,
+        sourceAccountId: 'cash',
+        notes: 'عهدة مشتريات للموظف حسين',
+      },
+      k,
+      now,
+    );
+    expect(custodyRes.value.employeeEmail).toBe('hussein@example.com');
+    expect(custodyRes.value.employeeId).toBe('emp_custom_hussein_99');
+
+    // Hussein logs in with his Firebase Auth UID (which does not equal emp_custom_hussein_99)
+    const husseinActor: Actor = {
+      id: 'firebase_uid_hussein_777',
+      name: 'حسين محمد',
+      email: 'hussein@example.com',
+      role: 'employee',
+      orgId: ORG,
+    };
+
+    // Hussein settles an invoice against his custody
+    const settlementRes = await settleCustodyItem(
+      store,
+      husseinActor,
+      {
+        custodyId: custodyRes.value.id,
+        amount: 500,
+        description: 'فاتورة أدوات مكتبية',
+        invoiceNumber: 'INV-001',
+      },
+      key(),
+      now,
+    );
+    expect(settlementRes.value.amount).toBe(500);
+    expect(settlementRes.value.employeeEmail).toBe('hussein@example.com');
+
+    const updatedCustody = store.read('custodies', custodyRes.value.id);
+    expect(updatedCustody?.remainingAmount).toBe(1000);
+    expect(updatedCustody?.settledAmount).toBe(500);
+
+    // Another employee from another company cannot settle Hussein's custody
+    const strangerActor: Actor = {
+      id: 'stranger_uid',
+      name: 'شخص غريب',
+      email: 'stranger@example.com',
+      role: 'employee',
+      orgId: 'OTHER_ORG',
+    };
+    await expect(
+      settleCustodyItem(store, strangerActor, { custodyId: custodyRes.value.id, amount: 100, description: 'forged' }, key(), now),
+    ).rejects.toMatchObject({ code: 'forbidden' });
   });
 });

@@ -427,6 +427,7 @@ export interface PettyCashCustody {
   employeeId: string;
   employeeName: string;
   employeePhone?: string;
+  employeeEmail?: string;
   totalAmount: number;
   remainingAmount: number;
   settledAmount: number;
@@ -453,6 +454,7 @@ export interface CustodySettlementItem {
   orgId: string;
   employeeId: string;
   employeeName: string;
+  employeeEmail?: string;
   amount: number;
   currency: string;
   serviceCategoryId?: string;

@@ -453,13 +453,25 @@ service cloud.firestore {
     // =========================================================================
     match /custodies/{custodyId} {
       function canReadCustody() {
-        return isSuperAdmin() || isFinance(resource.data.orgId) || resource.data.employeeId == request.auth.uid;
+        return isSuperAdmin() ||
+          isFinance(resource.data.orgId) ||
+          resource.data.employeeId == request.auth.uid ||
+          (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
+          (isOrgMember(resource.data.orgId) &&
+           exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
+           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName);
       }
       allow get: if isAuthenticated() && (isMissing() || canReadCustody());
       allow list: if isAuthenticated() && canReadCustody();
       allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
       allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged()) || (
-        resource.data.employeeId == request.auth.uid &&
+        (
+          resource.data.employeeId == request.auth.uid ||
+          (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
+          (isOrgMember(resource.data.orgId) &&
+           exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
+           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName)
+        ) &&
         request.resource.data.employeeId == resource.data.employeeId &&
         request.resource.data.totalAmount == resource.data.totalAmount &&
         request.resource.data.orgId == resource.data.orgId
@@ -471,11 +483,21 @@ service cloud.firestore {
       allow read: if isAuthenticated() && (
         isSuperAdmin() ||
         isFinance(resource.data.orgId) ||
-        resource.data.employeeId == request.auth.uid
+        resource.data.employeeId == request.auth.uid ||
+        (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
+        (isOrgMember(resource.data.orgId) &&
+         exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
+         get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName)
       );
       allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
       allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged()) || (
-        resource.data.employeeId == request.auth.uid &&
+        (
+          resource.data.employeeId == request.auth.uid ||
+          (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
+          (isOrgMember(resource.data.orgId) &&
+           exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
+           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName)
+        ) &&
         request.resource.data.employeeId == resource.data.employeeId &&
         request.resource.data.totalAmount == resource.data.totalAmount &&
         request.resource.data.orgId == resource.data.orgId
@@ -485,7 +507,13 @@ service cloud.firestore {
 
     match /custodySettlements/{settlementId} {
       function canReadSettlement() {
-        return isSuperAdmin() || isFinance(resource.data.orgId) || resource.data.employeeId == request.auth.uid;
+        return isSuperAdmin() ||
+          isFinance(resource.data.orgId) ||
+          resource.data.employeeId == request.auth.uid ||
+          (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
+          (isOrgMember(resource.data.orgId) &&
+           exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
+           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName);
       }
       allow get: if isAuthenticated() && (isMissing() || canReadSettlement());
       allow list: if isAuthenticated() && canReadSettlement();
@@ -493,12 +521,24 @@ service cloud.firestore {
       allow create: if isAuthenticated() && (
         isSuperAdmin() ||
         isFinance(request.resource.data.orgId) ||
-        (request.resource.data.employeeId == request.auth.uid &&
+        (
           isOrgMember(request.resource.data.orgId) &&
           request.resource.data.custodyId is string &&
           exists(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)) &&
-          get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.employeeId == request.auth.uid &&
-          get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.orgId == request.resource.data.orgId)
+          get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.orgId == request.resource.data.orgId &&
+          (
+            request.resource.data.employeeId == request.auth.uid ||
+            (request.resource.data.get('employeeEmail', '') != '' && request.resource.data.employeeEmail == request.auth.token.email) ||
+            request.resource.data.employeeId == get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.employeeId
+          ) &&
+          (
+            get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.employeeId == request.auth.uid ||
+            (get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.get('employeeEmail', '') != '' &&
+             get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.employeeEmail == request.auth.token.email) ||
+            (exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + request.resource.data.orgId)) &&
+             get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + request.resource.data.orgId)).data.userName == get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.employeeName)
+          )
+        )
       );
       allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged());
       allow delete: if isSuperAdmin() || isFinance(resource.data.orgId);

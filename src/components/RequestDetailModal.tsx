@@ -62,7 +62,9 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     replyClarification, 
     disburseRequest,
     paymentAccounts,
-    resolveParentBankAccount
+    resolveParentBankAccount,
+    activeOrgId,
+    activeOrg
   } = useApp();
 
   const [isEditing, setIsEditing] = useState(false);
@@ -115,7 +117,11 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     await actionGuard.run(scope, async (idempotencyKey) => {
       setIsUploadingInvoice(true);
       try {
-        const att = await processAndUploadInvoice(file, request.orgId || 'org-main', request.id);
+        const targetOrgId = request.orgId || (activeOrgId && activeOrgId !== 'all' ? activeOrgId : '') || activeOrg?.id || '';
+        if (!targetOrgId) {
+          throw new Error('تعذر تحديد الشركة المرتبطة بهذا الطلب لرفع الملف.');
+        }
+        const att = await processAndUploadInvoice(file, targetOrgId, request.id);
         const otherAttachments = (request.attachments || []).filter(
           a => !request.invoiceAttachment || a.id !== request.invoiceAttachment.id
         );

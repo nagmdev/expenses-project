@@ -166,9 +166,13 @@ export function downloadFileSafely(url: string, fileName = 'attachment'): void {
  */
 export async function processAndUploadInvoice(
   file: File,
-  orgId: string = 'org-main',
+  orgId: string,
   requestId?: string
 ): Promise<RequestAttachment> {
+  const cleanOrgId = (orgId || '').trim();
+  if (!cleanOrgId || cleanOrgId === 'org-main') {
+    throw new Error('تعذر رفع الملف: يجب تحديد الشركة أولاً لضمان عزل وتأمين الملفات.');
+  }
   const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const now = new Date();
   const dateFormatted = localToday(now); // the viewer's local day, like every displayed date
