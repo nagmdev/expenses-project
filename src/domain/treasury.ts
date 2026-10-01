@@ -779,6 +779,10 @@ export async function settleCustodyItem(
       throw new DomainError('forbidden', 'ليس لديك صلاحية تسوية هذه العهدة.');
     }
 
+    if (amount > Number(custody.remainingAmount || 0)) {
+      throw new DomainError('insufficient_funds', 'مبلغ التسوية أكبر من المبلغ المتبقي في العهدة.');
+    }
+
     // Computed from the committed custody, so two concurrent invoices can't both
     // subtract from the same stale "remaining" value.
     const remaining = toMoney(Math.max(0, Number(custody.remainingAmount || 0) - amount));

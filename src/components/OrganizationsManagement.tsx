@@ -2176,7 +2176,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 className="w-full text-xs bg-transparent outline-hidden text-slate-800"
               />
               {userSearch && (
-                <button onClick={() => setUserSearch('')} className="text-slate-400 hover:text-slate-600">
+                <button type="button" onClick={() => setUserSearch('')} className="text-slate-400 hover:text-slate-600 cursor-pointer">
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
@@ -2227,7 +2227,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
               resetFeedback.isError ? 'bg-rose-50 border border-rose-200 text-rose-800' : 'bg-emerald-50 border border-emerald-200 text-emerald-800'
             }`}>
               <span>{resetFeedback.message}</span>
-              <button onClick={() => setResetFeedback(null)} className="p-1 text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => setResetFeedback(null)} className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X className="h-3.5 w-3.5" />
               </button>
             </div>
@@ -3307,7 +3307,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 className="w-full text-xs bg-transparent outline-hidden text-slate-800"
               />
               {auditSearch && (
-                <button onClick={() => setAuditSearch('')} className="text-slate-400 hover:text-slate-600">
+                <button type="button" onClick={() => setAuditSearch('')} className="text-slate-400 hover:text-slate-600 cursor-pointer">
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
@@ -3428,7 +3428,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <Building2 className="h-4 w-4 text-emerald-600" />
                 <span>إضافة شركة / مؤسسة جديدة</span>
               </h3>
-              <button onClick={() => setIsOrgModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => setIsOrgModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -3534,7 +3534,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <Edit className="h-4 w-4 text-indigo-600" />
                 <span>تعديل وإعادة تسمية الشركة ({editingOrg.name})</span>
               </h3>
-              <button onClick={() => setEditingOrg(null)} className="p-1 text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => setEditingOrg(null)} className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -3668,7 +3668,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <UserPlus className="h-4 w-4 text-indigo-600" />
                 <span>تعيين موظف جديد وإنشاء حسابه</span>
               </h3>
-              <button onClick={() => setIsProvisionModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => setIsProvisionModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -4116,7 +4116,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   <span className="text-[11px] font-normal text-slate-400">تحديد سقف الميزانية، دورية الاستحقاق، المورد المعتمد، وبيانات السداد</span>
                 </div>
               </h3>
-              <button onClick={() => setIsServiceModalOpen(false)} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer">
+              <button type="button" onClick={() => setIsServiceModalOpen(false)} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -4428,7 +4428,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <Truck className="h-4 w-4 text-sky-600" />
                 <span>{editingVendor ? `تعديل وتسمية المورد (${editingVendor.name})` : 'تسجيل مورد جديد'}</span>
               </h3>
-              <button onClick={() => setIsVendorModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => setIsVendorModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -4685,7 +4685,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <Wallet className="h-4 w-4 text-amber-600" />
                 <span>{editingVault ? `تعديل وإعادة تسمية الخزينة (${editingVault.name})` : 'إضافة خزينة / حساب دفع جديد'}</span>
               </h3>
-              <button onClick={() => setIsVaultModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => setIsVaultModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X className="h-4 w-4" />
               </button>
             </div>
@@ -5005,6 +5005,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <span>إدارة حسابات السوبر أدمن (Super Admins) 👑</span>
               </h3>
               <button 
+                type="button"
                 onClick={() => setIsSuperAdminModalOpen(false)} 
                 className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
               >
@@ -5092,6 +5093,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 <span>سحب صلاحية المشرف العام وتعيينه بدور شركة</span>
               </h3>
               <button 
+                type="button"
                 onClick={() => setEditingSuperAdminEmail(null)} 
                 className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
               >

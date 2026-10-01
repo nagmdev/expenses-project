@@ -36,6 +36,7 @@ import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModa
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { newOperationKey } from '../utils/ids';
+import { showToast } from '../utils/toast';
 import { can } from '../utils/permissions';
 import {
   accountBalance,
@@ -470,11 +471,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     // The account shown selected is the one paid from; refuse a batch it cannot cover.
     const selectedAccount = batchAccount;
     if (!selectedAccount) {
-      alert('لا يوجد حساب خزينة نشط بعملة الطلبات المحددة. يرجى إضافة حساب أو تفعيله أولاً.');
+      showToast('لا يوجد حساب خزينة نشط بعملة الطلبات المحددة. يرجى إضافة حساب أو تفعيله أولاً.', 'warning');
       return;
     }
     if (batchShortfall) {
-      alert(batchShortfall);
+      showToast(batchShortfall, 'error');
       return;
     }
     const batchRequests = [...selectedBatchRequests];
@@ -530,7 +531,9 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
       if (paidCount > 0) summary.push(`تم صرف ${paidCount} طلب`);
       if (skippedCount > 0) summary.push(`تم تخطي ${skippedCount} (مصروف مسبقاً)`);
       if (failures.length > 0) summary.push(`فشل ${failures.length}:\n${failures.join('\n')}`);
-      if (summary.length > 0) alert(summary.join('\n'));
+      if (summary.length > 0) {
+        showToast(summary.join('\n'), failures.length > 0 ? 'warning' : 'success');
+      }
 
       if (failures.length === 0) {
         batchGuard.rotateKey();
@@ -625,7 +628,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
         setActiveAction('none');
       } catch (err) {
         console.error('[Approve Error]', err);
-        alert(errorText(err, 'حدث خطأ أثناء اعتماد الطلب.'));
+        showToast(errorText(err, 'حدث خطأ أثناء اعتماد الطلب.'), 'error');
       }
     });
   };
@@ -646,7 +649,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
         setActiveAction('none');
       } catch (err) {
         console.error('[Reject Error]', err);
-        alert(errorText(err, 'حدث خطأ أثناء رفض الطلب.'));
+        showToast(errorText(err, 'حدث خطأ أثناء رفض الطلب.'), 'error');
       }
     });
   };
@@ -667,7 +670,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
         setActiveAction('none');
       } catch (err) {
         console.error('[Clarification Error]', err);
-        alert(errorText(err, 'حدث خطأ أثناء إرسال الاستفسار.'));
+        showToast(errorText(err, 'حدث خطأ أثناء إرسال الاستفسار.'), 'error');
       }
     });
   };
@@ -707,11 +710,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
         setActiveAction('none');
         setDisburseNotes('');
         if (!outcome.changed) {
-          alert('تم صرف هذا الطلب مسبقاً، ولم يتم تنفيذ أي صرف إضافي.');
+          showToast('تم صرف هذا الطلب مسبقاً، ولم يتم تنفيذ أي صرف إضافي.', 'info');
         }
       } catch (err) {
         console.error('[Disbursement Error]', err);
-        alert(errorText(err, 'حدث خطأ أثناء تنفيذ الصرف.'));
+        showToast(errorText(err, 'حدث خطأ أثناء تنفيذ الصرف.'), 'error');
       }
     });
   };

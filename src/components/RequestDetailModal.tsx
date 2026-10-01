@@ -19,6 +19,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { processAndUploadInvoice } from '../utils/fileUpload';
+import { showToast } from '../utils/toast';
 import { useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { can } from '../utils/permissions';
@@ -108,7 +109,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     if (!file || !request) return;
 
     if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-      alert(`حجم الملف كبير جداً، يرجى اختيار ملف أقل من ${MAX_UPLOAD_MB} ميجابايت`);
+      showToast(`حجم الملف كبير جداً، يرجى اختيار ملف أقل من ${MAX_UPLOAD_MB} ميجابايت`, 'error');
       e.target.value = '';
       return;
     }
@@ -132,7 +133,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
         actionGuard.rotateKey(scope);
       } catch (err: any) {
         console.error('[DirectInvoiceUpload]', err);
-        alert('تعذر إرفاق صورة الفاتورة: ' + (err?.message || 'خطأ غير متوقع'));
+        showToast('تعذر إرفاق صورة الفاتورة: ' + (err?.message || 'خطأ غير متوقع'), 'error');
       } finally {
         setIsUploadingInvoice(false);
         e.target.value = '';
@@ -220,7 +221,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
         onClose();
       } catch (err: any) {
         console.error(`[RequestDetailModal] ${action} failed:`, err);
-        alert(err?.message || 'تعذر تنفيذ العملية');
+        showToast(err?.message || 'تعذر تنفيذ العملية', 'error');
       }
     });
   };

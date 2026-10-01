@@ -4,16 +4,60 @@ service firebase.storage {
     function isAuthenticated() {
       return request.auth != null;
     }
-    
+
+    function hasVerifiedEmail() {
+      return request.auth.token.get('email_verified', false) == true &&
+        request.auth.token.get('email', null) is string &&
+        request.auth.token.email != '';
+    }
+
+    function verifiedEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        firestore.exists(/databases/(default)/documents/super_admins/$(request.auth.uid)) ||
+        (hasVerifiedEmail() && (
+          firestore.exists(/databases/(default)/documents/super_admins/$(verifiedEmail())) ||
+          verifiedEmail() == 'mahmoud@tieapps.com'
+        ))
+      );
+    }
+
+    function profilePath() {
+      return /databases/(default)/documents/users/$(request.auth.uid);
+    }
+
+    function ownMemberPath(orgId) {
+      return /databases/(default)/documents/members/$(request.auth.uid + '_' + orgId);
+    }
+
+    function inOrgViaProfile(orgId) {
+      return firestore.exists(profilePath()) &&
+        firestore.get(profilePath()).data.get('orgId', null) == orgId &&
+        firestore.get(profilePath()).data.get('active', true) != false;
+    }
+
+    function inOrgViaMember(orgId) {
+      return firestore.exists(ownMemberPath(orgId)) &&
+        firestore.get(ownMemberPath(orgId)).data.get('orgId', null) == orgId &&
+        firestore.get(ownMemberPath(orgId)).data.get('active', true) != false;
+    }
+
+    function isOrgMember(orgId) {
+      return isSuperAdmin() || (isAuthenticated() && (inOrgViaProfile(orgId) || inOrgViaMember(orgId)));
+    }
+
     match /invoices/{orgId}/{fileName} {
-      allow read: if isAuthenticated();
-      allow write: if isAuthenticated() &&
+      allow read: if isOrgMember(orgId);
+      allow write: if isOrgMember(orgId) &&
         orgId != '' &&
         orgId != 'org-main' &&
         request.resource.size < 15 * 1024 * 1024 &&
         (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf');
     }
-    
+
     match /{allPaths=**} {
       allow read, write: if false;
     }

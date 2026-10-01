@@ -948,12 +948,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } else {
         setEmailSettings(DEFAULT_EMAIL_SETTINGS);
       }
-    }, err => console.warn('[Firebase] Email settings listener:', err?.message || err)));
+    }, err => {
+      if (err?.code !== 'permission-denied') {
+        console.warn('[Firebase] Email settings listener:', err?.message || err);
+      }
+    }));
 
     unsubs.push(onSnapshot(doc(db, 'system_settings', 'notification_recipients'), snap => {
       const emails = snap.exists() ? snap.data().emails : null;
       setPlatformRecipients({ loaded: true, emails: Array.isArray(emails) ? emails : snap.exists() ? [] : null });
-    }, err => console.warn('[Firebase] Notification recipients listener:', err?.message || err)));
+    }, err => {
+      if (err?.code !== 'permission-denied') {
+        console.warn('[Firebase] Notification recipients listener:', err?.message || err);
+      }
+    }));
 
     return () => unsubs.forEach(u => {
       try { u(); } catch {}

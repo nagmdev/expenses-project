@@ -528,7 +528,7 @@ export const UsersManagement: React.FC = () => {
             className="w-full text-xs bg-transparent outline-hidden text-slate-800 font-medium"
           />
           {searchQuery && (
-            <button onClick={() => setSearchQuery('')} className="text-slate-400 hover:text-slate-600">
+            <button type="button" onClick={() => setSearchQuery('')} className="text-slate-400 hover:text-slate-600 cursor-pointer">
               <X className="h-3.5 w-3.5" />
             </button>
           )}
@@ -603,7 +603,7 @@ export const UsersManagement: React.FC = () => {
           feedbackMessage.isError ? 'bg-rose-50 border border-rose-200 text-rose-800' : 'bg-emerald-50 border border-emerald-200 text-emerald-800'
         }`}>
           <span>{feedbackMessage.message}</span>
-          <button onClick={() => setFeedbackMessage(null)} className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer">
+          <button type="button" onClick={() => setFeedbackMessage(null)} className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer">
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
@@ -829,7 +829,7 @@ export const UsersManagement: React.FC = () => {
                 <Edit3 className="h-5 w-5 text-indigo-600" />
                 <span>تعديل بيانات المستخدم: {editingMember.userName}</span>
               </h3>
-              <button onClick={() => setIsEditModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1">
+              <button type="button" onClick={() => setIsEditModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer">
                 <X className="h-5 w-5" />
               </button>
             </div>
@@ -1017,7 +1017,7 @@ export const UsersManagement: React.FC = () => {
                 <Plus className="h-5 w-5 text-emerald-600" />
                 <span>إضافة مستخدم جديد للنظام</span>
               </h3>
-              <button onClick={() => setIsProvisionModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1">
+              <button type="button" onClick={() => setIsProvisionModalOpen(false)} className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer">
                 <X className="h-5 w-5" />
               </button>
             </div>

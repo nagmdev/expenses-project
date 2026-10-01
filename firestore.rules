@@ -472,9 +472,18 @@ service cloud.firestore {
            exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
            get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName)
         ) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt']) &&
         request.resource.data.employeeId == resource.data.employeeId &&
         request.resource.data.totalAmount == resource.data.totalAmount &&
-        request.resource.data.orgId == resource.data.orgId
+        request.resource.data.orgId == resource.data.orgId &&
+        request.resource.data.currency == resource.data.currency &&
+        request.resource.data.sourceAccountId == resource.data.sourceAccountId &&
+        request.resource.data.custodyNumber == resource.data.custodyNumber &&
+        request.resource.data.remainingAmount >= 0 &&
+        request.resource.data.remainingAmount <= resource.data.remainingAmount &&
+        request.resource.data.settledAmount >= resource.data.settledAmount &&
+        request.resource.data.totalAmount == request.resource.data.remainingAmount + request.resource.data.settledAmount + resource.data.get('returnedAmount', 0) &&
+        (request.resource.data.status == resource.data.status || (request.resource.data.remainingAmount == 0 && request.resource.data.status == 'settled'))
       );
       allow delete: if isSuperAdmin();
     }
@@ -498,9 +507,18 @@ service cloud.firestore {
            exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
            get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName)
         ) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt']) &&
         request.resource.data.employeeId == resource.data.employeeId &&
         request.resource.data.totalAmount == resource.data.totalAmount &&
-        request.resource.data.orgId == resource.data.orgId
+        request.resource.data.orgId == resource.data.orgId &&
+        request.resource.data.currency == resource.data.currency &&
+        request.resource.data.sourceAccountId == resource.data.sourceAccountId &&
+        request.resource.data.custodyNumber == resource.data.custodyNumber &&
+        request.resource.data.remainingAmount >= 0 &&
+        request.resource.data.remainingAmount <= resource.data.remainingAmount &&
+        request.resource.data.settledAmount >= resource.data.settledAmount &&
+        request.resource.data.totalAmount == request.resource.data.remainingAmount + request.resource.data.settledAmount + resource.data.get('returnedAmount', 0) &&
+        (request.resource.data.status == resource.data.status || (request.resource.data.remainingAmount == 0 && request.resource.data.status == 'settled'))
       );
       allow delete: if isSuperAdmin();
     }
@@ -526,6 +544,8 @@ service cloud.firestore {
           request.resource.data.custodyId is string &&
           exists(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)) &&
           get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.orgId == request.resource.data.orgId &&
+          request.resource.data.amount > 0 &&
+          request.resource.data.amount <= get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.remainingAmount &&
           (
             request.resource.data.employeeId == request.auth.uid ||
             (request.resource.data.get('employeeEmail', '') != '' && request.resource.data.employeeEmail == request.auth.token.email) ||
@@ -566,8 +586,24 @@ service cloud.firestore {
     // =========================================================================
     match /counters/{counterId} {
       allow get: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.value == 1;
-      allow update: if isAuthenticated() && request.resource.data.value == resource.data.value + 1;
+      allow create: if isAuthenticated() && request.resource.data.value == 1 && (
+        isSuperAdmin() ||
+        (counterId.matches('^(custodies|transfers)-[0-9]{4}$') && (
+          exists(profilePath()) && hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])
+        )) ||
+        (counterId.matches('^(requests|visa)-[0-9]{4}$') && (
+          exists(profilePath()) && get(profilePath()).data.get('active', true) != false && get(profilePath()).data.get('orgId', '') != ''
+        ))
+      );
+      allow update: if isAuthenticated() && request.resource.data.value == resource.data.value + 1 && (
+        isSuperAdmin() ||
+        (counterId.matches('^(custodies|transfers)-[0-9]{4}$') && (
+          exists(profilePath()) && hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])
+        )) ||
+        (counterId.matches('^(requests|visa)-[0-9]{4}$') && (
+          exists(profilePath()) && get(profilePath()).data.get('active', true) != false && get(profilePath()).data.get('orgId', '') != ''
+        ))
+      );
       allow delete: if false;
     }
 
@@ -594,7 +630,13 @@ service cloud.firestore {
       );
       allow update: if false;
       allow delete: if isAuthenticated() && (
-        isSuperAdmin() || (resource.data.orgId != '-' && isFinance(resource.data.orgId))
+        isSuperAdmin() || (
+          resource.data.orgId != '-' &&
+          isOrgAdmin(resource.data.orgId) &&
+          resource.data.entityCollection is string &&
+          resource.data.entityId is string &&
+          !exists(/databases/$(database)/documents/$(resource.data.entityCollection)/$(resource.data.entityId))
+        )
       );
     }
 
@@ -753,7 +795,10 @@ service cloud.firestore {
     // 16. SHARED SYSTEM SETTINGS (email notification settings)
     // =========================================================================
     match /system_settings/{settingId} {
-      allow read: if isAuthenticated();
+      allow read: if isSuperAdmin() || (isAuthenticated() && (
+        settingId == 'email_notifications' && exists(profilePath()) &&
+        hasOrgRole(get(profilePath()).data.get('orgId', ''), ['org_admin', 'finance'])
+      ));
       allow write: if isSuperAdmin();
     }
   }

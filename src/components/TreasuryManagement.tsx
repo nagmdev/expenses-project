@@ -43,6 +43,7 @@ import {
 import { useKeyedSubmitGuard, useSubmitGuard } from '../hooks/useSubmitGuard';
 import { isLegacyLinkedWallet, linkedParentIdOf, MAX_CUSTODY_RETURN_BATCH } from '../domain/treasury';
 import { isArchivedOrg, toMoney } from '../domain/common';
+import { showToast } from '../utils/toast';
 import { can } from '../utils/permissions';
 
 const errorText = (err: unknown, fallback: string) =>
@@ -499,7 +500,7 @@ export const TreasuryManagement: React.FC = () => {
         showNotice(editingAccount ? `تم حفظ تعديلات الحساب "${accName.trim()}".` : `تم إنشاء الحساب "${accName.trim()}" وتفعيله.`);
       } catch (err) {
         console.error(err);
-        alert(errorText(err, 'حدث خطأ أثناء حفظ بيانات الحساب.'));
+        showToast(errorText(err, 'حدث خطأ أثناء حفظ بيانات الحساب.'), 'error');
       }
     });
   };

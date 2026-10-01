@@ -24,6 +24,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { processAndUploadInvoice } from '../utils/fileUpload';
+import { showToast } from '../utils/toast';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { isArchivedOrg } from '../domain/common';
@@ -524,7 +525,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     if (!file) return;
 
     if (file.size > MAX_UPLOAD_BYTES) {
-      alert(FILE_TOO_LARGE);
+      showToast(FILE_TOO_LARGE, 'error');
       e.target.value = '';
       return;
     }
@@ -532,7 +533,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
     const uploadOrgId = selectedOrgId || (activeOrgId && activeOrgId !== 'all' ? activeOrgId : '') || activeOrg?.id || (creatableOrgs[0]?.id || '');
     if (!uploadOrgId) {
-      alert('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.');
+      showToast('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.', 'warning');
       e.target.value = '';
       return;
     }
@@ -543,7 +544,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       setInvoiceAttachment(attachment);
     } catch (err: any) {
       console.error('[FileUpload Error]', err);
-      alert(err?.message || 'تعذر معالجة أو رفع الملف، يرجى المحاولة ثانية');
+      showToast(err?.message || 'تعذر معالجة أو رفع الملف، يرجى المحاولة ثانية', 'error');
     } finally {
       setIsUploadingInvoice(false);
       e.target.value = '';
@@ -555,7 +556,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     if (!file) return;
 
     if (file.size > MAX_UPLOAD_BYTES) {
-      alert(FILE_TOO_LARGE);
+      showToast(FILE_TOO_LARGE, 'error');
       e.target.value = '';
       return;
     }
@@ -563,7 +564,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
     const uploadOrgId = selectedOrgId || (activeOrgId && activeOrgId !== 'all' ? activeOrgId : '') || activeOrg?.id || (creatableOrgs[0]?.id || '');
     if (!uploadOrgId) {
-      alert('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.');
+      showToast('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.', 'warning');
       e.target.value = '';
       return;
     }
@@ -574,7 +575,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       setVisaDocumentAttachment(attachment);
     } catch (err: any) {
       console.error('[VisaDocUpload Error]', err);
-      alert(err?.message || 'تعذر رفع مستند التأشيرة، يرجى المحاولة ثانية');
+      showToast(err?.message || 'تعذر رفع مستند التأشيرة، يرجى المحاولة ثانية', 'error');
     } finally {
       setIsUploadingVisaDoc(false);
       e.target.value = '';
@@ -586,7 +587,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     if (!file) return;
 
     if (file.size > MAX_UPLOAD_BYTES) {
-      alert(FILE_TOO_LARGE);
+      showToast(FILE_TOO_LARGE, 'error');
       e.target.value = '';
       return;
     }
@@ -594,7 +595,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
     const uploadOrgId = selectedOrgId || (activeOrgId && activeOrgId !== 'all' ? activeOrgId : '') || activeOrg?.id || (creatableOrgs[0]?.id || '');
     if (!uploadOrgId) {
-      alert('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.');
+      showToast('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.', 'warning');
       e.target.value = '';
       return;
     }
@@ -605,7 +606,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       setInstallmentTransferAttachment(attachment);
     } catch (err: any) {
       console.error('[InstallmentTransferUpload Error]', err);
-      alert(err?.message || 'تعذر رفع سكرين تحويل سداد القسط، يرجى المحاولة ثانية');
+      showToast(err?.message || 'تعذر رفع سكرين تحويل سداد القسط، يرجى المحاولة ثانية', 'error');
     } finally {
       setIsUploadingInstallmentTransfer(false);
       e.target.value = '';
@@ -617,7 +618,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     if (!file) return;
 
     if (file.size > MAX_UPLOAD_BYTES) {
-      alert(FILE_TOO_LARGE);
+      showToast(FILE_TOO_LARGE, 'error');
       e.target.value = '';
       return;
     }
@@ -625,7 +626,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
     const uploadOrgId = selectedOrgId || (activeOrgId && activeOrgId !== 'all' ? activeOrgId : '') || activeOrg?.id || (creatableOrgs[0]?.id || '');
     if (!uploadOrgId) {
-      alert('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.');
+      showToast('يرجى اختيار الشركة أولاً قبل إرفاق المستندات.', 'warning');
       e.target.value = '';
       return;
     }
@@ -636,7 +637,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       setWalletTransferAttachment(attachment);
     } catch (err: any) {
       console.error('[WalletTransferUpload Error]', err);
-      alert(err?.message || 'تعذر رفع سكرين شحن المحفظة، يرجى المحاولة ثانية');
+      showToast(err?.message || 'تعذر رفع سكرين شحن المحفظة، يرجى المحاولة ثانية', 'error');
     } finally {
       setIsUploadingWalletTransfer(false);
       e.target.value = '';

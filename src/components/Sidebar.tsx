@@ -149,7 +149,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = true, onClose }) => {
           <div className="flex items-center justify-between pb-2 border-b border-slate-100 lg:hidden">
             <span className="font-extrabold text-sm text-slate-800">القائمة الرئيسية</span>
             {onClose && (
-              <button onClick={onClose} aria-label="إغلاق القائمة" className="p-1 rounded-lg text-slate-400 hover:bg-slate-100">
+              <button type="button" onClick={onClose} aria-label="إغلاق القائمة" className="p-1 rounded-lg text-slate-400 hover:bg-slate-100 cursor-pointer">
                 <X className="h-5 w-5" />
               </button>
             )}

@@ -1,8 +1,14 @@
 # مصروفي — Expense System
 
-- **Data integrity, idempotency & deployment steps:** see [docs/05-data-integrity-and-idempotency.md](docs/05-data-integrity-and-idempotency.md) — the updated `firestore.rules` must be deployed together with this version.
-- **Security fixes (profile escalation, email relay, access revocation) — deploy order and notes:** [docs/06-security-rules-deploy.md](docs/06-security-rules-deploy.md).
-- Tests: `npm test`.
+- **Architecture & Source of Truth:** Cloud Firestore is the single and sole production source of truth for all business data, permissions, and tenant isolation.
+- **Standalone Express API (`server/`):** Kept exclusively as a local offline reference and development testing tool. It is strictly guarded against execution in production environments (`NODE_ENV === 'production'`).
+- **Data integrity, idempotency & deployment steps:** see [docs/05-data-integrity-and-idempotency.md](docs/05-data-integrity-and-idempotency.md) — the updated `firestore.rules` and `storage.rules` must be deployed together with this version.
+- **Security fixes & Rules hardening:**
+  - **Storage Rules:** Strict multi-tenant isolation via Firestore cross-service checks (`isOrgMember(orgId)`).
+  - **Custody & Settlements:** Field whitelisting, mathematical balance invariants, and settlement amount guards at both domain and rules layers.
+  - **Sequence & Uniqueness:** Sequence counters protected from unauthorized incrementing; uniqueKeys deletion strictly tied to entity removal.
+  - **UI/UX:** Zero browser `alert()` popups; native animated Toast notification system; full button `type` attribute compliance.
+- **Tests:** `npm test`.
 
 ---
 

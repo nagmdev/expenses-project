@@ -159,6 +159,15 @@ describe('custodies', () => {
     expect(custody.settledAmount).toBe(700);
   });
 
+  it('cannot settle an amount greater than the remaining balance', async () => {
+    const store = freshStore();
+    seedAccount(store, 'cash', 5000);
+    const c = await issue(store, key(), 500);
+    await expect(
+      settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 600, description: 'too much' }, key(), now),
+    ).rejects.toMatchObject({ code: 'insufficient_funds' });
+  });
+
   it('issue + replenish of the same custody are BOTH kept in the ledger (never "de-duplicated")', async () => {
     const store = freshStore();
     seedAccount(store, 'cash', 5000);

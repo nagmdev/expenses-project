@@ -663,8 +663,9 @@ export const VendorsManagement: React.FC = () => {
                 {editingProvider ? 'تعديل بيانات مقدم الخدمة' : 'إضافة مقدم خدمة جديد'}
               </h3>
               <button 
+                type="button"
                 onClick={() => setIsModalOpen(false)}
-                className="p-1 text-slate-400 hover:text-slate-600"
+                className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
               >
                 <X className="h-4 w-4" />
               </button>

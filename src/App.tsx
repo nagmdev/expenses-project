@@ -27,7 +27,8 @@ const FirebaseConfigModal = lazy(() => import('./components/FirebaseConfigModal'
 const SettingsManagement = lazy(() => import('./components/SettingsManagement').then(m => ({ default: m.SettingsManagement })));
 const ProfileManagement = lazy(() => import('./components/ProfileManagement').then(m => ({ default: m.ProfileManagement })));
 const VisaManagement = lazy(() => import('./components/VisaManagement').then(m => ({ default: m.VisaManagement })));
-const UsersManagement = lazy(() => import('./components/UsersManagement').then(m => ({ default: m.UsersManagement })));
+import { UsersManagement } from './components/UsersManagement';
+import { ToastContainer } from './components/ToastContainer';
 
 // Ultra-fast lightweight tab loading skeleton
 const TabLoadingFallback: React.FC = () => (
@@ -654,6 +655,7 @@ const MainApp: React.FC = () => {
         نظام إدارة المصروفات والعهد متعدد الشركات © 2026 — بيئة مشفرة ومعزولة مصرفياً
       </footer>
 
+      <ToastContainer />
     </div>
   );
 };

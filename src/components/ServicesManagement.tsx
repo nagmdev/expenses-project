@@ -730,6 +730,7 @@ export const ServicesManagement: React.FC = () => {
                 </div>
               </h3>
               <button
+                type="button"
                 onClick={() => setIsAddModalOpen(false)}
                 className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
               >
