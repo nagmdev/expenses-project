@@ -882,3 +882,144 @@ describe('transfer between accounts', () => {
     ).rejects.toMatchObject({ code: 'forbidden' });
   });
 });
+
+describe('Custody Settlement Math & Invariants Test Matrix', () => {
+  const issueCustodyHelper = (store: ReturnType<typeof freshStore>, amount = 1000) =>
+    issueCustody(store, finance, {
+      orgId: ORG,
+      employeeId: employee.id,
+      employeeName: employee.name,
+      employeeEmail: employee.email,
+      amount,
+      sourceAccountId: 'cash',
+    }, key(), now);
+
+  it('multi-step consecutive partial settlements until fully settled (1000 -> 700 -> 300 -> 0)', async () => {
+    const store = freshStore();
+    seedAccount(store, 'cash', 10_000);
+    const c = await issueCustodyHelper(store, 1000);
+
+    // Initial state invariant: total = remaining + settled + returned
+    let custody = store.read('custodies', c.value.id)!;
+    expect(custody.status).toBe('active');
+    expect(custody.totalAmount).toBe(1000);
+    expect(custody.remainingAmount).toBe(1000);
+    expect(custody.settledAmount).toBe(0);
+    expect(custody.returnedAmount || 0).toBe(0);
+    expect(custody.totalAmount).toBe(custody.remainingAmount + custody.settledAmount + (custody.returnedAmount || 0));
+
+    // Step 1: First partial settlement: 300
+    await settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 300, description: 'دفعة أولى - بنزين' }, key(), now);
+    custody = store.read('custodies', c.value.id)!;
+    expect(custody.status).toBe('active');
+    expect(custody.settledAmount).toBe(300);
+    expect(custody.remainingAmount).toBe(700);
+    expect(custody.totalAmount).toBe(custody.remainingAmount + custody.settledAmount + (custody.returnedAmount || 0));
+
+    // Step 2: Second partial settlement: 400
+    await settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 400, description: 'دفعة ثانية - صيانة' }, key(), now);
+    custody = store.read('custodies', c.value.id)!;
+    expect(custody.status).toBe('active');
+    expect(custody.settledAmount).toBe(700);
+    expect(custody.remainingAmount).toBe(300);
+    expect(custody.totalAmount).toBe(custody.remainingAmount + custody.settledAmount + (custody.returnedAmount || 0));
+
+    // Step 3: Final settlement of exact remainder: 300
+    await settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 300, description: 'تصفية نهائية - أدوات' }, key(), now);
+    custody = store.read('custodies', c.value.id)!;
+    expect(custody.status).toBe('settled');
+    expect(custody.settledAmount).toBe(1000);
+    expect(custody.remainingAmount).toBe(0);
+    expect(custody.settledAt).toBeDefined();
+    expect(custody.totalAmount).toBe(custody.remainingAmount + custody.settledAmount + (custody.returnedAmount || 0));
+
+    // Step 4: Attempting any further settlement on settled custody is rejected
+    await expect(
+      settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 10, description: 'محاولة بعد التصفية' }, key(), now)
+    ).rejects.toMatchObject({ code: 'insufficient_funds' });
+  });
+
+  it('interleaving partial settlement, replenishment, and remainder return preserves the mathematical invariant', async () => {
+    const store = freshStore();
+    seedAccount(store, 'cash', 10_000);
+    const c = await issueCustodyHelper(store, 1000);
+
+    // Partial settlement of 400 -> remaining 600
+    await settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 400, description: 'شراء ورق' }, key(), now);
+    let custody = store.read('custodies', c.value.id)!;
+    expect(custody.settledAmount).toBe(400);
+    expect(custody.remainingAmount).toBe(600);
+    expect(custody.totalAmount).toBe(1000);
+
+    // Finance replenishes the custody with 500 from cash account
+    await replenishCustody(store, finance, { custodyId: c.value.id, amount: 500, sourceAccountId: 'cash' }, key(), now);
+    custody = store.read('custodies', c.value.id)!;
+    expect(custody.totalAmount).toBe(1500);
+    expect(custody.remainingAmount).toBe(1100);
+    expect(custody.settledAmount).toBe(400);
+    expect(custody.status).toBe('active');
+    expect(custody.totalAmount).toBe(custody.remainingAmount + custody.settledAmount + (custody.returnedAmount || 0));
+
+    // Another partial settlement of 300 -> remaining 800
+    await settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 300, description: 'صيانة طابعة' }, key(), now);
+    custody = store.read('custodies', c.value.id)!;
+    expect(custody.remainingAmount).toBe(800);
+    expect(custody.settledAmount).toBe(700);
+
+    // Return remainder of 800 back to the treasury
+    const returnRes = await returnCustodyRemainders(store, finance, { custodyIds: [c.value.id] }, key(), now);
+    expect(returnRes.value.totalReturned).toBe(800);
+
+    custody = store.read('custodies', c.value.id)!;
+    expect(custody.status).toBe('settled');
+    expect(custody.remainingAmount).toBe(0);
+    expect(custody.returnedAmount).toBe(800);
+    expect(custody.settledAmount).toBe(700);
+    expect(custody.totalAmount).toBe(1500);
+    expect(custody.totalAmount).toBe(custody.remainingAmount + custody.settledAmount + (custody.returnedAmount || 0));
+  });
+
+  it('5 concurrent settlements of 200 on 1000 total converge with 0 remaining and no lost updates', async () => {
+    const store = freshStore();
+    seedAccount(store, 'cash', 10_000);
+    const c = await issueCustodyHelper(store, 1000);
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 200, description: `بند ${i + 1}` }, key(), now)
+      )
+    );
+
+    expect(results).toHaveLength(5);
+    const custody = store.read('custodies', c.value.id)!;
+    expect(custody.settledAmount).toBe(1000);
+    expect(custody.remainingAmount).toBe(0);
+    expect(custody.status).toBe('settled');
+    expect(store.dump('custodySettlements').filter(s => s.custodyId === c.value.id)).toHaveLength(5);
+  });
+
+  it('oversubscribed concurrent settlements: only valid subsets succeed without overdrawing', async () => {
+    const store = freshStore();
+    seedAccount(store, 'cash', 10_000);
+    const c = await issueCustodyHelper(store, 1000);
+
+    // 3 parallel settlements of 400 each (total 1200 > 1000)
+    const outcomes = await Promise.allSettled([
+      settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 400, description: '1' }, key(), now),
+      settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 400, description: '2' }, key(), now),
+      settleCustodyItem(store, employee, { custodyId: c.value.id, amount: 400, description: '3' }, key(), now),
+    ]);
+
+    const succeeded = outcomes.filter(o => o.status === 'fulfilled');
+    const failed = outcomes.filter(o => o.status === 'rejected');
+
+    expect(succeeded).toHaveLength(2);
+    expect(failed).toHaveLength(1);
+
+    const custody = store.read('custodies', c.value.id)!;
+    expect(custody.settledAmount).toBe(800);
+    expect(custody.remainingAmount).toBe(200);
+    expect(custody.status).toBe('active');
+    expect(custody.remainingAmount).toBeGreaterThanOrEqual(0);
+  });
+});

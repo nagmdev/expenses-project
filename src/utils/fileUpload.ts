@@ -1,4 +1,4 @@
-import { getStorageInstance, ref, uploadBytes, getDownloadURL } from '../lib/firebase';
+import { getStorageInstance, ref, uploadBytes, getDownloadURL, deleteObject } from '../lib/firebase';
 import { RequestAttachment } from '../types';
 import { newId, uuid } from './ids';
 import { localToday } from './requestUi';
@@ -161,8 +161,9 @@ export function downloadFileSafely(url: string, fileName = 'attachment'): void {
 
 /**
  * Upload an invoice or receipt file.
- * Handles compression for images, attempts Firebase Storage upload (free Spark plan),
- * and seamlessly falls back to ultra-lightweight DataURL.
+ * Handles compression for images, uploads to Firebase Storage with strict tenant pathing,
+ * and records metadata.
+ * Fails explicitly if storage upload cannot be completed (no silent base64 fallback).
  */
 export async function processAndUploadInvoice(
   file: File,
@@ -173,24 +174,26 @@ export async function processAndUploadInvoice(
   if (!cleanOrgId || cleanOrgId === 'org-main') {
     throw new Error('تعذر رفع الملف: يجب تحديد الشركة أولاً لضمان عزل وتأمين الملفات.');
   }
+
   const cleanName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const now = new Date();
-  const dateFormatted = localToday(now); // the viewer's local day, like every displayed date
+  const dateFormatted = localToday(now);
   const isImage = file.type.startsWith('image/');
   const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 
-  let finalUrl = '';
+  if (!isImage && !isPdf) {
+    throw new Error('نوع الملف غير مدعوم. يُسمح فقط برفع الصور (PNG, JPG) ومستندات PDF.');
+  }
+
   let finalSize = formatFileSize(file.size);
   let fileType = isPdf ? 'pdf' : (file.type.includes('png') ? 'png' : 'jpg');
 
   // Step 1: Compress if image
   let blobToUpload: Blob = file;
-  let fallbackDataUrl = '';
 
   if (isImage) {
     try {
       const compressed = await compressImage(file);
-      fallbackDataUrl = compressed.dataUrl;
       finalSize = compressed.sizeString;
       blobToUpload = dataUrlToBlob(compressed.dataUrl);
     } catch (compressionErr) {
@@ -198,46 +201,33 @@ export async function processAndUploadInvoice(
     }
   }
 
-  // Step 2: Attempt Firebase Storage upload (Free Spark tier up to 5GB)
-  let storageUploadSucceeded = false;
-  try {
-    const storage = getStorageInstance();
-    if (storage) {
-      const storagePath = `invoices/${orgId}/${requestId || 'new'}_${uuid()}_${cleanName}`;
-      const storageRef = ref(storage, storagePath);
-      
-      const snapshot = await uploadBytes(storageRef, blobToUpload, {
-        contentType: blobToUpload.type || file.type,
-        customMetadata: {
-          originalName: file.name,
-          orgId,
-          uploadedAt: now.toISOString(),
-        }
-      });
-
-      finalUrl = await getDownloadURL(snapshot.ref);
-      storageUploadSucceeded = true;
-    }
-  } catch (storageErr) {
-    console.warn('[Firebase Storage] Direct upload not available or rules restricted, falling back to data URL:', storageErr);
+  // Step 2: Upload to Firebase Storage
+  const storage = getStorageInstance();
+  if (!storage) {
+    throw new Error('تعذر رفع المستند: خدمة التخزين السحابية (Firebase Storage) غير متصلة أو غير مهيأة.');
   }
 
-  // Step 3: Fallback if Storage was not used or failed
-  if (!storageUploadSucceeded || !finalUrl) {
-    if (fallbackDataUrl) {
-      finalUrl = fallbackDataUrl;
-    } else {
-      if (file.size > 800 * 1024) {
-        throw new Error(`حجم ملف المستند كبير (${formatFileSize(file.size)}). لضمان حفظ الملف بشكل دائم ومؤكد، يرجى رفع ملف PDF أقل من 750 كيلوبايت أو تصوير الفاتورة كصورة عادية (حيث تُضغط الصور تلقائياً لأعلى جودة وأصغر حجم).`);
+  const storagePath = `invoices/${cleanOrgId}/${requestId || 'new'}_${uuid()}_${cleanName}`;
+  const storageRef = ref(storage, storagePath);
+
+  let finalUrl = '';
+  try {
+    const snapshot = await uploadBytes(storageRef, blobToUpload, {
+      contentType: blobToUpload.type || file.type || (isPdf ? 'application/pdf' : 'image/jpeg'),
+      customMetadata: {
+        originalName: file.name,
+        orgId: cleanOrgId,
+        uploadedAt: now.toISOString(),
       }
-      // Read raw as DataURL
-      finalUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (e) => resolve(e.target?.result as string);
-        reader.onerror = () => reject(new Error('فشل قراءة الملف'));
-        reader.readAsDataURL(file);
-      });
-    }
+    });
+
+    finalUrl = await getDownloadURL(snapshot.ref);
+  } catch (storageErr: any) {
+    console.error('[Firebase Storage] Upload failed:', storageErr);
+    const reason = storageErr?.message ? ` (${storageErr.message})` : '';
+    throw new Error(
+      `فشل رفع المستند إلى وحدة التخزين السحابية الآمنة${reason}. يرجى التحقق من الاتصال بالإنترنت وصلاحيات حسابك وإعادة المحاولة.`
+    );
   }
 
   return {
@@ -246,6 +236,20 @@ export async function processAndUploadInvoice(
     size: finalSize,
     type: fileType,
     url: finalUrl,
+    storagePath,
     uploadedAt: dateFormatted,
   };
+}
+
+/**
+ * Safely delete an attachment file from Firebase Storage.
+ */
+export async function deleteAttachmentFile(storagePath: string): Promise<void> {
+  if (!storagePath) return;
+  const storage = getStorageInstance();
+  if (!storage) {
+    throw new Error('تعذر حذف المستند: وحدة التخزين السحابية غير متصلة.');
+  }
+  const storageRef = ref(storage, storagePath);
+  await deleteObject(storageRef);
 }

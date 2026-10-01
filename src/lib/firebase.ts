@@ -49,6 +49,7 @@ import {
   ref,
   uploadBytes,
   getDownloadURL,
+  deleteObject,
   type FirebaseStorage
 } from 'firebase/storage';
 
@@ -274,7 +275,7 @@ export function getStorageInstance(): FirebaseStorage | null {
   return s;
 }
 
-export { ref, uploadBytes, getDownloadURL };
+export { ref, uploadBytes, getDownloadURL, deleteObject };
 
 // Firebase Authentication
 export const auth = app ? getAuth(app) : getAuth();

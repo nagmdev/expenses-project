@@ -124,6 +124,7 @@ export interface RequestAttachment {
   size: string;
   type: string;
   url?: string;
+  storagePath?: string;
   uploadedAt: string;
 }
 

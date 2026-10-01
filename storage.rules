@@ -45,17 +45,27 @@ service firebase.storage {
         firestore.get(ownMemberPath(orgId)).data.get('active', true) != false;
     }
 
+    function hasOrgRole(orgId, roles) {
+      return (inOrgViaProfile(orgId) && firestore.get(profilePath()).data.get('role', null) in roles) ||
+        (inOrgViaMember(orgId) && firestore.get(ownMemberPath(orgId)).data.get('role', null) in roles);
+    }
+
     function isOrgMember(orgId) {
       return isSuperAdmin() || (isAuthenticated() && (inOrgViaProfile(orgId) || inOrgViaMember(orgId)));
     }
 
+    function canDeleteAttachment(orgId) {
+      return isSuperAdmin() || (isAuthenticated() && hasOrgRole(orgId, ['org_admin', 'finance']));
+    }
+
     match /invoices/{orgId}/{fileName} {
       allow read: if isOrgMember(orgId);
-      allow write: if isOrgMember(orgId) &&
+      allow create, update: if isOrgMember(orgId) &&
         orgId != '' &&
         orgId != 'org-main' &&
         request.resource.size < 15 * 1024 * 1024 &&
         (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf');
+      allow delete: if canDeleteAttachment(orgId);
     }
 
     match /{allPaths=**} {

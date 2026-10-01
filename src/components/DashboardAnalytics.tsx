@@ -29,6 +29,7 @@ import {
   Cell 
 } from 'recharts';
 import { ExpenseRequest, isServiceMatchingOrg } from '../types';
+import { aggregateMetricsByCurrency, normalizeCurrency } from '../domain/analytics';
 
 interface DashboardAnalyticsProps {
   onSelectRequest: (request: ExpenseRequest) => void;
@@ -247,103 +248,43 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
 
   // Financial Metrics
   const baseCurrency = activeOrg?.currency || 'EGP';
-  const currencyOf = (c?: string | null) => ((c || '').trim() || baseCurrency).toUpperCase();
+  const currencyOf = useCallback((c?: string | null) => normalizeCurrency(c, baseCurrency), [baseCurrency]);
 
   const metricsByCurrency = useMemo(() => {
-    const map = new Map<string, {
-      currency: string;
-      disbursedRequests: number;
-      disbursedCount: number;
-      settledCustodies: number;
-      settledCount: number;
-      totalActual: number;
-      approvedRequests: number;
-      approvedCount: number;
-      pendingRequests: number;
-      pendingCount: number;
-    }>();
-
-    const getRow = (cur: string) => {
-      let row = map.get(cur);
-      if (!row) {
-        row = {
-          currency: cur,
-          disbursedRequests: 0,
-          disbursedCount: 0,
-          settledCustodies: 0,
-          settledCount: 0,
-          totalActual: 0,
-          approvedRequests: 0,
-          approvedCount: 0,
-          pendingRequests: 0,
-          pendingCount: 0,
-        };
-        map.set(cur, row);
-      }
-      return row;
-    };
-
-    filteredRequests.forEach(r => {
-      const cur = currencyOf(r.currency);
-      const row = getRow(cur);
-      if (r.status === 'disbursed') {
-        row.disbursedRequests += Number(r.amount || 0);
-        row.disbursedCount += 1;
-        row.totalActual += Number(r.amount || 0);
-      } else if (r.status === 'approved') {
-        row.approvedRequests += Number(r.amount || 0);
-        row.approvedCount += 1;
-      } else if (r.status === 'pending') {
-        row.pendingRequests += Number(r.amount || 0);
-        row.pendingCount += 1;
-      }
+    return aggregateMetricsByCurrency({
+      requests: filteredRequests,
+      settlements: filteredSettlements,
+      custodies: filteredCustodies,
+      baseCurrency,
     });
-
-    filteredSettlements.forEach(s => {
-      const cur = currencyOf(s.currency);
-      const row = getRow(cur);
-      row.settledCustodies += Number(s.amount || 0);
-      row.settledCount += 1;
-      row.totalActual += Number(s.amount || 0);
-    });
-
-    const mainCur = currencyOf(baseCurrency);
-    const sorted = Array.from(map.values()).sort((a, b) =>
-      a.currency === mainCur ? -1 : b.currency === mainCur ? 1 : a.currency.localeCompare(b.currency)
-    );
-    if (sorted.length === 0) {
-      sorted.push(getRow(mainCur));
-    }
-    return sorted;
-  }, [filteredRequests, filteredSettlements, baseCurrency]);
+  }, [filteredRequests, filteredSettlements, filteredCustodies, baseCurrency]);
 
   const primaryMetrics = metricsByCurrency[0];
   const secondaryMetrics = metricsByCurrency.slice(1);
+  const currency = primaryMetrics.currency;
 
-  const disbursedRequests = filteredRequests.filter(r => r.status === 'disbursed');
+  const disbursedRequests = filteredRequests.filter(r => r.status === 'disbursed' && currencyOf(r.currency) === currency);
   const totalDisbursedRequests = primaryMetrics.disbursedRequests;
   const totalSettledCustodies = primaryMetrics.settledCustodies;
   const totalActualExpenses = primaryMetrics.totalActual;
 
   // Requests Pending & Approved
-  const approvedRequests = filteredRequests.filter(r => r.status === 'approved');
+  const approvedRequests = filteredRequests.filter(r => r.status === 'approved' && currencyOf(r.currency) === currency);
   const totalApprovedAwaitingDisbursement = primaryMetrics.approvedRequests;
 
-  const pendingRequests = filteredRequests.filter(r => r.status === 'pending');
+  const pendingRequests = filteredRequests.filter(r => r.status === 'pending' && currencyOf(r.currency) === currency);
   const totalPending = primaryMetrics.pendingRequests;
 
-  const clarificationRequests = filteredRequests.filter(r => r.status === 'clarification_requested');
-  const rejectedRequests = filteredRequests.filter(r => r.status === 'rejected');
+  const clarificationRequests = filteredRequests.filter(r => r.status === 'clarification_requested' && currencyOf(r.currency) === currency);
+  const rejectedRequests = filteredRequests.filter(r => r.status === 'rejected' && currencyOf(r.currency) === currency);
 
-  // Custodies Breakdown
-  const activeCustodies = filteredCustodies.filter(c => c.status === 'active');
-  const totalActiveCustodiesRemaining = activeCustodies.reduce((sum, c) => sum + Number(c.remainingAmount || 0), 0);
-  const totalCustodiesIssued = filteredCustodies.reduce((sum, c) => sum + Number(c.totalAmount || 0), 0);
-  // The custody widget reconciles on the same custodies: issued = still with employees
-  // + settled by invoices + returned to the treasury (returnCustodyRemainders).
-  const totalCustodiesSettledByInvoices = filteredCustodies.reduce((sum, c) => sum + Number(c.settledAmount || 0), 0);
-  const totalCustodiesReturned = filteredCustodies.reduce((sum, c) => sum + Number(c.returnedAmount || 0), 0);
-  const totalCustodiesInHand = filteredCustodies.reduce((sum, c) => sum + Math.max(0, Number(c.remainingAmount || 0)), 0);
+  // Custodies Breakdown (Primary Currency)
+  const activeCustodiesCount = primaryMetrics.activeCustodiesCount;
+  const totalActiveCustodiesRemaining = primaryMetrics.custodiesInHand;
+  const totalCustodiesIssued = primaryMetrics.custodiesIssued;
+  const totalCustodiesSettledByInvoices = primaryMetrics.custodiesSettled;
+  const totalCustodiesReturned = primaryMetrics.custodiesReturned;
+  const totalCustodiesInHand = primaryMetrics.custodiesInHand;
 
   // Total budget
   const totalBudget = activeOrgId === 'all' 
@@ -352,17 +293,16 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
 
   const remainingBudget = Math.max(0, totalBudget - totalActualExpenses);
   const budgetUtilization = totalBudget > 0 ? Math.min(100, Math.round((totalActualExpenses / totalBudget) * 100)) : 0;
-  const currency = primaryMetrics.currency;
 
-  // Chart 1: Expenses by Service Category (Combines Requests + Custody Settlements)
+  // Chart 1: Expenses by Service Category (Combines Requests + Custody Settlements for active currency)
   const serviceChartData = useMemo(() => {
     return currentOrgServices.map(srv => {
       const requestsSpent = filteredRequests
-        .filter(r => r.serviceCategoryId === srv.id && r.status === 'disbursed')
+        .filter(r => r.serviceCategoryId === srv.id && r.status === 'disbursed' && currencyOf(r.currency) === currency)
         .reduce((sum, r) => sum + r.amount, 0);
 
       const custodySpent = filteredSettlements
-        .filter(s => s.serviceCategoryId === srv.id)
+        .filter(s => s.serviceCategoryId === srv.id && currencyOf(s.currency) === currency)
         .reduce((sum, s) => sum + Number(s.amount || 0), 0);
 
       const totalSpent = requestsSpent + custodySpent;
@@ -376,9 +316,9 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
         budget: srv.budgetLimit || 0,
       };
     }).filter(item => item.spent > 0 || item.budget > 0);
-  }, [currentOrgServices, filteredRequests, filteredSettlements]);
+  }, [currentOrgServices, filteredRequests, filteredSettlements, currency, currencyOf]);
 
-  // Chart 2: Status Distribution (All financial operations)
+  // Chart 2: Status Distribution (All financial operations in active currency)
   const statusColors: Record<string, string> = {
     'طلبات تم صرفها': '#10b981',
     'فواتير عُهد مسواة': '#059669',
@@ -392,30 +332,30 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
   const statusData = useMemo(() => {
     return [
       { name: 'طلبات تم صرفها', count: disbursedRequests.length, amount: totalDisbursedRequests },
-      { name: 'فواتير عُهد مسواة', count: filteredSettlements.length, amount: totalSettledCustodies },
+      { name: 'فواتير عُهد مسواة', count: primaryMetrics.settledCount, amount: totalSettledCustodies },
       { name: 'معتمد للصرف', count: approvedRequests.length, amount: totalApprovedAwaitingDisbursement },
       { name: 'قيد المراجعة', count: pendingRequests.length, amount: totalPending },
-      { name: 'عُهد جارية مع الموظفين', count: activeCustodies.length, amount: totalActiveCustodiesRemaining },
+      { name: 'عُهد جارية مع الموظفين', count: activeCustodiesCount, amount: totalActiveCustodiesRemaining },
       { name: 'طلب توضيح', count: clarificationRequests.length, amount: clarificationRequests.reduce((s, r) => s + r.amount, 0) },
       { name: 'مرفوض', count: rejectedRequests.length, amount: rejectedRequests.reduce((s, r) => s + r.amount, 0) },
     ].filter(d => d.count > 0 || d.amount > 0);
   }, [
     disbursedRequests.length, totalDisbursedRequests,
-    filteredSettlements.length, totalSettledCustodies,
+    primaryMetrics.settledCount, totalSettledCustodies,
     approvedRequests.length, totalApprovedAwaitingDisbursement,
     pendingRequests.length, totalPending,
-    activeCustodies.length, totalActiveCustodiesRemaining,
+    activeCustodiesCount, totalActiveCustodiesRemaining,
     clarificationRequests, rejectedRequests
   ]);
 
-  // Chart 3: Expenses by Top Providers (Aggregating Requests + Custody Settlements)
+  // Chart 3: Expenses by Top Providers (Aggregating Requests + Custody Settlements for active currency)
   const providerExpenseData = useMemo(() => {
     const vendorMap = new Map<string, { fullName: string; paid: number }>();
 
     // 1. From requests
     currentOrgProviders.forEach(prov => {
       const paid = filteredRequests
-        .filter(r => (r.providerId === prov.id || r.providerName === prov.name) && r.status === 'disbursed')
+        .filter(r => (r.providerId === prov.id || r.providerName === prov.name) && r.status === 'disbursed' && currencyOf(r.currency) === currency)
         .reduce((sum, r) => sum + r.amount, 0);
       if (paid > 0) {
         vendorMap.set(prov.name, { fullName: prov.name, paid });
@@ -423,11 +363,13 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
     });
 
     // 2. From custody settlements
-    filteredSettlements.forEach(s => {
-      const vName = (s.vendorName || '').trim();
-      if (vName) {
-        const existing = vendorMap.get(vName);
-        if (existing) {
+    filteredSettlements
+      .filter(s => currencyOf(s.currency) === currency)
+      .forEach(s => {
+        const vName = (s.vendorName || '').trim();
+        if (vName) {
+          const existing = vendorMap.get(vName);
+          if (existing) {
           existing.paid += Number(s.amount || 0);
         } else {
           vendorMap.set(vName, { fullName: vName, paid: Number(s.amount || 0) });
@@ -443,7 +385,7 @@ export const DashboardAnalytics: React.FC<DashboardAnalyticsProps> = ({
       }))
       .sort((a, b) => b.paid - a.paid)
       .slice(0, 5);
-  }, [currentOrgProviders, filteredRequests, filteredSettlements]);
+  }, [currentOrgProviders, filteredRequests, filteredSettlements, currency, currencyOf]);
 
   const exportReport = () => {
     window.print();

@@ -23,7 +23,7 @@ import {
   Hash,
   Loader2
 } from 'lucide-react';
-import { processAndUploadInvoice } from '../utils/fileUpload';
+import { processAndUploadInvoice, deleteAttachmentFile } from '../utils/fileUpload';
 import { showToast } from '../utils/toast';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
@@ -539,12 +539,15 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
 
     setIsUploadingInvoice(true);
+    setFormError(null);
     try {
       const attachment = await processAndUploadInvoice(file, uploadOrgId);
       setInvoiceAttachment(attachment);
     } catch (err: any) {
       console.error('[FileUpload Error]', err);
-      showToast(err?.message || 'تعذر معالجة أو رفع الملف، يرجى المحاولة ثانية', 'error');
+      const msg = err?.message || 'تعذر معالجة أو رفع الملف، يرجى المحاولة ثانية';
+      showToast(msg, 'error');
+      setFormError(msg);
     } finally {
       setIsUploadingInvoice(false);
       e.target.value = '';
@@ -570,12 +573,15 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
 
     setIsUploadingVisaDoc(true);
+    setFormError(null);
     try {
       const attachment = await processAndUploadInvoice(file, uploadOrgId);
       setVisaDocumentAttachment(attachment);
     } catch (err: any) {
       console.error('[VisaDocUpload Error]', err);
-      showToast(err?.message || 'تعذر رفع مستند التأشيرة، يرجى المحاولة ثانية', 'error');
+      const msg = err?.message || 'تعذر رفع مستند التأشيرة، يرجى المحاولة ثانية';
+      showToast(msg, 'error');
+      setFormError(msg);
     } finally {
       setIsUploadingVisaDoc(false);
       e.target.value = '';
@@ -601,12 +607,15 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
 
     setIsUploadingInstallmentTransfer(true);
+    setFormError(null);
     try {
       const attachment = await processAndUploadInvoice(file, uploadOrgId);
       setInstallmentTransferAttachment(attachment);
     } catch (err: any) {
       console.error('[InstallmentTransferUpload Error]', err);
-      showToast(err?.message || 'تعذر رفع سكرين تحويل سداد القسط، يرجى المحاولة ثانية', 'error');
+      const msg = err?.message || 'تعذر رفع سكرين تحويل سداد القسط، يرجى المحاولة ثانية';
+      showToast(msg, 'error');
+      setFormError(msg);
     } finally {
       setIsUploadingInstallmentTransfer(false);
       e.target.value = '';
@@ -632,16 +641,59 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
 
     setIsUploadingWalletTransfer(true);
+    setFormError(null);
     try {
       const attachment = await processAndUploadInvoice(file, uploadOrgId);
       setWalletTransferAttachment(attachment);
     } catch (err: any) {
       console.error('[WalletTransferUpload Error]', err);
-      showToast(err?.message || 'تعذر رفع سكرين شحن المحفظة، يرجى المحاولة ثانية', 'error');
+      const msg = err?.message || 'تعذر رفع سكرين شحن المحفظة، يرجى المحاولة ثانية';
+      showToast(msg, 'error');
+      setFormError(msg);
     } finally {
       setIsUploadingWalletTransfer(false);
       e.target.value = '';
     }
+  };
+
+  const handleRemoveInvoiceAttachment = () => {
+    if (invoiceAttachment?.storagePath) {
+      deleteAttachmentFile(invoiceAttachment.storagePath).catch(err => {
+        console.warn('[Storage Cleanup] Failed to delete invoice attachment:', err);
+      });
+    }
+    setInvoiceAttachment(null);
+    markTouched();
+  };
+
+  const handleRemoveVisaDocumentAttachment = () => {
+    if (visaDocumentAttachment?.storagePath) {
+      deleteAttachmentFile(visaDocumentAttachment.storagePath).catch(err => {
+        console.warn('[Storage Cleanup] Failed to delete visa document attachment:', err);
+      });
+    }
+    setVisaDocumentAttachment(null);
+    markTouched();
+  };
+
+  const handleRemoveInstallmentTransferAttachment = () => {
+    if (installmentTransferAttachment?.storagePath) {
+      deleteAttachmentFile(installmentTransferAttachment.storagePath).catch(err => {
+        console.warn('[Storage Cleanup] Failed to delete installment transfer attachment:', err);
+      });
+    }
+    setInstallmentTransferAttachment(null);
+    markTouched();
+  };
+
+  const handleRemoveWalletTransferAttachment = () => {
+    if (walletTransferAttachment?.storagePath) {
+      deleteAttachmentFile(walletTransferAttachment.storagePath).catch(err => {
+        console.warn('[Storage Cleanup] Failed to delete wallet transfer attachment:', err);
+      });
+    }
+    setWalletTransferAttachment(null);
+    markTouched();
   };
 
   // Helper to get auto-fill details from profile for a given payment method
@@ -2032,7 +2084,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                           <button
                             type="button"
-                            onClick={() => { setInvoiceAttachment(null); markTouched(); }}
+                            onClick={handleRemoveInvoiceAttachment}
                             className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
                             title="حذف هذا المرفق"
                           >
@@ -2138,7 +2190,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                             <button
                               type="button"
-                              onClick={() => { setVisaDocumentAttachment(null); markTouched(); }}
+                              onClick={handleRemoveVisaDocumentAttachment}
                               className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
                               title="حذف مستند التأشيرة"
                             >
@@ -2249,7 +2301,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                             <button
                               type="button"
-                              onClick={() => { setInstallmentTransferAttachment(null); markTouched(); }}
+                              onClick={handleRemoveInstallmentTransferAttachment}
                               className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
                               title="حذف سكرين القسط"
                             >
@@ -2356,7 +2408,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
 
                             <button
                               type="button"
-                              onClick={() => { setWalletTransferAttachment(null); markTouched(); }}
+                              onClick={handleRemoveWalletTransferAttachment}
                               className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs rounded-xl border border-rose-200 flex items-center gap-1.5 transition cursor-pointer"
                               title="حذف سكرين المحفظة"
                             >
