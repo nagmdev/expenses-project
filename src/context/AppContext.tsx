@@ -413,6 +413,8 @@ interface AppContextType {
    * so the rules do not let their account take that membership yet (see profileMembershipState).
    */
   membershipNeedsVerification: boolean;
+  /** email_verified of the current ID token (what the security rules see). */
+  emailVerified: boolean;
   sendSuperAdminVerificationEmail: () => Promise<{ success: boolean; message: string }>;
   recheckSuperAdminVerification: () => Promise<{ verified: boolean; error?: string }>;
   /** Data sources the database refused to serve (permission-denied), shown to the user instead of silently empty lists. */
@@ -3061,6 +3063,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isAccountSuspended,
         superAdminNeedsVerification,
         membershipNeedsVerification,
+        emailVerified,
         sendSuperAdminVerificationEmail,
         recheckSuperAdminVerification,
         permissionDeniedSources,

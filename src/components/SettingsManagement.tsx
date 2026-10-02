@@ -49,6 +49,9 @@ export const SettingsManagement: React.FC = () => {
     auditLogs,
     updateUserProfileInfo,
     changeCurrentUserPassword,
+    emailVerified,
+    sendSuperAdminVerificationEmail,
+    recheckSuperAdminVerification,
   } = useApp();
 
   // Platform-wide tools (email sender + API keys, Firebase connection) belong to the platform
@@ -103,6 +106,27 @@ export const SettingsManagement: React.FC = () => {
   const [displayName, setDisplayName] = useState(currentUser.name || '');
   const [phoneNumber, setPhoneNumber] = useState(currentUser.phone || '');
   const profileGuard = useSubmitGuard();
+
+  // Email verification. Being added to another company by email (an invite) opens only for
+  // a verified address (firestore.rules -> isInviteeOf / users.verifiedEmail).
+  const verifyGuard = useSubmitGuard();
+  const [verifyFeedback, setVerifyFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const handleSendVerification = () => {
+    void verifyGuard.run(async () => {
+      const res = await sendSuperAdminVerificationEmail();
+      setVerifyFeedback({ ok: res.success, text: res.message });
+    });
+  };
+  const handleRecheckVerification = () => {
+    void verifyGuard.run(async () => {
+      const res = await recheckSuperAdminVerification();
+      setVerifyFeedback(res.error
+        ? { ok: false, text: res.error }
+        : res.verified
+        ? { ok: true, text: 'تم تفعيل البريد بنجاح. ستظهر لك أي شركة أُضفت إليها ببريدك خلال لحظات.' }
+        : { ok: false, text: 'البريد لم يُفعَّل بعد. افتح رابط التفعيل في بريدك أولاً ثم اضغط "تحقق الآن".' });
+    });
+  };
   const isSavingProfile = profileGuard.pending;
   const [profileFeedback, setProfileFeedback] = useState<{ msg: string; isError?: boolean } | null>(null);
 
@@ -990,6 +1014,42 @@ export const SettingsManagement: React.FC = () => {
                 disabled
                 className="w-full text-xs px-3 py-2 bg-slate-100 border border-slate-200 text-slate-500 rounded-xl font-mono cursor-not-allowed"
               />
+              {emailVerified ? (
+                <div className="mt-1.5 flex items-center gap-1.5 text-[11px] font-bold text-emerald-700">
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                  <span>البريد مُفعَّل</span>
+                </div>
+              ) : (
+                <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-xl space-y-2">
+                  <p className="text-[11px] text-amber-900 leading-relaxed">
+                    البريد غير مُفعَّل. فعّله حتى تظهر لك أي شركة يضيفك إليها المدير ببريدك.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={verifyGuard.pending}
+                      onClick={handleSendVerification}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-[11px] rounded-lg transition cursor-pointer flex items-center gap-1.5"
+                    >
+                      <Mail className="h-3.5 w-3.5" />
+                      <span>إرسال رابط التفعيل</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={verifyGuard.pending}
+                      onClick={handleRecheckVerification}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-900 disabled:opacity-50 text-white font-bold text-[11px] rounded-lg transition cursor-pointer"
+                    >
+                      تحقق الآن
+                    </button>
+                  </div>
+                  {verifyFeedback && (
+                    <p role="status" className={`text-[11px] font-bold ${verifyFeedback.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                      {verifyFeedback.text}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
 
             <div>
