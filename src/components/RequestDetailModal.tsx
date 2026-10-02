@@ -19,6 +19,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { processAndUploadInvoice } from '../utils/fileUpload';
+import { AttachmentError, MAX_ATTACHMENT_BYTES } from '../lib/attachments';
 import { showToast } from '../utils/toast';
 import { useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
@@ -41,10 +42,10 @@ import {
   resolveRequestPaymentMethod,
 } from '../utils/requestUi';
 import { NewRequestModal } from './NewRequestModal';
-import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
+import { InvoiceViewerModal, InvoiceViewerAttachment, AttachmentImage } from './InvoiceViewerModal';
 
 /** Largest invoice file accepted here (the same limit as the new-request form). */
-const MAX_UPLOAD_MB = 15;
+const MAX_UPLOAD_MB = MAX_ATTACHMENT_BYTES / (1024 * 1024);
 
 interface RequestDetailModalProps {
   request: ExpenseRequest | null;
@@ -108,7 +109,9 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
     const file = e.target.files?.[0];
     if (!file || !request) return;
 
-    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+    // Photos are compressed before they are stored (the stored copy is checked against
+    // the same limit after compression); a PDF is stored as it is, so it is checked now.
+    if (!file.type.startsWith('image/') && file.size > MAX_ATTACHMENT_BYTES) {
       showToast(`حجم الملف كبير جداً، يرجى اختيار ملف أقل من ${MAX_UPLOAD_MB} ميجابايت`, 'error');
       e.target.value = '';
       return;
@@ -133,7 +136,11 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
         actionGuard.rotateKey(scope);
       } catch (err: any) {
         console.error('[DirectInvoiceUpload]', err);
-        showToast('تعذر إرفاق صورة الفاتورة: ' + (err?.message || 'خطأ غير متوقع'), 'error');
+        // The attachments module's messages are complete Arabic sentences already.
+        showToast(
+          err instanceof AttachmentError ? err.message : 'تعذر إرفاق صورة الفاتورة: ' + (err?.message || 'خطأ غير متوقع'),
+          'error'
+        );
       } finally {
         setIsUploadingInvoice(false);
         e.target.value = '';
@@ -658,9 +665,9 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                         className="block shrink-0 cursor-pointer group"
                         title="معاينة الفاتورة بملء الشاشة"
                       >
-                        <img 
-                          src={request.invoiceAttachment.url} 
-                          alt="فاتورة" 
+                        <AttachmentImage
+                          url={request.invoiceAttachment.url}
+                          alt="فاتورة"
                           className="w-10 h-10 rounded-lg object-cover border border-amber-200 shadow-2xs group-hover:scale-105 group-hover:border-amber-400 transition" 
                         />
                       </button>
@@ -769,7 +776,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           className="cursor-pointer shrink-0"
                           title="معاينة المستند"
                         >
-                          <img src={request.visaDocumentAttachment.url} alt="تأشيرة" className="w-10 h-10 rounded-lg object-cover border border-teal-300 shadow-2xs" />
+                          <AttachmentImage url={request.visaDocumentAttachment.url} alt="تأشيرة" className="w-10 h-10 rounded-lg object-cover border border-teal-300 shadow-2xs" />
                         </button>
                       ) : (
                         <div className="w-10 h-10 rounded-lg bg-teal-100 text-teal-800 font-bold text-xs flex items-center justify-center border border-teal-200 shrink-0">
@@ -827,7 +834,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           className="cursor-pointer shrink-0"
                           title="معاينة السكرين"
                         >
-                          <img src={request.installmentTransferAttachment.url} alt="قسط" className="w-10 h-10 rounded-lg object-cover border border-blue-300 shadow-2xs" />
+                          <AttachmentImage url={request.installmentTransferAttachment.url} alt="قسط" className="w-10 h-10 rounded-lg object-cover border border-blue-300 shadow-2xs" />
                         </button>
                       ) : (
                         <div className="w-10 h-10 rounded-lg bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center border border-blue-200 shrink-0">
@@ -885,7 +892,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           className="cursor-pointer shrink-0"
                           title="معاينة السكرين"
                         >
-                          <img src={request.walletTransferAttachment.url} alt="محفظة" className="w-10 h-10 rounded-lg object-cover border border-purple-300 shadow-2xs" />
+                          <AttachmentImage url={request.walletTransferAttachment.url} alt="محفظة" className="w-10 h-10 rounded-lg object-cover border border-purple-300 shadow-2xs" />
                         </button>
                       ) : (
                         <div className="w-10 h-10 rounded-lg bg-purple-100 text-purple-800 font-bold text-xs flex items-center justify-center border border-purple-200 shrink-0">

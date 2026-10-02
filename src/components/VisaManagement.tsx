@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
   VisaRequest,
@@ -9,9 +9,19 @@ import {
   PaymentMethod,
   SUPPORTED_CURRENCIES
 } from '../types';
-import { compressImage, formatFileSize } from '../utils/fileUpload';
+import { formatFileSize } from '../utils/fileUpload';
+import { isFirestoreAttachmentUrl } from '../lib/attachments';
+import {
+  ATTACHMENT_ACCEPT,
+  ATTACHMENT_LIMIT_LABEL,
+  UNSUPPORTED_ATTACHMENT_MESSAGE,
+  acceptedAttachmentMime,
+  discardStoredAttachment,
+  storeRecordAttachment,
+} from '../utils/recordAttachments';
+import { useAttachmentPreview } from '../hooks/useAttachmentPreview';
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
-import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
+import { InvoiceViewerModal } from './InvoiceViewerModal';
 import { can } from '../utils/permissions';
 import { isArchivedOrg } from '../domain/common';
 import {
@@ -31,6 +41,7 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
+  Loader2,
   AlertTriangle,
   CreditCard,
   UploadCloud,
@@ -114,10 +125,19 @@ export const VisaManagement: React.FC = () => {
   const [visaAttachmentUrl, setVisaAttachmentUrl] = useState<string>('');
   const [visaAttachmentName, setVisaAttachmentName] = useState<string>('');
   const [visaAttachmentSize, setVisaAttachmentSize] = useState<number>(0);
+  const [visaAttachmentMime, setVisaAttachmentMime] = useState<string>('');
+  // The company the document was stored under (it must be the request's company).
+  const [visaAttachmentOrgId, setVisaAttachmentOrgId] = useState<string>('');
+  const [isUploadingVisaDoc, setIsUploadingVisaDoc] = useState(false);
+  // Each upload gets a number; one that finishes after the form moved on (removed, closed,
+  // company changed) is deleted instead of being shown.
+  const visaUploadSeq = useRef(0);
+  // The stored copy of the form's document while no saved request uses it yet.
+  const unsavedVisaUploadRef = useRef('');
   const [formOrgId, setFormOrgId] = useState('');
   const [serviceProviderId, setServiceProviderId] = useState('');
   const [notes, setNotes] = useState('');
-  const [previewVisaDoc, setPreviewVisaDoc] = useState<InvoiceViewerAttachment | null>(null);
+  const docPreview = useAttachmentPreview();
 
   // Validation & feedback state for create modal
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
@@ -283,68 +303,93 @@ export const VisaManagement: React.FC = () => {
     return passportRegex.test(clean);
   };
 
-  // Handle File Upload with Strict validations (.pdf, .png, .jpeg, max 5MB)
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const setVisaAttachmentError = (message: string) => setFormErrors(prev => ({ ...prev, visaAttachment: message }));
+  const clearVisaAttachmentError = () =>
+    setFormErrors(prev => {
+      const copy = { ...prev };
+      delete copy.visaAttachment;
+      return copy;
+    });
+  const noCompanyForUploadMessage = 'يرجى اختيار الشركة التابع لها الطلب أولاً، ثم رفع المستند.';
+
+  const clearVisaAttachmentFields = () => {
+    setVisaAttachmentUrl('');
+    setVisaAttachmentName('');
+    setVisaAttachmentSize(0);
+    setVisaAttachmentMime('');
+    setVisaAttachmentOrgId('');
+  };
+
+  /**
+   * Takes the document out of the form. Its stored copy is deleted: no saved request uses it
+   * (an upload still running is deleted as soon as it finishes).
+   */
+  const discardVisaAttachment = () => {
+    visaUploadSeq.current++;
+    setIsUploadingVisaDoc(false);
+    const unsavedUrl = unsavedVisaUploadRef.current;
+    unsavedVisaUploadRef.current = '';
+    clearVisaAttachmentFields();
+    discardStoredAttachment(unsavedUrl);
+  };
+
+  // Leaving the page with an unsaved document in the form deletes its stored copy.
+  useEffect(() => {
+    const uploads = visaUploadSeq;
+    const unsaved = unsavedVisaUploadRef;
+    return () => {
+      uploads.current++;
+      discardStoredAttachment(unsaved.current);
+      unsaved.current = '';
+    };
+  }, []);
+
+  // The document is stored (in Firestore, under the request's company) as soon as it is picked:
+  // PDF, PNG or JPG; images are compressed first; at most 10 MB. The request keeps only its link.
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const file = input.files?.[0];
+    input.value = ''; // the same file can be picked again after removing it
     if (!file) return;
 
-    // Validate size (max 5MB)
-    const maxSize = 5 * 1024 * 1024;
-    if (file.size > maxSize) {
-      setFormErrors(prev => ({ ...prev, visaAttachment: 'حجم الملف يتجاوز الحد الأقصى المسموح (5 ميجابايت)' }));
+    if (!formOrgId) {
+      setVisaAttachmentError(noCompanyForUploadMessage);
+      return;
+    }
+    if (!acceptedAttachmentMime(file)) {
+      setVisaAttachmentError(UNSUPPORTED_ATTACHMENT_MESSAGE);
       return;
     }
 
-    // Validate type (.pdf, .png, .jpg, .jpeg)
-    const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'];
-    if (!allowedTypes.includes(file.type)) {
-      setFormErrors(prev => ({ ...prev, visaAttachment: 'صيغة الملف غير مدعومة. يسمح فقط بـ PDF أو الصور (PNG, JPG)' }));
-      return;
+    const upload = ++visaUploadSeq.current;
+    const orgId = formOrgId;
+    setIsUploadingVisaDoc(true);
+    clearVisaAttachmentError();
+    try {
+      const stored = await storeRecordAttachment(file, orgId);
+      if (upload !== visaUploadSeq.current) {
+        discardStoredAttachment(stored.url);
+        return;
+      }
+      unsavedVisaUploadRef.current = stored.url;
+      setVisaAttachmentUrl(stored.url);
+      setVisaAttachmentName(stored.name || file.name);
+      setVisaAttachmentSize(stored.size);
+      setVisaAttachmentMime(stored.mimeType);
+      setVisaAttachmentOrgId(orgId);
+    } catch (err: any) {
+      if (upload !== visaUploadSeq.current) return;
+      setVisaAttachmentError(err?.message || 'تعذر رفع المستند، يرجى المحاولة مرة أخرى.');
+    } finally {
+      if (upload === visaUploadSeq.current) setIsUploadingVisaDoc(false);
     }
+  };
 
-    // Auto-compress phone images before saving
-    if (file.type.startsWith('image/')) {
-      compressImage(file)
-        .then(compressed => {
-          setVisaAttachmentUrl(compressed.dataUrl);
-          setVisaAttachmentName(file.name);
-          setVisaAttachmentSize(compressed.byteSize);
-          setFormErrors(prev => {
-            const copy = { ...prev };
-            delete copy.visaAttachment;
-            return copy;
-          });
-        })
-        .catch(err => {
-          console.warn('[Visa Upload] Image compression fallback to FileReader:', err);
-          const reader = new FileReader();
-          reader.onload = () => {
-            setVisaAttachmentUrl(reader.result as string);
-            setVisaAttachmentName(file.name);
-            setVisaAttachmentSize(file.size);
-            setFormErrors(prev => {
-              const copy = { ...prev };
-              delete copy.visaAttachment;
-              return copy;
-            });
-          };
-          reader.readAsDataURL(file);
-        });
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      setVisaAttachmentUrl(reader.result as string);
-      setVisaAttachmentName(file.name);
-      setVisaAttachmentSize(file.size);
-      setFormErrors(prev => {
-        const copy = { ...prev };
-        delete copy.visaAttachment;
-        return copy;
-      });
-    };
-    reader.readAsDataURL(file);
+  // Closing the form without saving drops its document. While the request is being saved the
+  // document stays: a saved request keeps it, otherwise the next new form deletes it.
+  const closeCreateModal = () => {
+    if (!createGuard.pending) discardVisaAttachment();
+    setIsCreateModalOpen(false);
   };
 
   // Reset Create Form
@@ -359,9 +404,9 @@ export const VisaManagement: React.FC = () => {
     setInitialPayment('');
     setCurrency('EGP');
     setPaymentMode('full');
-    setVisaAttachmentUrl('');
-    setVisaAttachmentName('');
-    setVisaAttachmentSize(0);
+    visaUploadSeq.current++;
+    setIsUploadingVisaDoc(false);
+    clearVisaAttachmentFields();
     setServiceProviderId('');
     setNotes('');
     setFormErrors({});
@@ -402,8 +447,13 @@ export const VisaManagement: React.FC = () => {
     }
 
     // 6. Visa File Upload (صورة مستند التأشيرة أو الجواز - إجباري)
-    if (!visaAttachmentUrl) {
+    if (isUploadingVisaDoc) {
+      errors.visaAttachment = 'يرجى الانتظار حتى يكتمل رفع المستند.';
+    } else if (!visaAttachmentUrl) {
       errors.visaAttachment = 'صورة مستند التأشيرة أو الجواز مطلوبة (إجباري)';
+    } else if (visaAttachmentOrgId && formOrgId && visaAttachmentOrgId !== formOrgId) {
+      // Only the request's own company may read its document
+      errors.visaAttachment = 'المستند مرفوع لشركة أخرى؛ احذفه ثم ارفعه مرة أخرى لهذه الشركة.';
     }
 
     // 7. Company + Service Provider (مورد التأشيرات المختص - إجباري)
@@ -462,6 +512,8 @@ export const VisaManagement: React.FC = () => {
         notes: notes.trim() || undefined,
       }, { idempotencyKey });
 
+      // The saved request uses the stored document now: it is no longer deleted with the form.
+      if (unsavedVisaUploadRef.current === visaAttachmentUrl) unsavedVisaUploadRef.current = '';
       createGuard.rotateKey();
       setIsCreateModalOpen(false);
       resetCreateForm();
@@ -601,6 +653,9 @@ export const VisaManagement: React.FC = () => {
 
   // New request: the active company (or the only one); in "all companies" mode the super admin picks one.
   const handleOpenCreate = () => {
+    // A document left from an earlier form that was never saved is deleted (not while that
+    // form's request is still being saved: its outcome decides).
+    if (!createGuard.pending) discardVisaAttachment();
     resetCreateForm();
     const orgId = effectiveOrgId && effectiveOrgId !== 'all' ? effectiveOrgId : (creatableOrgs.length === 1 ? creatableOrgs[0].id : '');
     setFormOrgId(orgId);
@@ -934,7 +989,7 @@ export const VisaManagement: React.FC = () => {
               </div>
               <button
                 type="button"
-                onClick={() => setIsCreateModalOpen(false)}
+                onClick={closeCreateModal}
                 className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition cursor-pointer"
               >
                 <X className="h-5 w-5" />
@@ -1121,21 +1176,40 @@ export const VisaManagement: React.FC = () => {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".pdf,.png,.jpg,.jpeg"
+                    accept={ATTACHMENT_ACCEPT}
                     onChange={handleFileUpload}
                     className="hidden"
                   />
 
-                  {!visaAttachmentUrl ? (
-                    <div 
-                      onClick={() => fileInputRef.current?.click()}
+                  {isUploadingVisaDoc ? (
+                    <div
+                      role="status"
+                      className="border-2 border-dashed border-teal-300 bg-teal-50/30 rounded-2xl p-4 text-center cursor-wait"
+                    >
+                      <Loader2 className="h-7 w-7 text-teal-600 mx-auto mb-1.5 animate-spin" />
+                      <span className="text-xs font-bold text-teal-800 block">جاري رفع المستند وحفظه...</span>
+                      <span className="text-[10px] text-slate-500">يرجى الانتظار حتى يكتمل الرفع قبل حفظ الطلب</span>
+                    </div>
+                  ) : !visaAttachmentUrl ? (
+                    <div
+                      onClick={() => {
+                        // The document is stored under the request's company: it must be chosen first
+                        if (!formOrgId) {
+                          setVisaAttachmentError(noCompanyForUploadMessage);
+                          return;
+                        }
+                        fileInputRef.current?.click();
+                      }}
                       className={`border-2 border-dashed rounded-2xl p-4 text-center cursor-pointer transition hover:bg-teal-50/30 ${
                         formErrors.visaAttachment ? 'border-rose-300 bg-rose-50/20' : 'border-slate-300 hover:border-teal-500'
                       }`}
                     >
                       <UploadCloud className="h-7 w-7 text-slate-400 mx-auto mb-1.5" />
                       <span className="text-xs font-bold text-slate-700 block">انقر لرفع مستند التأشيرة أو الجواز</span>
-                      <span className="text-[10px] text-slate-400">ملفات PDF أو صور (PNG, JPG) حتى 5 ميجابايت كحد أقصى (ضغط تلقائي للصور)</span>
+                      <span className="text-[10px] text-slate-400">ملفات PDF أو صور (PNG, JPG) حتى {ATTACHMENT_LIMIT_LABEL} كحد أقصى (ضغط تلقائي للصور)</span>
+                      {!formOrgId && (
+                        <span className="text-[10px] text-amber-700 font-bold block mt-1">اختر الشركة التابع لها الطلب أولاً، ثم ارفع المستند</span>
+                      )}
                     </div>
                   ) : (
                     <div className="flex items-center justify-between p-3 bg-white rounded-xl border border-teal-200">
@@ -1151,11 +1225,11 @@ export const VisaManagement: React.FC = () => {
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
-                          onClick={() => setPreviewVisaDoc({
+                          onClick={() => docPreview.open({
                             url: visaAttachmentUrl,
                             name: visaAttachmentName,
                             size: formatFileSize(visaAttachmentSize),
-                            type: visaAttachmentName.toLowerCase().endsWith('.pdf') ? 'pdf' : 'jpg'
+                            type: visaAttachmentMime === 'application/pdf' ? 'pdf' : 'jpg'
                           })}
                           className="text-teal-600 hover:text-teal-800 p-1.5 rounded-lg hover:bg-teal-50 transition cursor-pointer"
                           title="معاينة المستند"
@@ -1165,11 +1239,11 @@ export const VisaManagement: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => {
-                            setVisaAttachmentUrl('');
-                            setVisaAttachmentName('');
-                            setVisaAttachmentSize(0);
+                            discardVisaAttachment();
+                            clearVisaAttachmentError();
                           }}
-                          className="text-rose-500 hover:text-rose-700 p-1.5 rounded-lg hover:bg-rose-50 transition cursor-pointer"
+                          disabled={isSubmitting}
+                          className="text-rose-500 hover:text-rose-700 p-1.5 rounded-lg hover:bg-rose-50 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                           title="حذف المرفق"
                         >
                           <Trash2 className="h-4 w-4" />
@@ -1191,9 +1265,20 @@ export const VisaManagement: React.FC = () => {
                     <select
                       value={formOrgId}
                       onChange={(e) => {
-                        setFormOrgId(e.target.value);
+                        const nextOrgId = e.target.value;
+                        setFormOrgId(nextOrgId);
                         setServiceProviderId('');
                         if (formErrors.orgId) setFormErrors(prev => ({ ...prev, orgId: '' }));
+                        // The document was stored under the previous company (only that company may
+                        // read it): it is deleted and has to be uploaded again for the new one.
+                        if (!createGuard.pending && (isUploadingVisaDoc || (visaAttachmentUrl && visaAttachmentOrgId !== nextOrgId))) {
+                          discardVisaAttachment();
+                          setVisaAttachmentError(
+                            nextOrgId
+                              ? 'تم تغيير الشركة، لذا أُزيل المستند المرفوع. يرجى رفعه مرة أخرى لهذه الشركة.'
+                              : noCompanyForUploadMessage
+                          );
+                        }
                       }}
                       className={`w-full px-3 py-2 bg-white border rounded-xl text-xs font-bold cursor-pointer focus:outline-none focus:ring-2 focus:ring-teal-500/20 ${
                         formErrors.orgId ? 'border-rose-400 bg-rose-50/20' : 'border-slate-200 focus:border-teal-500'
@@ -1447,7 +1532,7 @@ export const VisaManagement: React.FC = () => {
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
                   type="button"
-                  onClick={() => setIsCreateModalOpen(false)}
+                  onClick={closeCreateModal}
                   className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
                 >
                   إلغاء
@@ -1579,16 +1664,29 @@ export const VisaManagement: React.FC = () => {
                     {selectedVisa.visaAttachmentUrl && (
                       <button
                         type="button"
-                        onClick={() => setPreviewVisaDoc({
+                        onClick={() => docPreview.open({
                           url: selectedVisa.visaAttachmentUrl!,
                           name: selectedVisa.visaAttachmentName || 'مستند_التأشيرة',
                           size: selectedVisa.visaAttachmentSize ? formatFileSize(selectedVisa.visaAttachmentSize) : undefined,
-                          type: selectedVisa.visaAttachmentName?.toLowerCase().endsWith('.pdf') ? 'pdf' : 'jpg'
+                          // A document kept in Firestore: its type comes from its name or from the file itself
+                          type: isFirestoreAttachmentUrl(selectedVisa.visaAttachmentUrl)
+                            ? undefined
+                            : selectedVisa.visaAttachmentName?.toLowerCase().endsWith('.pdf') ? 'pdf' : 'jpg'
                         })}
-                        className="px-3 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-700 font-bold text-xs rounded-lg transition flex items-center gap-1 cursor-pointer"
+                        disabled={docPreview.loadingUrl === selectedVisa.visaAttachmentUrl}
+                        className="px-3 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-700 font-bold text-xs rounded-lg transition flex items-center gap-1 cursor-pointer disabled:opacity-70 disabled:cursor-wait"
                       >
-                        <Eye className="h-3.5 w-3.5" />
-                        <span>معاينة</span>
+                        {docPreview.loadingUrl === selectedVisa.visaAttachmentUrl ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            <span>جاري التحميل...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Eye className="h-3.5 w-3.5" />
+                            <span>معاينة</span>
+                          </>
+                        )}
                       </button>
                     )}
                   </div>
@@ -2026,10 +2124,10 @@ export const VisaManagement: React.FC = () => {
       )}
 
       {/* Visa Document In-App Lightbox Viewer */}
-      {previewVisaDoc && (
+      {docPreview.preview && (
         <InvoiceViewerModal
-          attachment={previewVisaDoc}
-          onClose={() => setPreviewVisaDoc(null)}
+          attachment={docPreview.preview}
+          onClose={docPreview.close}
         />
       )}
     </div>

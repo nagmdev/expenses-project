@@ -12,7 +12,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where, type Firestore } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where, writeBatch, type Firestore } from 'firebase/firestore';
 import { createFirestoreStore } from '../src/domain/firestoreStore';
 import { createExpenseRequest, disburseExpenseRequest, transitionExpenseRequest } from '../src/domain/requests';
 import {
@@ -43,6 +43,7 @@ import { migrateLegacyUniqueKeys } from '../src/domain/directory';
 import type { ServiceProvider } from '../src/types';
 import { DEFAULT_EMAIL_SETTINGS } from '../src/services/emailTemplates';
 import type { Actor } from '../src/domain/common';
+import { readAttachmentBlob, removeAttachment, writeAttachment } from '../src/lib/attachmentsCore';
 
 const ORG = 'org-acme';
 const OTHER_ORG = 'org-other';
@@ -660,5 +661,296 @@ describe('visa requests: only company admins delete', () => {
     await assertFails(deleteVisaRequest(store, actor(EMP, 'org_admin'), visa.value.id, opKey(32)));
     await deleteVisaRequest(createFirestoreStore(db(ADMIN)), actor(ADMIN, 'org_admin'), visa.value.id, opKey(33));
     expect(await readDoc('visaRequests', visa.value.id)).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// Attachments stored IN Firestore (Spark plan: no Cloud Storage), driven through the
+// real client code (src/lib/attachmentsCore.ts): metadata -> chunk batches -> complete.
+// ===========================================================================
+describe('attachments in Firestore: only the company reads them, the upload is append-only', () => {
+  const CAIRO_ADMIN = { uid: 'uidCairoAdmin000000000001', email: 'admin@other.test' };
+  beforeEach(() =>
+    seed(async f => {
+      await setDoc(doc(f, 'users', CAIRO_EMP.uid), { orgId: OTHER_ORG, role: 'employee', active: true });
+      await setDoc(doc(f, 'members', `${CAIRO_EMP.uid}_${OTHER_ORG}`), { orgId: OTHER_ORG, userId: CAIRO_EMP.uid, userEmail: CAIRO_EMP.email, role: 'employee', active: true });
+      await setDoc(doc(f, 'users', CAIRO_ADMIN.uid), { orgId: OTHER_ORG, role: 'org_admin', active: true });
+      await setDoc(doc(f, 'members', `${CAIRO_ADMIN.uid}_${OTHER_ORG}`), { orgId: OTHER_ORG, userId: CAIRO_ADMIN.uid, userEmail: CAIRO_ADMIN.email, role: 'org_admin', active: true });
+    }),
+  );
+
+  /** "%PDF-1.7\n%âãÏÓ\n" followed by pseudo-random binary data. */
+  const pdf = (length: number): Uint8Array<ArrayBuffer> => {
+    const out = new Uint8Array(length);
+    let x = length || 1;
+    for (let i = 0; i < length; i++) {
+      x = (x * 1103515245 + 12345) >>> 0;
+      out[i] = x >>> 24;
+    }
+    out.set([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0x0a, 0x25, 0xe2, 0xe3, 0xcf, 0xd3, 0x0a].slice(0, length));
+    return out;
+  };
+  const upload = (who: { uid: string; email: string }, bytes: Uint8Array<ArrayBuffer>, orgId = ORG) =>
+    writeAttachment(db(who), who.uid, new Blob([bytes], { type: 'application/pdf' }), { orgId, name: 'فاتورة.pdf' });
+  const bytesOf = async (blob: Blob) => Buffer.from(await blob.arrayBuffer());
+  const meta = (who: { uid: string; email: string }, id: string) => doc(db(who), 'attachments', id);
+  const chunk = (who: { uid: string; email: string }, id: string, index: number | string) => doc(db(who), 'attachments', id, 'chunks', String(index));
+  const chunks = (who: { uid: string; email: string }, id: string) => collection(db(who), 'attachments', id, 'chunks');
+  const openUpload = (id: string, extra: Record<string, unknown> = {}) =>
+    seed(f =>
+      setDoc(doc(f, 'attachments', id), {
+        id, orgId: ORG, name: 'x.pdf', mimeType: 'application/pdf', size: 6, chunkCount: 2, createdBy: EMP.uid,
+        createdAt: '2026-10-02T00:00:00.000Z', complete: false, ...extra,
+      }),
+    );
+
+  it('a member uploads a multi-chunk PDF (metadata + chunk batches + complete) and the company reads it back byte for byte', async () => {
+    const bytes = pdf(1_200_000); // 3 chunks
+    const stored = await upload(EMP, bytes);
+    expect(stored).toMatchObject({ url: `fsattach://${stored.attachmentId}`, name: 'فاتورة.pdf', size: bytes.length, mimeType: 'application/pdf' });
+    expect(await readDoc('attachments', stored.attachmentId)).toMatchObject({
+      id: stored.attachmentId, orgId: ORG, size: bytes.length, chunkCount: 3, createdBy: EMP.uid, mimeType: 'application/pdf', complete: true,
+    });
+    for (const who of [EMP, ADMIN, FIN, OWNER]) {
+      const blob = await readAttachmentBlob(db(who), stored.attachmentId);
+      expect(blob.type).toBe('application/pdf');
+      expect((await bytesOf(blob)).equals(Buffer.from(bytes))).toBe(true);
+    }
+  });
+
+  it('a 10 MB PDF (the limit: 20 chunks in 7 batches) round-trips', async () => {
+    const bytes = pdf(10 * 1024 * 1024);
+    const stored = await upload(FIN, bytes);
+    expect((await readDoc('attachments', stored.attachmentId))!.chunkCount).toBe(20);
+    expect((await bytesOf(await readAttachmentBlob(db(EMP), stored.attachmentId))).equals(Buffer.from(bytes))).toBe(true);
+  });
+
+  it("another company's member or admin, an outsider and a signed-out visitor read neither the metadata nor the chunks", async () => {
+    const { attachmentId: id } = await upload(EMP, pdf(5000));
+    for (const who of [CAIRO_EMP, CAIRO_ADMIN, STRANGER]) {
+      await assertFails(getDoc(meta(who, id)));
+      await assertFails(getDoc(chunk(who, id, 0)));
+      await assertFails(getDocs(chunks(who, id)));
+      await expect(readAttachmentBlob(db(who), id)).rejects.toMatchObject({ code: 'forbidden' });
+    }
+    const anonymous = env.unauthenticatedContext().firestore() as unknown as Firestore;
+    await assertFails(getDoc(doc(anonymous, 'attachments', id)));
+    await assertFails(getDocs(collection(anonymous, 'attachments', id, 'chunks')));
+    // A suspended member loses access too.
+    await seed(async f => {
+      await updateDoc(doc(f, 'users', EMP.uid), { active: false });
+      await updateDoc(doc(f, 'members', `${EMP.uid}_${ORG}`), { active: false });
+    });
+    await assertFails(getDoc(meta(EMP, id)));
+    await assertFails(getDocs(chunks(EMP, id)));
+  });
+
+  it('a missing attachment answers exactly like a forbidden one (nothing tells whether an id exists)', async () => {
+    for (const who of [EMP, ADMIN, CAIRO_EMP, STRANGER]) {
+      await assertFails(getDoc(meta(who, 'att-missing')));
+      await assertFails(getDoc(chunk(who, 'att-missing', 0)));
+      await assertFails(getDocs(chunks(who, 'att-missing')));
+    }
+    // Chunks left without metadata: only the platform owner (cleaning up) reads or deletes them.
+    await seed(f => setDoc(doc(f, 'attachments', 'att-orphan', 'chunks', '0'), { index: 0, data: 'QUJD' }));
+    await assertFails(getDoc(chunk(EMP, 'att-orphan', 0)));
+    await assertFails(getDocs(chunks(ADMIN, 'att-orphan')));
+    await assertFails(deleteDoc(chunk(ADMIN, 'att-orphan', 0)));
+    await assertSucceeds(getDocs(chunks(OWNER, 'att-orphan')));
+    await assertSucceeds(deleteDoc(chunk(OWNER, 'att-orphan', 0)));
+    // The platform owner sees a missing attachment as missing.
+    expect((await assertSucceeds(getDoc(meta(OWNER, 'att-missing')))).exists()).toBe(false);
+  });
+
+  it('chunks cannot be added after complete, never rewritten, and only by the uploader within the announced count', async () => {
+    const done = await upload(EMP, pdf(10)); // 1 chunk, complete
+    await assertFails(setDoc(chunk(EMP, done.attachmentId, 0), { index: 0, data: 'QUJD' })); // rewrite
+    await assertFails(setDoc(chunk(EMP, done.attachmentId, 1), { index: 1, data: 'QUJD' })); // after complete
+    await assertFails(setDoc(chunk(OWNER, done.attachmentId, 1), { index: 1, data: 'QUJD' }));
+
+    // An unfinished upload of 2 chunks by EMP
+    await openUpload('att-open');
+    await assertSucceeds(setDoc(chunk(EMP, 'att-open', 0), { index: 0, data: 'QUJD' }));
+    await assertFails(setDoc(chunk(EMP, 'att-open', 0), { index: 0, data: 'REVG' })); // no update
+    await assertFails(setDoc(chunk(EMP, 'att-open', 2), { index: 2, data: 'QUJD' })); // beyond chunkCount
+    await assertFails(setDoc(chunk(EMP, 'att-open', 1), { index: 0, data: 'QUJD' })); // id != index
+    await assertFails(setDoc(chunk(EMP, 'att-open', 'x'), { index: 1, data: 'QUJD' }));
+    await assertFails(setDoc(chunk(EMP, 'att-open', 1), { index: 1, data: '' }));
+    await assertFails(setDoc(chunk(EMP, 'att-open', 1), { index: 1, data: 'A'.repeat(700_004) })); // above 700,000 characters
+    await assertFails(setDoc(chunk(EMP, 'att-open', 1), { index: 1, data: 'QUJD', extra: true }));
+    await assertFails(setDoc(chunk(ADMIN, 'att-open', 1), { index: 1, data: 'QUJD' })); // not the uploader
+    await assertFails(setDoc(chunk(CAIRO_EMP, 'att-open', 1), { index: 1, data: 'QUJD' }));
+    // Completing before the last chunk exists is refused; then the uploader completes it.
+    await assertFails(updateDoc(meta(EMP, 'att-open'), { complete: true }));
+    await assertSucceeds(setDoc(chunk(EMP, 'att-open', 1), { index: 1, data: 'R0hJ' }));
+    await assertFails(updateDoc(meta(ADMIN, 'att-open'), { complete: true }));
+    await assertSucceeds(updateDoc(meta(EMP, 'att-open'), { complete: true }));
+    expect(new TextDecoder().decode(await bytesOf(await readAttachmentBlob(db(ADMIN), 'att-open')))).toBe('ABCGHI');
+    await assertFails(setDoc(chunk(EMP, 'att-open', 1), { index: 1, data: 'QUJD' }));
+  });
+
+  it('nothing but complete (false -> true, by its creator) can ever change on the metadata', async () => {
+    const { attachmentId: id } = await upload(EMP, pdf(100));
+    for (const change of [
+      { name: 'other.pdf' }, { orgId: OTHER_ORG }, { size: 1 }, { chunkCount: 5 }, { mimeType: 'text/html' },
+      { createdBy: ADMIN.uid }, { createdAt: 'x' }, { complete: false }, { complete: true }, { extra: 1 },
+    ]) {
+      await assertFails(updateDoc(meta(EMP, id), change));
+      await assertFails(updateDoc(meta(ADMIN, id), change));
+      await assertFails(updateDoc(meta(OWNER, id), change));
+    }
+    await assertFails(setDoc(meta(EMP, id), { complete: true }, { merge: true }));
+    // An unfinished upload: complete together with any other change is refused.
+    await openUpload('att-open2', { chunkCount: 1 });
+    await assertSucceeds(setDoc(chunk(EMP, 'att-open2', 0), { index: 0, data: 'QUJD' }));
+    await assertFails(updateDoc(meta(EMP, 'att-open2'), { complete: true, name: 'renamed.pdf' }));
+    await assertFails(updateDoc(meta(EMP, 'att-open2'), { complete: true, size: 3 }));
+    await assertSucceeds(updateDoc(meta(EMP, 'att-open2'), { complete: true }));
+  });
+
+  it('creation: in the caller\'s own name and company, incomplete, PDF/PNG/JPEG of at most 10 MB', async () => {
+    const base = {
+      orgId: ORG, name: 'a.pdf', mimeType: 'application/pdf', size: 10, chunkCount: 1, createdBy: EMP.uid,
+      createdAt: '2026-10-02T00:00:00.000Z', complete: false,
+    };
+    await assertSucceeds(setDoc(meta(EMP, 'att-ok'), { ...base, id: 'att-ok' }));
+    await assertSucceeds(setDoc(meta(EMP, 'att-png'), { ...base, id: 'att-png', mimeType: 'image/png', size: 10 * 1024 * 1024, chunkCount: 20 }));
+    const bad: Record<string, unknown>[] = [
+      { createdBy: ADMIN.uid }, { orgId: OTHER_ORG }, { orgId: '' }, { complete: true }, { mimeType: 'text/html' }, { mimeType: 'image/svg+xml' },
+      { size: 10 * 1024 * 1024 + 1 }, { size: 0 }, { size: '10' }, { chunkCount: 0 }, { chunkCount: 33 }, { name: '' }, { extra: 1 },
+    ];
+    for (const [i, change] of bad.entries()) {
+      await assertFails(setDoc(meta(EMP, `att-bad-${i}`), { ...base, id: `att-bad-${i}`, ...change }));
+    }
+    await assertFails(setDoc(meta(EMP, 'att-id'), { ...base, id: 'another-id' }));
+    const { createdAt: _omit, ...missingField } = base;
+    await assertFails(setDoc(meta(EMP, 'att-missing-field'), { ...missingField, id: 'att-missing-field' }));
+    await assertFails(setDoc(meta(STRANGER, 'att-stranger'), { ...base, id: 'att-stranger', createdBy: STRANGER.uid }));
+    await assertFails(setDoc(meta(CAIRO_EMP, 'att-cairo'), { ...base, id: 'att-cairo', createdBy: CAIRO_EMP.uid }));
+    await assertSucceeds(setDoc(meta(CAIRO_EMP, 'att-cairo-own'), { ...base, id: 'att-cairo-own', orgId: OTHER_ORG, createdBy: CAIRO_EMP.uid }));
+    // The client refuses an empty file before writing anything.
+    await expect(writeAttachment(db(EMP), EMP.uid, new Blob([], { type: 'application/pdf' }), { orgId: ORG, name: 'x.pdf' }))
+      .rejects.toMatchObject({ code: 'empty' });
+    // ...and an upload into another company fails cleanly, leaving nothing behind.
+    await expect(upload(EMP, pdf(10), OTHER_ORG)).rejects.toMatchObject({ code: 'upload_failed' });
+  });
+
+  it('the uploader, an org admin and the platform owner delete an attachment (chunks first, one batch); nobody else can', async () => {
+    const mine = await upload(EMP, pdf(600_000)); // 2 chunks
+    for (const who of [FIN, CAIRO_ADMIN, CAIRO_EMP, STRANGER]) {
+      await assertFails(deleteDoc(meta(who, mine.attachmentId)));
+      await assertFails(deleteDoc(chunk(who, mine.attachmentId, 0)));
+    }
+    await expect(removeAttachment(db(FIN), FIN.uid, mine.attachmentId)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(removeAttachment(db(CAIRO_ADMIN), CAIRO_ADMIN.uid, mine.attachmentId)).rejects.toMatchObject({ code: 'forbidden' });
+    await removeAttachment(db(EMP), EMP.uid, mine.attachmentId);
+    expect(await readDoc('attachments', mine.attachmentId)).toBeUndefined();
+    expect(await readDoc(`attachments/${mine.attachmentId}/chunks`, '0')).toBeUndefined();
+    expect(await readDoc(`attachments/${mine.attachmentId}/chunks`, '1')).toBeUndefined();
+    expect(await readDoc('attachmentTombstones', mine.attachmentId)).toMatchObject({ orgId: ORG, deletedBy: EMP.uid });
+
+    const byEmp = await upload(EMP, pdf(100));
+    await removeAttachment(db(ADMIN), ADMIN.uid, byEmp.attachmentId);
+    expect(await readDoc('attachments', byEmp.attachmentId)).toBeUndefined();
+
+    const byFin = await upload(FIN, pdf(100));
+    await removeAttachment(db(OWNER), OWNER.uid, byFin.attachmentId);
+    expect(await readDoc('attachments', byFin.attachmentId)).toBeUndefined();
+    await removeAttachment(db(OWNER), OWNER.uid, byFin.attachmentId); // already gone: no-op for whoever could read it
+
+    // An uploader who has left the company can no longer delete it; its admin still can.
+    const leaver = await upload(EMP, pdf(100));
+    await seed(async f => {
+      await updateDoc(doc(f, 'users', EMP.uid), { active: false });
+      await updateDoc(doc(f, 'members', `${EMP.uid}_${ORG}`), { active: false });
+    });
+    await expect(removeAttachment(db(EMP), EMP.uid, leaver.attachmentId)).rejects.toMatchObject({ code: 'forbidden' });
+    await removeAttachment(db(ADMIN), ADMIN.uid, leaver.attachmentId);
+    expect(await readDoc('attachments', leaver.attachmentId)).toBeUndefined();
+  });
+
+  it('an attachment id is single-use: a saved file can be removed but never swapped (delete + re-create the same id)', async () => {
+    const original = pdf(10);
+    const forged = new TextEncoder().encode('%PDF fake');
+    const forgedB64 = Buffer.from(forged).toString('base64');
+    const invoice = await upload(EMP, original); // 1 chunk, complete; a request now points at fsattach://<id>
+    const id = invoice.attachmentId;
+    const recreate = (who: { uid: string; email: string }) => ({
+      id, orgId: ORG, name: 'x.pdf', mimeType: 'application/pdf', size: forged.length, chunkCount: 1, createdBy: who.uid,
+      createdAt: '2026-10-02T00:00:00.000Z', complete: false,
+    });
+
+    /** One batch as EMP: delete chunk 0 and the metadata, plus `extra` writes. */
+    const deleteBatch = (extra: (f: Firestore, b: ReturnType<typeof writeBatch>) => void = () => {}) => {
+      const f = db(EMP);
+      const b = writeBatch(f).delete(doc(f, 'attachments', id, 'chunks', '0')).delete(doc(f, 'attachments', id));
+      extra(f, b);
+      return b.commit();
+    };
+    const tombstone = (f: Firestore) => doc(f, 'attachmentTombstones', id);
+
+    // A complete file never loses single chunks, not even to its uploader or an org admin.
+    await assertFails(deleteDoc(chunk(EMP, id, 0)));
+    await assertFails(deleteDoc(chunk(ADMIN, id, 0)));
+    // The metadata cannot be deleted without its tombstone...
+    await assertFails(deleteBatch());
+    // ...and a tombstone cannot be written without deleting the metadata, nor forged.
+    await assertFails(setDoc(tombstone(db(EMP)), { orgId: ORG, deletedBy: EMP.uid, deletedAt: 'x' }));
+    await assertFails(deleteBatch((f, b) => b.set(tombstone(f), { orgId: ORG, deletedBy: ADMIN.uid, deletedAt: 'x' })));
+    await assertFails(deleteBatch((f, b) => b.set(tombstone(f), { orgId: OTHER_ORG, deletedBy: EMP.uid, deletedAt: 'x' })));
+    await assertFails(deleteBatch((f, b) => b.set(tombstone(f), { orgId: ORG, deletedBy: EMP.uid, deletedAt: 'x', extra: 1 })));
+    // Delete and re-create in one batch is refused too.
+    await assertFails(
+      deleteBatch((f, b) => {
+        b.set(tombstone(f), { orgId: ORG, deletedBy: EMP.uid, deletedAt: 'x' });
+        b.set(doc(f, 'attachments', id), recreate(EMP));
+      }),
+    );
+    expect((await bytesOf(await readAttachmentBlob(db(ADMIN), id))).equals(Buffer.from(original))).toBe(true);
+
+    // The uploader deletes it (the app's own path): the id is tombstoned...
+    await removeAttachment(db(EMP), EMP.uid, id);
+    expect(await readDoc('attachmentTombstones', id)).toMatchObject({ orgId: ORG, deletedBy: EMP.uid });
+    // ...so nobody (uploader, org admin, another member, the platform owner) can create it again.
+    for (const who of [EMP, ADMIN, FIN, OWNER]) {
+      await assertFails(setDoc(meta(who, id), recreate(who)));
+    }
+    await assertFails(setDoc(chunk(EMP, id, 0), { index: 0, data: forgedB64 }));
+    // The saved link is now refused like any missing id ("... or it does not exist"); it never shows other content.
+    await expect(readAttachmentBlob(db(ADMIN), id)).rejects.toMatchObject({ code: 'forbidden' });
+    // Tombstones never change and are never removed; only the platform owner reads them.
+    await assertFails(updateDoc(doc(db(EMP), 'attachmentTombstones', id), { deletedAt: 'y' }));
+    await assertFails(deleteDoc(doc(db(EMP), 'attachmentTombstones', id)));
+    await assertFails(deleteDoc(doc(db(OWNER), 'attachmentTombstones', id)));
+    await assertFails(getDoc(doc(db(EMP), 'attachmentTombstones', id)));
+    await assertSucceeds(getDoc(doc(db(OWNER), 'attachmentTombstones', id)));
+
+    // The same holds after an org admin deletes a file, and for a 20-chunk (10 MB) file.
+    const big = await upload(FIN, pdf(10 * 1024 * 1024));
+    await removeAttachment(db(ADMIN), ADMIN.uid, big.attachmentId);
+    expect(await readDoc('attachments', big.attachmentId)).toBeUndefined();
+    expect(await readDoc(`attachments/${big.attachmentId}/chunks`, '19')).toBeUndefined();
+    await assertFails(setDoc(meta(FIN, big.attachmentId), { ...recreate(FIN), id: big.attachmentId }));
+
+    // An unfinished upload still loses chunks freely (its uploader is still writing it).
+    await openUpload('att-open3', { chunkCount: 2 });
+    await assertSucceeds(setDoc(chunk(EMP, 'att-open3', 0), { index: 0, data: 'QUJD' }));
+    await assertSucceeds(deleteDoc(chunk(EMP, 'att-open3', 0)));
+  });
+
+  it('only the platform owner lists attachments', async () => {
+    await upload(EMP, pdf(100));
+    await assertFails(getDocs(collection(db(ADMIN), 'attachments')));
+    await assertFails(getDocs(query(collection(db(EMP), 'attachments'), where('orgId', '==', ORG))));
+    await assertFails(getDocs(query(collection(db(ADMIN), 'attachments'), where('createdBy', '==', EMP.uid))));
+    const all = await assertSucceeds(getDocs(collection(db(OWNER), 'attachments')));
+    expect(all.size).toBe(1);
+  });
+
+  it('an unfinished upload is never handed out as a file', async () => {
+    await openUpload('att-partial');
+    await seed(f => setDoc(doc(f, 'attachments', 'att-partial', 'chunks', '0'), { index: 0, data: 'QUJD' }));
+    await expect(readAttachmentBlob(db(EMP), 'att-partial')).rejects.toMatchObject({ code: 'incomplete' });
+    await expect(readAttachmentBlob(db(ADMIN), 'att-partial')).rejects.toThrow(/لم يكتمل رفع/);
   });
 });

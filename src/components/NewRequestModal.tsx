@@ -24,11 +24,12 @@ import {
   Loader2
 } from 'lucide-react';
 import { processAndUploadInvoice, deleteAttachmentFile } from '../utils/fileUpload';
+import { MAX_ATTACHMENT_BYTES, isFirestoreAttachmentUrl, deleteAttachment } from '../lib/attachments';
 import { showToast } from '../utils/toast';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { isArchivedOrg } from '../domain/common';
-import { InvoiceViewerModal } from './InvoiceViewerModal';
+import { InvoiceViewerModal, AttachmentImage } from './InvoiceViewerModal';
 import { 
   PaymentMethod, 
   SUPPORTED_CURRENCIES, 
@@ -52,9 +53,20 @@ import {
 import { resolveRequestPaymentMethod, normalizePaymentMethod, extractIban, fmtMoney, accountBalance, currencyCode } from '../utils/requestUi';
 
 /** Largest attachment accepted by the form (the same number the upload hint shows). */
-const MAX_UPLOAD_MB = 15;
-const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+const MAX_UPLOAD_MB = MAX_ATTACHMENT_BYTES / (1024 * 1024);
 const FILE_TOO_LARGE = `حجم الملف كبير جداً، يرجى اختيار ملف أقل من ${MAX_UPLOAD_MB} ميجابايت`;
+
+/**
+ * Photos are compressed before they are stored (the stored copy is checked against the
+ * same limit after compression); a PDF is stored as it is, so it can be refused at once.
+ */
+const isTooLargeToAttach = (file: File) => !file.type.startsWith('image/') && file.size > MAX_ATTACHMENT_BYTES;
+
+/** Whether two attachment records point to the same stored file. */
+const sameStoredFile = (a: RequestAttachment, b?: RequestAttachment | null): boolean => {
+  if (!b) return false;
+  return Boolean((a.url && a.url === b.url) || (a.storagePath && a.storagePath === b.storagePath));
+};
 
 /**
  * Normalises text for keyword matching: lower case, Arabic letter variants unified
@@ -516,6 +528,13 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [isUploadingWalletTransfer, setIsUploadingWalletTransfer] = useState<boolean>(false);
   const walletFileInputRef = useRef<HTMLInputElement>(null);
 
+  // The company each file uploaded in this form was stored under (by url). Only that company
+  // can read the file (firestore.rules → attachments), so it must be the request's company.
+  const uploadedOrgByUrlRef = useRef(new Map<string, string>());
+  const rememberUploadOrg = (attachment: RequestAttachment, orgId: string) => {
+    if (attachment.url) uploadedOrgByUrlRef.current.set(attachment.url, orgId);
+  };
+
   // Whether the user changed anything since the form opened (Esc then asks before discarding).
   const [touched, setTouched] = useState(false);
   const markTouched = () => setTouched(true);
@@ -524,7 +543,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > MAX_UPLOAD_BYTES) {
+    if (isTooLargeToAttach(file)) {
       showToast(FILE_TOO_LARGE, 'error');
       e.target.value = '';
       return;
@@ -542,6 +561,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setFormError(null);
     try {
       const attachment = await processAndUploadInvoice(file, uploadOrgId);
+      rememberUploadOrg(attachment, uploadOrgId);
       setInvoiceAttachment(attachment);
     } catch (err: any) {
       console.error('[FileUpload Error]', err);
@@ -558,7 +578,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > MAX_UPLOAD_BYTES) {
+    if (isTooLargeToAttach(file)) {
       showToast(FILE_TOO_LARGE, 'error');
       e.target.value = '';
       return;
@@ -576,6 +596,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setFormError(null);
     try {
       const attachment = await processAndUploadInvoice(file, uploadOrgId);
+      rememberUploadOrg(attachment, uploadOrgId);
       setVisaDocumentAttachment(attachment);
     } catch (err: any) {
       console.error('[VisaDocUpload Error]', err);
@@ -592,7 +613,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > MAX_UPLOAD_BYTES) {
+    if (isTooLargeToAttach(file)) {
       showToast(FILE_TOO_LARGE, 'error');
       e.target.value = '';
       return;
@@ -610,6 +631,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setFormError(null);
     try {
       const attachment = await processAndUploadInvoice(file, uploadOrgId);
+      rememberUploadOrg(attachment, uploadOrgId);
       setInstallmentTransferAttachment(attachment);
     } catch (err: any) {
       console.error('[InstallmentTransferUpload Error]', err);
@@ -626,7 +648,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > MAX_UPLOAD_BYTES) {
+    if (isTooLargeToAttach(file)) {
       showToast(FILE_TOO_LARGE, 'error');
       e.target.value = '';
       return;
@@ -644,6 +666,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     setFormError(null);
     try {
       const attachment = await processAndUploadInvoice(file, uploadOrgId);
+      rememberUploadOrg(attachment, uploadOrgId);
       setWalletTransferAttachment(attachment);
     } catch (err: any) {
       console.error('[WalletTransferUpload Error]', err);
@@ -656,42 +679,80 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
     }
   };
 
-  const handleRemoveInvoiceAttachment = () => {
-    if (invoiceAttachment?.storagePath) {
-      deleteAttachmentFile(invoiceAttachment.storagePath).catch(err => {
-        console.warn('[Storage Cleanup] Failed to delete invoice attachment:', err);
+  /**
+   * Deletes the stored copy of an attachment removed from the form. Only a copy uploaded
+   * in this form is deleted: one the saved request still points to (when editing) stays,
+   * because the edit can still be cancelled and the saved request keeps showing it.
+   */
+  const discardStoredCopy = (attachment: RequestAttachment | null, what: string) => {
+    if (!attachment) return;
+    if (editingRequest) {
+      const saved = [
+        editingRequest.invoiceAttachment,
+        editingRequest.visaDocumentAttachment,
+        editingRequest.installmentTransferAttachment,
+        editingRequest.walletTransferAttachment,
+        ...(editingRequest.attachments || []),
+      ];
+      if (saved.some(s => sameStoredFile(attachment, s))) return;
+    }
+    if (attachment.url && isFirestoreAttachmentUrl(attachment.url)) {
+      deleteAttachment(attachment.url).catch(err => {
+        console.warn(`[Attachment Cleanup] Failed to delete ${what}:`, err);
+      });
+    } else if (attachment.storagePath) {
+      deleteAttachmentFile(attachment.storagePath).catch(err => {
+        console.warn(`[Storage Cleanup] Failed to delete ${what}:`, err);
       });
     }
+  };
+
+  /** Files uploaded in this form for a company other than `orgId` (that company cannot read them). */
+  const attachmentsFromOtherCompany = (orgId: string): RequestAttachment[] =>
+    [invoiceAttachment, visaDocumentAttachment, installmentTransferAttachment, walletTransferAttachment].filter(
+      (a): a is RequestAttachment => {
+        const uploadedFor = a?.url ? uploadedOrgByUrlRef.current.get(a.url) : undefined;
+        return Boolean(orgId && uploadedFor && uploadedFor !== orgId);
+      }
+    );
+
+  /**
+   * The super admin targets another company: files uploaded for the previous one could not be
+   * read by the new company, so they are taken out of the form (their stored copies deleted).
+   */
+  const handleTargetOrgChange = (orgId: string) => {
+    setSelectedOrgId(orgId);
+    const stale = attachmentsFromOtherCompany(orgId);
+    if (stale.length === 0) return;
+    stale.forEach(a => discardStoredCopy(a, 'attachment uploaded for another company'));
+    const isStale = (a: RequestAttachment | null) => Boolean(a && stale.includes(a));
+    if (isStale(invoiceAttachment)) setInvoiceAttachment(null);
+    if (isStale(visaDocumentAttachment)) setVisaDocumentAttachment(null);
+    if (isStale(installmentTransferAttachment)) setInstallmentTransferAttachment(null);
+    if (isStale(walletTransferAttachment)) setWalletTransferAttachment(null);
+    showToast('تم تغيير الشركة، لذا أُزيلت المرفقات التي رُفعت للشركة السابقة. يرجى رفعها مرة أخرى لهذه الشركة.', 'warning');
+  };
+
+  const handleRemoveInvoiceAttachment = () => {
+    discardStoredCopy(invoiceAttachment, 'invoice attachment');
     setInvoiceAttachment(null);
     markTouched();
   };
 
   const handleRemoveVisaDocumentAttachment = () => {
-    if (visaDocumentAttachment?.storagePath) {
-      deleteAttachmentFile(visaDocumentAttachment.storagePath).catch(err => {
-        console.warn('[Storage Cleanup] Failed to delete visa document attachment:', err);
-      });
-    }
+    discardStoredCopy(visaDocumentAttachment, 'visa document attachment');
     setVisaDocumentAttachment(null);
     markTouched();
   };
 
   const handleRemoveInstallmentTransferAttachment = () => {
-    if (installmentTransferAttachment?.storagePath) {
-      deleteAttachmentFile(installmentTransferAttachment.storagePath).catch(err => {
-        console.warn('[Storage Cleanup] Failed to delete installment transfer attachment:', err);
-      });
-    }
+    discardStoredCopy(installmentTransferAttachment, 'installment transfer attachment');
     setInstallmentTransferAttachment(null);
     markTouched();
   };
 
   const handleRemoveWalletTransferAttachment = () => {
-    if (walletTransferAttachment?.storagePath) {
-      deleteAttachmentFile(walletTransferAttachment.storagePath).catch(err => {
-        console.warn('[Storage Cleanup] Failed to delete wallet transfer attachment:', err);
-      });
-    }
+    discardStoredCopy(walletTransferAttachment, 'wallet transfer attachment');
     setWalletTransferAttachment(null);
     markTouched();
   };
@@ -1073,6 +1134,11 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
       setFormError('⚠️ يرجى الانتظار حتى يكتمل رفع المرفقات قبل إرسال الطلب');
       return;
     }
+    // A file is readable only by the company it was uploaded for: it must be the request's company.
+    if (attachmentsFromOtherCompany(selectedOrgId).length > 0) {
+      setFormError('⚠️ بعض المرفقات رُفعت لشركة أخرى غير الشركة المختارة للطلب، ولن تتمكن هذه الشركة من الاطلاع عليها. يرجى حذفها ثم رفعها مرة أخرى.');
+      return;
+    }
 
     // ==========================================
     // 0. EDIT MODE SUBMISSION (تعديل طلب موجود)
@@ -1432,7 +1498,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                 </div>
                 <select
                   value={selectedOrgId}
-                  onChange={(e) => setSelectedOrgId(e.target.value)}
+                  onChange={(e) => handleTargetOrgChange(e.target.value)}
                   className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-bold text-slate-900 text-xs"
                 >
                   {creatableOrgs.map((org) => (
@@ -2036,8 +2102,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       <div className="bg-white border-2 border-teal-300 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
                         <div className="flex items-center gap-3 min-w-0">
                           {invoiceAttachment.url && (invoiceAttachment.type === 'png' || invoiceAttachment.type === 'jpg' || invoiceAttachment.type.startsWith('image/')) ? (
-                            <img 
-                              src={invoiceAttachment.url} 
+                            <AttachmentImage
+                              url={invoiceAttachment.url}
                               alt="معاينة الفاتورة" 
                               className="w-12 h-12 rounded-xl object-cover border border-slate-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
                               onClick={() => setPreviewModalUrl({ url: invoiceAttachment.url!, name: invoiceAttachment.name, type: invoiceAttachment.type })}
@@ -2143,8 +2209,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         <div className="bg-white border-2 border-teal-400 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
                           <div className="flex items-center gap-3 min-w-0">
                             {visaDocumentAttachment.url && (visaDocumentAttachment.type === 'png' || visaDocumentAttachment.type === 'jpg' || visaDocumentAttachment.type.startsWith('image/')) ? (
-                              <img 
-                                src={visaDocumentAttachment.url} 
+                              <AttachmentImage
+                                url={visaDocumentAttachment.url}
                                 alt="مستند التأشيرة" 
                                 className="w-12 h-12 rounded-xl object-cover border border-teal-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
                                 onClick={() => setPreviewModalUrl({ url: visaDocumentAttachment.url!, name: visaDocumentAttachment.name, type: visaDocumentAttachment.type })}
@@ -2254,8 +2320,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         <div className="bg-white border-2 border-blue-400 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
                           <div className="flex items-center gap-3 min-w-0">
                             {installmentTransferAttachment.url && (installmentTransferAttachment.type === 'png' || installmentTransferAttachment.type === 'jpg' || installmentTransferAttachment.type.startsWith('image/')) ? (
-                              <img 
-                                src={installmentTransferAttachment.url} 
+                              <AttachmentImage
+                                url={installmentTransferAttachment.url}
                                 alt="سكرين سداد القسط" 
                                 className="w-12 h-12 rounded-xl object-cover border border-blue-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
                                 onClick={() => setPreviewModalUrl({ url: installmentTransferAttachment.url!, name: installmentTransferAttachment.name, type: installmentTransferAttachment.type })}
@@ -2361,8 +2427,8 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                         <div className="bg-white border-2 border-purple-400 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
                           <div className="flex items-center gap-3 min-w-0">
                             {walletTransferAttachment.url && (walletTransferAttachment.type === 'png' || walletTransferAttachment.type === 'jpg' || walletTransferAttachment.type.startsWith('image/')) ? (
-                              <img 
-                                src={walletTransferAttachment.url} 
+                              <AttachmentImage
+                                url={walletTransferAttachment.url}
                                 alt="سكرين شحن المحفظة" 
                                 className="w-12 h-12 rounded-xl object-cover border border-purple-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
                                 onClick={() => setPreviewModalUrl({ url: walletTransferAttachment.url!, name: walletTransferAttachment.name, type: walletTransferAttachment.type })}

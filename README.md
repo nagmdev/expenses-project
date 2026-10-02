@@ -2,9 +2,10 @@
 
 - **Architecture & Source of Truth:** Cloud Firestore is the single and sole production source of truth for all business data, permissions, and tenant isolation.
 - **Standalone Express API (`server/`):** Kept exclusively as a local offline reference and development testing tool. It is strictly guarded against execution in production environments (`NODE_ENV === 'production'`).
-- **Data integrity, idempotency & deployment steps:** see [docs/05-data-integrity-and-idempotency.md](docs/05-data-integrity-and-idempotency.md) — the updated `firestore.rules` and `storage.rules` must be deployed together with this version.
+- **Data integrity, idempotency & deployment steps:** see [docs/05-data-integrity-and-idempotency.md](docs/05-data-integrity-and-idempotency.md) — only `firestore.rules` is deployed (`firebase deploy --only firestore:rules`).
+- **Attachments live in Firestore** (the project is on the free Spark plan; Cloud Storage needs Blaze): chunked under `attachments/{id}`, isolated per company by `firestore.rules`. Firebase Storage is optional (`VITE_USE_FIREBASE_STORAGE=true`, Blaze only); `storage.rules` is kept for a future Blaze upgrade and is not deployed. See [docs/06-security-rules-deploy.md](docs/06-security-rules-deploy.md).
 - **Security fixes & Rules hardening:**
-  - **Storage Rules:** Strict multi-tenant isolation via Firestore cross-service checks (`isOrgMember(orgId)`).
+  - **Attachments:** Strict multi-tenant isolation in `firestore.rules` (`isOrgMember(orgId)`); uploads are append-only until complete.
   - **Custody & Settlements:** Field whitelisting, mathematical balance invariants, and settlement amount guards at both domain and rules layers.
   - **Sequence & Uniqueness:** Sequence counters protected from unauthorized incrementing; uniqueKeys deletion strictly tied to entity removal.
   - **UI/UX:** Zero browser `alert()` popups; native animated Toast notification system; full button `type` attribute compliance.

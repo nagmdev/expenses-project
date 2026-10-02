@@ -25,7 +25,9 @@ import {
   UploadCloud,
   Image as ImageIcon,
   Undo2,
-  Landmark
+  Landmark,
+  Loader2,
+  Trash2
 } from 'lucide-react';
 import { 
   handleNumericKeyDown, 
@@ -34,6 +36,17 @@ import {
 } from '../utils/validation';
 import { InvoiceViewerModal } from './InvoiceViewerModal';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
+import { useAttachmentPreview } from '../hooks/useAttachmentPreview';
+import { formatFileSize } from '../utils/fileUpload';
+import type { StoredAttachment } from '../lib/attachments';
+import {
+  ATTACHMENT_ACCEPT,
+  ATTACHMENT_LIMIT_LABEL,
+  UNSUPPORTED_ATTACHMENT_MESSAGE,
+  acceptedAttachmentMime,
+  discardStoredAttachment,
+  storeRecordAttachment,
+} from '../utils/recordAttachments';
 import { newId } from '../utils/ids';
 import { isArchivedOrg, toMoney } from '../domain/common';
 import { can } from '../utils/permissions';
@@ -150,7 +163,7 @@ export const CustodyManagement: React.FC = () => {
   const [settlingCustody, setSettlingCustody] = useState<PettyCashCustody | null>(null);
   const [replenishingCustody, setReplenishingCustody] = useState<PettyCashCustody | null>(null);
   const [inspectingCustody, setInspectingCustody] = useState<PettyCashCustody | null>(null);
-  const [previewReceiptUrl, setPreviewReceiptUrl] = useState<string | null>(null);
+  const receiptPreview = useAttachmentPreview();
 
   // Issue Custody Form State
   const [issueOrgId, setIssueOrgId] = useState<string>('');
@@ -172,7 +185,15 @@ export const CustodyManagement: React.FC = () => {
   const [settleInvoiceNumber, setSettleInvoiceNumber] = useState('');
   const [settleInvoiceDate, setSettleInvoiceDate] = useState(localToday);
   const [settleDescription, setSettleDescription] = useState('');
+  // The invoice's document: a link typed by the user, or the fsattach:// link of a file uploaded here
   const [settleReceiptUrl, setSettleReceiptUrl] = useState('');
+  // The file uploaded in this form (stored in Firestore under the custody's company)
+  const [settleReceiptFile, setSettleReceiptFile] = useState<StoredAttachment | null>(null);
+  const [isUploadingReceipt, setIsUploadingReceipt] = useState(false);
+  // Each upload gets a number; one that finishes after the form moved on is deleted instead of shown.
+  const receiptUploadSeq = useRef(0);
+  // The stored copy of the form's file while no saved invoice uses it yet.
+  const unsavedReceiptRef = useRef('');
   const settleGuard = useSubmitGuard();
   const isSettling = settleGuard.pending;
   const [settleError, setSettleError] = useState<string | null>(null);
@@ -445,8 +466,36 @@ export const CustodyManagement: React.FC = () => {
     });
   };
 
+  /**
+   * Takes the uploaded file out of the settlement form. Its stored copy is deleted: no saved
+   * invoice uses it (an upload still running is deleted as soon as it finishes).
+   */
+  const discardSettleReceipt = () => {
+    receiptUploadSeq.current++;
+    setIsUploadingReceipt(false);
+    const unsavedUrl = unsavedReceiptRef.current;
+    unsavedReceiptRef.current = '';
+    setSettleReceiptFile(null);
+    if (unsavedUrl) setSettleReceiptUrl(prev => (prev === unsavedUrl ? '' : prev));
+    discardStoredAttachment(unsavedUrl);
+  };
+
+  // Leaving the page with an unsaved file in the settlement form deletes its stored copy.
+  useEffect(() => {
+    const uploads = receiptUploadSeq;
+    const unsaved = unsavedReceiptRef;
+    return () => {
+      uploads.current++;
+      discardStoredAttachment(unsaved.current);
+      unsaved.current = '';
+    };
+  }, []);
+
   // Handle open settlement modal
   const handleOpenSettleModal = (custody: PettyCashCustody) => {
+    // A file left from an earlier form that was never saved is deleted (not while that form's
+    // invoice is still being saved: its outcome decides).
+    if (!settleGuard.pending) discardSettleReceipt();
     setSettlingCustody(custody);
     setSettleAmount('');
     setSettleServiceCategoryId('');
@@ -455,27 +504,59 @@ export const CustodyManagement: React.FC = () => {
     setSettleInvoiceDate(localToday());
     setSettleDescription('');
     setSettleReceiptUrl('');
+    setSettleReceiptFile(null);
+    setIsUploadingReceipt(false);
+    receiptUploadSeq.current++;
     setSettleError(null);
     settleGuard.rotateKey();
   };
 
-  // Handle receipt image upload
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // A saved invoice's document. An invoice keeps only the link, so a file kept in Firestore is
+  // loaded first to know whether it is a PDF or an image; older data: / https links open as before.
+  const openSettlementReceipt = (url?: string) => {
+    if (url) void receiptPreview.open({ url, name: 'مستند_إيصال_العهدة' });
+  };
 
-    if (file.size > 5 * 1024 * 1024) {
-      setSettleError('حجم الملف كبير جداً، يرجى اختيار ملف أقل من 5 ميجابايت.');
+  // Closing the settlement form without saving drops its uploaded file. While the invoice is
+  // being saved the file stays: a saved invoice keeps it, otherwise the next form deletes it.
+  const closeSettleModal = () => {
+    if (!settleGuard.pending) discardSettleReceipt();
+    setSettlingCustody(null);
+  };
+
+  // The invoice's document is stored (in Firestore, under the custody's company) as soon as it is
+  // picked: PDF, PNG or JPG; images are compressed first; at most 10 MB. The invoice keeps its link.
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const file = input.files?.[0];
+    input.value = ''; // the same file can be picked again after removing it
+    if (!file || !settlingCustody) return;
+
+    if (!acceptedAttachmentMime(file)) {
+      setSettleError(UNSUPPORTED_ATTACHMENT_MESSAGE);
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (reader.result) {
-        setSettleReceiptUrl(reader.result.toString());
+    // A new file replaces the one uploaded before (whose stored copy is deleted)
+    discardSettleReceipt();
+    const upload = ++receiptUploadSeq.current;
+    setIsUploadingReceipt(true);
+    setSettleError(null);
+    try {
+      const stored = await storeRecordAttachment(file, settlingCustody.orgId);
+      if (upload !== receiptUploadSeq.current) {
+        discardStoredAttachment(stored.url);
+        return;
       }
-    };
-    reader.readAsDataURL(file);
+      unsavedReceiptRef.current = stored.url;
+      setSettleReceiptFile(stored);
+      setSettleReceiptUrl(stored.url);
+    } catch (err: any) {
+      if (upload !== receiptUploadSeq.current) return;
+      setSettleError(err?.message || 'تعذر رفع المستند، يرجى المحاولة مرة أخرى.');
+    } finally {
+      if (upload === receiptUploadSeq.current) setIsUploadingReceipt(false);
+    }
   };
 
   // Submit settlement
@@ -502,6 +583,18 @@ export const CustodyManagement: React.FC = () => {
       return;
     }
 
+    if (isUploadingReceipt) {
+      setSettleError('يرجى الانتظار حتى يكتمل رفع المستند.');
+      return;
+    }
+    // A typed link must be a web address: a file is never kept inside the invoice record itself
+    // (uploaded files are stored apart and the invoice keeps their link).
+    const receiptUrl = settleReceiptUrl.trim();
+    if (receiptUrl && !settleReceiptFile && !/^https?:\/\//i.test(receiptUrl)) {
+      setSettleError('رابط المستند يجب أن يبدأ بـ https:// — أو استخدم زر «رفع صورة المستند» لإرفاق الملف.');
+      return;
+    }
+
     const custody = settlingCustody;
     await settleGuard.run(async (idempotencyKey) => {
       try {
@@ -513,7 +606,7 @@ export const CustodyManagement: React.FC = () => {
           settleVendorName.trim() || undefined,
           settleInvoiceNumber.trim() || undefined,
           settleInvoiceDate || undefined,
-          settleReceiptUrl || undefined,
+          receiptUrl || undefined,
           { idempotencyKey }
         );
 
@@ -522,6 +615,9 @@ export const CustodyManagement: React.FC = () => {
           return;
         }
 
+        // The saved invoice uses the stored file now: it is no longer deleted with the form.
+        if (unsavedReceiptRef.current === receiptUrl) unsavedReceiptRef.current = '';
+        setSettleReceiptFile(null);
         settleGuard.rotateKey();
         setSettlingCustody(null);
         setNotice(`تم تسجيل فاتورة تصفية بمبلغ ${fmtMoney(amountNum)} ${currencyOf(custody.currency)} على العهدة ${custody.custodyNumber}.`);
@@ -1300,11 +1396,21 @@ export const CustodyManagement: React.FC = () => {
                         {item.receiptUrl ? (
                           <button
                             type="button"
-                            onClick={() => setPreviewReceiptUrl(item.receiptUrl || null)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg text-xs font-bold transition cursor-pointer"
+                            onClick={() => openSettlementReceipt(item.receiptUrl)}
+                            disabled={receiptPreview.loadingUrl === item.receiptUrl}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg text-xs font-bold transition cursor-pointer disabled:opacity-70 disabled:cursor-wait"
                           >
-                            <FileText className="h-3.5 w-3.5" />
-                            <span>عرض الفاتورة</span>
+                            {receiptPreview.loadingUrl === item.receiptUrl ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                <span>جاري التحميل...</span>
+                              </>
+                            ) : (
+                              <>
+                                <FileText className="h-3.5 w-3.5" />
+                                <span>عرض الفاتورة</span>
+                              </>
+                            )}
                           </button>
                         ) : (
                           <span className="text-slate-300 text-[11px]">لا يوجد</span>
@@ -1561,7 +1667,7 @@ export const CustodyManagement: React.FC = () => {
               </div>
               <button
                 type="button"
-                onClick={() => setSettlingCustody(null)}
+                onClick={closeSettleModal}
                 className="text-slate-400 hover:text-slate-600 p-1 rounded-xl hover:bg-slate-100 cursor-pointer"
               >
                 <X className="h-5 w-5" />
@@ -1685,38 +1791,98 @@ export const CustodyManagement: React.FC = () => {
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">صورة الفاتورة أو المستند</label>
                 <div className="space-y-2">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <input
                       type="file"
                       ref={receiptFileInputRef}
                       onChange={handleFileUpload}
-                      accept="image/*,.pdf"
+                      accept={ATTACHMENT_ACCEPT}
                       className="hidden"
                     />
                     <button
                       type="button"
                       onClick={() => receiptFileInputRef.current?.click()}
-                      className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                      disabled={isUploadingReceipt || isSettling}
+                      className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                     >
-                      <UploadCloud className="h-4 w-4" />
-                      <span>رفع صورة المستند</span>
+                      {isUploadingReceipt ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <UploadCloud className="h-4 w-4" />
+                      )}
+                      <span>
+                        {isUploadingReceipt ? 'جاري رفع المستند...' : settleReceiptFile ? 'استبدال الملف' : 'رفع صورة المستند'}
+                      </span>
                     </button>
-                    <span className="text-[11px] text-slate-400">أو رابط إلكتروني:</span>
+                    {!settleReceiptFile && !isUploadingReceipt && (
+                      <span className="text-[11px] text-slate-400">أو رابط إلكتروني:</span>
+                    )}
                   </div>
+                  <span className="text-[10px] text-slate-400 block">
+                    PDF أو صور (PNG, JPG) حتى {ATTACHMENT_LIMIT_LABEL} كحد أقصى (ضغط تلقائي للصور)
+                  </span>
 
-                  <input
-                    type="text"
-                    value={settleReceiptUrl}
-                    onChange={(e) => setSettleReceiptUrl(e.target.value)}
-                    placeholder="https://... أو سيتم حفظ الملف المرفوع تلقائياً"
-                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-
-                  {settleReceiptUrl && (
-                    <div className="flex items-center gap-2 text-xs text-blue-600 font-bold">
-                      <ImageIcon className="h-3.5 w-3.5" />
-                      <span>تم إرفاق المستند بنجاح</span>
+                  {settleReceiptFile ? (
+                    <div className="flex items-center justify-between gap-2 p-2.5 bg-blue-50/40 rounded-xl border border-blue-200">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="h-8 w-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+                          {settleReceiptFile.mimeType === 'application/pdf' ? (
+                            <FileText className="h-4 w-4" />
+                          ) : (
+                            <ImageIcon className="h-4 w-4" />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <span className="text-xs font-bold text-slate-900 block truncate max-w-[220px]" title={settleReceiptFile.name}>
+                            {settleReceiptFile.name}
+                          </span>
+                          <span className="text-[10px] text-blue-700 font-bold">
+                            {formatFileSize(settleReceiptFile.size)} • تم إرفاق المستند بنجاح
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => receiptPreview.open({
+                            url: settleReceiptFile.url,
+                            name: settleReceiptFile.name,
+                            size: formatFileSize(settleReceiptFile.size),
+                            type: settleReceiptFile.mimeType === 'application/pdf' ? 'pdf' : 'jpg',
+                          })}
+                          className="text-blue-600 hover:text-blue-800 p-1.5 rounded-lg hover:bg-blue-50 transition cursor-pointer"
+                          title="معاينة المستند"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={discardSettleReceipt}
+                          disabled={isSettling}
+                          className="text-rose-500 hover:text-rose-700 p-1.5 rounded-lg hover:bg-rose-50 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="حذف المرفق"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
                     </div>
+                  ) : !isUploadingReceipt && (
+                    <>
+                      <input
+                        type="text"
+                        value={settleReceiptUrl}
+                        onChange={(e) => setSettleReceiptUrl(e.target.value)}
+                        placeholder="https://..."
+                        className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+
+                      {settleReceiptUrl && (
+                        <div className="flex items-center gap-2 text-xs text-blue-600 font-bold">
+                          <ImageIcon className="h-3.5 w-3.5" />
+                          <span>تم إرفاق المستند بنجاح</span>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -1725,7 +1891,7 @@ export const CustodyManagement: React.FC = () => {
               <div className="pt-3 flex items-center justify-end gap-2 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setSettlingCustody(null)}
+                  onClick={closeSettleModal}
                   disabled={isSettling}
                   className="px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
                 >
@@ -2228,11 +2394,16 @@ export const CustodyManagement: React.FC = () => {
                         {item.receiptUrl && (
                           <button
                             type="button"
-                            onClick={() => setPreviewReceiptUrl(item.receiptUrl || null)}
-                            className="p-1.5 bg-white border border-slate-200 rounded-lg text-slate-600 hover:text-blue-600 hover:border-blue-300"
-                            title="عرض الفاتورة"
+                            onClick={() => openSettlementReceipt(item.receiptUrl)}
+                            disabled={receiptPreview.loadingUrl === item.receiptUrl}
+                            className="p-1.5 bg-white border border-slate-200 rounded-lg text-slate-600 hover:text-blue-600 hover:border-blue-300 disabled:cursor-wait"
+                            title={receiptPreview.loadingUrl === item.receiptUrl ? 'جاري تحميل الفاتورة...' : 'عرض الفاتورة'}
                           >
-                            <Eye className="h-3.5 w-3.5" />
+                            {receiptPreview.loadingUrl === item.receiptUrl ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Eye className="h-3.5 w-3.5" />
+                            )}
                           </button>
                         )}
                       </div>
@@ -2259,10 +2430,10 @@ export const CustodyManagement: React.FC = () => {
       {/* ========================================================================= */}
       {/* MODAL 5: معاينة الفاتورة أو المستند الإلكتروني */}
       {/* ========================================================================= */}
-      {previewReceiptUrl && (
+      {receiptPreview.preview && (
         <InvoiceViewerModal
-          attachment={{ url: previewReceiptUrl, name: 'مستند_إيصال_العهدة' }}
-          onClose={() => setPreviewReceiptUrl(null)}
+          attachment={receiptPreview.preview}
+          onClose={receiptPreview.close}
         />
       )}
 

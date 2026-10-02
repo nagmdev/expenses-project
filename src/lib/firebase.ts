@@ -44,14 +44,7 @@ import {
   type Unsubscribe,
   type CollectionReference,
 } from 'firebase/firestore';
-import {
-  getStorage,
-  ref,
-  uploadBytes,
-  getDownloadURL,
-  deleteObject,
-  type FirebaseStorage
-} from 'firebase/storage';
+import type { FirebaseStorage } from 'firebase/storage';
 
 export interface FirebaseConfig {
   apiKey: string;
@@ -104,6 +97,14 @@ const EMULATOR_CONFIG: FirebaseConfig = {
   messagingSenderId: '0',
   appId: 'demo-expenses-e2e',
 };
+/**
+ * Firebase (Cloud) Storage is OPTIONAL and off by default: it needs the paid Blaze plan.
+ * Attachments live in Firestore (src/lib/attachments.ts). Set VITE_USE_FIREBASE_STORAGE=true
+ * only on a Blaze project, and only to delete files older versions uploaded to Storage.
+ * Never used with the emulators (there is no Storage emulator in the e2e setup).
+ */
+export const USE_FIREBASE_STORAGE =
+  import.meta.env.VITE_USE_FIREBASE_STORAGE === 'true' && !USE_FIREBASE_EMULATORS;
 const connectEmulatedAuth = (a: ReturnType<typeof getAuth>) => {
   try {
     connectAuthEmulator(a, `http://${EMULATOR_HOST}:9099`, { disableWarnings: true });
@@ -189,25 +190,24 @@ export function isFirebaseConfigured(): boolean {
 // Singleton instances
 let appInstance: FirebaseApp | null = null;
 let dbInstance: Firestore | null = null;
-let storageInstance: FirebaseStorage | null = null;
 let currentConfigString = '';
 
 /**
- * Initialize or retrieve Firebase and Firestore instances
+ * Initialize or retrieve Firebase and Firestore instances.
+ * (Firebase Storage is not initialized here: see USE_FIREBASE_STORAGE / getStorageInstance.)
  */
-export function initFirebase(): { app: FirebaseApp | null; db: Firestore | null; storage: FirebaseStorage | null } {
+export function initFirebase(): { app: FirebaseApp | null; db: Firestore | null } {
   const config = getFirebaseConfig();
   if (!config || !config.apiKey || !config.projectId) {
     appInstance = null;
     dbInstance = null;
-    storageInstance = null;
     currentConfigString = '';
-    return { app: null, db: null, storage: null };
+    return { app: null, db: null };
   }
 
   const newConfigString = JSON.stringify(config);
   if (appInstance && dbInstance && currentConfigString === newConfigString) {
-    return { app: appInstance, db: dbInstance, storage: storageInstance };
+    return { app: appInstance, db: dbInstance };
   }
 
   try {
@@ -234,18 +234,11 @@ export function initFirebase(): { app: FirebaseApp | null; db: Firestore | null;
         // already connected (HMR)
       }
     }
-    try {
-      // No Storage emulator: uploads fall back to data URLs (see utils/fileUpload.ts).
-      storageInstance = USE_FIREBASE_EMULATORS ? null : getStorage(appInstance);
-    } catch (storageErr) {
-      console.warn('[Firebase] Storage initialization notice:', storageErr);
-      storageInstance = null;
-    }
     currentConfigString = newConfigString;
-    return { app: appInstance, db: dbInstance, storage: storageInstance };
+    return { app: appInstance, db: dbInstance };
   } catch (err) {
     console.error('[Firebase] Failed to initialize Firebase app:', err);
-    return { app: null, db: null, storage: null };
+    return { app: null, db: null };
   }
 }
 
@@ -261,21 +254,42 @@ export async function resetFirebaseApp(): Promise<void> {
   }
   appInstance = null;
   dbInstance = null;
-  storageInstance = null;
   currentConfigString = '';
 }
 
 // Initial bootstrap
-const { app, db, storage } = initFirebase();
-export { app, db, storage };
+const { app, db } = initFirebase();
+export { app, db };
 
-export function getStorageInstance(): FirebaseStorage | null {
-  if (storageInstance) return storageInstance;
-  const { storage: s } = initFirebase();
-  return s;
+/**
+ * Firebase Storage, only when VITE_USE_FIREBASE_STORAGE=true (Blaze plan); null otherwise.
+ * The SDK is loaded on first use, so a Spark deployment never touches Storage.
+ */
+export async function getStorageInstance(): Promise<FirebaseStorage | null> {
+  if (!USE_FIREBASE_STORAGE) return null;
+  const { app: current } = initFirebase();
+  if (!current) return null;
+  try {
+    const { getStorage } = await import('firebase/storage');
+    return getStorage(current);
+  } catch (err) {
+    console.warn('[Firebase] Storage is enabled but could not be initialized:', err);
+    return null;
+  }
 }
 
-export { ref, uploadBytes, getDownloadURL, deleteObject };
+/**
+ * Deletes a file an older version uploaded to Firebase Storage (`storagePath`).
+ * Returns false, without doing anything, when Storage is not enabled.
+ */
+export async function deleteStorageObject(storagePath: string): Promise<boolean> {
+  if (!storagePath) return false;
+  const storage = await getStorageInstance();
+  if (!storage) return false;
+  const { ref, deleteObject } = await import('firebase/storage');
+  await deleteObject(ref(storage, storagePath));
+  return true;
+}
 
 // Firebase Authentication
 export const auth = app ? getAuth(app) : getAuth();

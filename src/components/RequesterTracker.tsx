@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { ExpenseRequest } from '../types';
 import { NewRequestModal } from './NewRequestModal';
-import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
+import { InvoiceViewerModal, InvoiceViewerAttachment, AttachmentImage } from './InvoiceViewerModal';
 import { useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 import {
   fmtMoney,
@@ -783,7 +783,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                               className="cursor-pointer shrink-0"
                               title="معاينة المستند"
                             >
-                              <img src={activeRequest.visaDocumentAttachment.url} alt="تأشيرة" className="w-10 h-10 rounded-lg object-cover border border-teal-300 shadow-2xs" />
+                              <AttachmentImage url={activeRequest.visaDocumentAttachment.url} alt="تأشيرة" className="w-10 h-10 rounded-lg object-cover border border-teal-300 shadow-2xs" />
                             </button>
                           ) : (
                             <div className="w-10 h-10 rounded-lg bg-teal-100 text-teal-800 font-bold text-xs flex items-center justify-center border border-teal-200 shrink-0">
@@ -841,7 +841,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                               className="cursor-pointer shrink-0"
                               title="معاينة السكرين"
                             >
-                              <img src={activeRequest.installmentTransferAttachment.url} alt="قسط" className="w-10 h-10 rounded-lg object-cover border border-blue-300 shadow-2xs" />
+                              <AttachmentImage url={activeRequest.installmentTransferAttachment.url} alt="قسط" className="w-10 h-10 rounded-lg object-cover border border-blue-300 shadow-2xs" />
                             </button>
                           ) : (
                             <div className="w-10 h-10 rounded-lg bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center border border-blue-200 shrink-0">
@@ -899,7 +899,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                               className="cursor-pointer shrink-0"
                               title="معاينة التحويل"
                             >
-                              <img src={activeRequest.walletTransferAttachment.url} alt="محفظة" className="w-10 h-10 rounded-lg object-cover border border-emerald-300 shadow-2xs" />
+                              <AttachmentImage url={activeRequest.walletTransferAttachment.url} alt="محفظة" className="w-10 h-10 rounded-lg object-cover border border-emerald-300 shadow-2xs" />
                             </button>
                           ) : (
                             <div className="w-10 h-10 rounded-lg bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center justify-center border border-emerald-200 shrink-0">
@@ -979,9 +979,9 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                             className="cursor-pointer group shrink-0"
                             title="معاينة الفاتورة"
                           >
-                            <img 
-                              src={activeRequest.invoiceAttachment.url} 
-                              alt="فاتورة" 
+                            <AttachmentImage
+                              url={activeRequest.invoiceAttachment.url}
+                              alt="فاتورة"
                               className="w-10 h-10 rounded-lg object-cover border border-amber-200 shadow-2xs group-hover:scale-105 group-hover:border-amber-400 transition" 
                             />
                           </button>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   ZoomIn,
@@ -8,9 +8,13 @@ import {
   ExternalLink,
   FileText,
   Receipt,
-  Maximize2
+  Maximize2,
+  Loader2,
+  AlertTriangle,
+  RefreshCw
 } from 'lucide-react';
 import { openFileSafely, downloadFileSafely, dataUrlToBlob } from '../utils/fileUpload';
+import { isFirestoreAttachmentUrl, loadAttachmentBlob, resolveAttachmentUrl } from '../lib/attachments';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 export interface InvoiceViewerAttachment {
@@ -23,6 +27,116 @@ export interface InvoiceViewerAttachment {
 interface InvoiceViewerModalProps {
   attachment: InvoiceViewerAttachment | null;
   onClose: () => void;
+}
+
+const DOCUMENT_LOAD_ERROR = 'تعذر تحميل المستند. تحقق من اتصالك بالإنترنت ومن صلاحيتك على هذا الطلب ثم أعد المحاولة.';
+
+/** The loader's own message when it is written in Arabic (e.g. "attachment incomplete"), else ''. */
+const arabicReason = (err: unknown): string => {
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  return /\p{Script=Arabic}/u.test(message) ? message : '';
+};
+
+const isPdfDocument = (url?: string, type?: string, name?: string): boolean =>
+  type === 'pdf' ||
+  type === 'application/pdf' ||
+  Boolean(name && name.toLowerCase().endsWith('.pdf')) ||
+  Boolean(url && url.startsWith('data:application/pdf'));
+
+/** Opens a blob: URL in a new tab (a download when the browser blocks the tab). */
+function openObjectUrlInNewTab(objectUrl: string, fileName: string): void {
+  const newWin = window.open(objectUrl, '_blank');
+  // (the helpers below start a blob: download synchronously and never reject)
+  if (!newWin || newWin.closed) void downloadFileSafely(objectUrl, fileName);
+}
+
+/**
+ * Opens an in-memory document in a new tab. It gets its own short-lived object URL, so
+ * closing this preview (which revokes the preview's URL) cannot break the new tab.
+ */
+function openBlobInNewTab(blob: Blob, fileName: string): void {
+  const blobUrl = URL.createObjectURL(blob);
+  openObjectUrlInNewTab(blobUrl, fileName);
+  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 120000);
+}
+
+/** Saves an in-memory document to the user's device. */
+function downloadBlob(blob: Blob, fileName: string): void {
+  const blobUrl = URL.createObjectURL(blob);
+  void downloadFileSafely(blobUrl, fileName);
+  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 45000);
+}
+
+interface AttachmentImageProps {
+  /** Any stored attachment URL: fsattach:// (Firestore), data: or https. */
+  url: string;
+  alt: string;
+  className?: string;
+  title?: string;
+  onClick?: () => void;
+}
+
+/**
+ * Thumbnail of an attached image. Attachments kept in Firestore (fsattach://) are
+ * loaded first (a small spinner meanwhile, a warning icon if they cannot be read);
+ * data: and https URLs of older records are shown directly, exactly as before.
+ */
+export const AttachmentImage: React.FC<AttachmentImageProps> = ({ url, alt, className = '', title, onClick }) => {
+  const fromFirestore = isFirestoreAttachmentUrl(url);
+  const [resolved, setResolved] = useState<{ forUrl: string; src: string; failed: boolean } | null>(null);
+
+  useEffect(() => {
+    if (!fromFirestore) return;
+    let cancelled = false;
+    // The object URL is cached and owned by the attachments module: never revoked here.
+    resolveAttachmentUrl(url).then(
+      src => {
+        if (!cancelled) setResolved({ forUrl: url, src, failed: false });
+      },
+      err => {
+        console.warn('[AttachmentImage] Could not load attachment:', err);
+        if (!cancelled) setResolved({ forUrl: url, src: '', failed: true });
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [url, fromFirestore]);
+
+  if (!fromFirestore) {
+    return <img src={url} alt={alt} title={title} className={className} onClick={onClick} />;
+  }
+
+  const current = resolved && resolved.forUrl === url ? resolved : null;
+  if (!current || current.failed) {
+    const label = current ? 'تعذر تحميل المرفق' : 'جاري تحميل المرفق...';
+    return (
+      <span
+        role="img"
+        aria-label={`${alt}: ${label}`}
+        title={current ? `${label} — انقر للمعاينة وإعادة المحاولة` : label}
+        className={`${className} inline-flex items-center justify-center bg-slate-50 text-slate-400`}
+        onClick={onClick}
+      >
+        {current ? (
+          <AlertTriangle className="h-4 w-4 text-rose-500" />
+        ) : (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        )}
+      </span>
+    );
+  }
+
+  return <img src={current.src} alt={alt} title={title} className={className} onClick={onClick} />;
+};
+
+interface LoadedDocument {
+  forUrl: string;
+  /** What the <img>/<iframe> shows ('' when loading failed). */
+  src: string;
+  /** The document's bytes when they were loaded here (open / download use them). */
+  blob: Blob | null;
+  error: string;
 }
 
 export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachment, onClose }) => {
@@ -39,6 +153,66 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
   }
 
   const isOpen = Boolean(attachment?.url);
+  const docUrl = attachment?.url || '';
+  const docIsPdf = isPdfDocument(docUrl, attachment?.type, attachment?.name);
+
+  // Documents kept in Firestore (fsattach://) are read first; a PDF stored inline as a
+  // data: URL is turned into a blob: URL (browsers refuse data: documents in frames).
+  // Everything else (images in data: URLs, https links of older records) is shown as is.
+  const fromFirestore = isFirestoreAttachmentUrl(docUrl);
+  const needsLoading = fromFirestore || (docIsPdf && docUrl.startsWith('data:'));
+  const [loaded, setLoaded] = useState<LoadedDocument | null>(null);
+  const [reloadCount, setReloadCount] = useState(0);
+
+  useEffect(() => {
+    if (!docUrl || !needsLoading) return;
+    let cancelled = false;
+    let ownUrl = '';
+    const load = async () => {
+      try {
+        if (docIsPdf) {
+          const raw = docUrl.startsWith('data:') ? dataUrlToBlob(docUrl) : await loadAttachmentBlob(docUrl);
+          if (cancelled) return;
+          // The browser's PDF viewer needs the right type to show the file in the frame.
+          const pdf = raw.type === 'application/pdf' ? raw : new Blob([raw], { type: 'application/pdf' });
+          ownUrl = URL.createObjectURL(pdf);
+          setLoaded({ forUrl: docUrl, src: ownUrl, blob: pdf, error: '' });
+        } else {
+          // Image thumbnails already resolved this URL: reuse the cached object URL
+          // (owned by the attachments module, so it is never revoked here).
+          const src = await resolveAttachmentUrl(docUrl);
+          if (cancelled) return;
+          setLoaded({ forUrl: docUrl, src, blob: null, error: '' });
+        }
+      } catch (err) {
+        if (cancelled) return;
+        console.error('[InvoiceViewer] Failed to load the document:', err);
+        if (!fromFirestore) {
+          // An inline data: PDF that cannot be converted is still given to the frame as is.
+          setLoaded({ forUrl: docUrl, src: docUrl, blob: null, error: '' });
+        } else {
+          setLoaded({ forUrl: docUrl, src: '', blob: null, error: arabicReason(err) || DOCUMENT_LOAD_ERROR });
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+      if (ownUrl) {
+        const revoked = ownUrl;
+        URL.revokeObjectURL(revoked);
+        // Never show a revoked URL again (e.g. the same PDF opened a second time).
+        setLoaded(prev => (prev && prev.src === revoked ? null : prev));
+      }
+    };
+  }, [docUrl, docIsPdf, needsLoading, fromFirestore, reloadCount]);
+
+  const current = needsLoading ? (loaded && loaded.forUrl === docUrl ? loaded : null) : null;
+  const isLoadingDoc = needsLoading && !current;
+  const loadError = current?.error || '';
+  const displaySrc = needsLoading ? (current?.src || '') : docUrl;
+  const frameSrc = docIsPdf && !isLoadingDoc && !loadError ? displaySrc : '';
+
   const dialogRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const onCloseRef = useRef(onClose);
@@ -105,7 +279,8 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
       window.removeEventListener('blur', onWindowBlur);
       frame?.removeEventListener('mouseleave', reclaimFocus);
     };
-  }, [isOpen, attachment?.url]);
+    // frameSrc: the frame only mounts once the document has been loaded.
+  }, [isOpen, frameSrc]);
 
   // Same-origin documents (a PDF shown from a blob: URL) also get an Esc listener
   // inside the frame; a cross-origin frame refuses access, which is fine.
@@ -120,43 +295,13 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
     }
   };
 
-  // Generate safe blob URL for PDFs if using base64 data URL
-  const docUrl = attachment?.url;
-  const docType = attachment?.type;
-  const docName = attachment?.name;
-  const pdfBlobUrl = useMemo(() => {
-    if (!docUrl) return '';
-    const isPdf = docType === 'pdf' ||
-      (docName && docName.toLowerCase().endsWith('.pdf')) ||
-      docUrl.startsWith('data:application/pdf');
-
-    if (isPdf && docUrl.startsWith('data:')) {
-      try {
-        const blob = dataUrlToBlob(docUrl);
-        return URL.createObjectURL(blob);
-      } catch (e) {
-        console.error('Failed to convert PDF data URL to blob:', e);
-      }
-    }
-    return docUrl;
-  }, [docUrl, docType, docName]);
-
-  // Clean up blob URL on unmount or URL change
-  useEffect(() => {
-    return () => {
-      if (pdfBlobUrl && pdfBlobUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(pdfBlobUrl);
-      }
-    };
-  }, [pdfBlobUrl]);
-
   if (!attachment || !attachment.url) return null;
 
   const safeUrl = attachment.url;
   const fileName = attachment.name || 'مستند_الفاتورة';
-  const isPdf = attachment.type === 'pdf' || 
-    (attachment.name && attachment.name.toLowerCase().endsWith('.pdf')) ||
-    safeUrl.startsWith('data:application/pdf');
+  const isPdf = docIsPdf;
+  // A Firestore document can be opened / saved only once its bytes are here.
+  const actionsDisabled = fromFirestore && (isLoadingDoc || Boolean(loadError));
 
   const handleZoomIn = () => setZoom(prev => Math.min(Number((prev + 0.25).toFixed(2)), 3.5));
   const handleZoomOut = () => setZoom(prev => Math.max(Number((prev - 0.25).toFixed(2)), 0.5));
@@ -166,12 +311,26 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
     setRotation(0);
   };
 
+  // Opening / saving happens right inside the click (no waiting), so the browser never
+  // treats the new tab as an unwanted pop-up.
   const handleOpenExternal = () => {
-    if (safeUrl) openFileSafely(safeUrl, fileName);
+    if (actionsDisabled) return;
+    if (current?.blob) openBlobInNewTab(current.blob, fileName);
+    else if (fromFirestore && current?.src) openObjectUrlInNewTab(current.src, fileName);
+    else if (safeUrl.startsWith('blob:')) openObjectUrlInNewTab(safeUrl, fileName);
+    else if (safeUrl) void openFileSafely(safeUrl, fileName);
   };
 
   const handleDownload = () => {
-    if (safeUrl) downloadFileSafely(safeUrl, fileName);
+    if (actionsDisabled) return;
+    if (current?.blob) downloadBlob(current.blob, fileName);
+    else if (fromFirestore && current?.src) void downloadFileSafely(current.src, fileName);
+    else if (safeUrl) void downloadFileSafely(safeUrl, fileName);
+  };
+
+  const handleRetry = () => {
+    setLoaded(null);
+    setReloadCount(n => n + 1);
   };
 
   return (
@@ -264,8 +423,9 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
           <button
             type="button"
             onClick={handleOpenExternal}
+            disabled={actionsDisabled}
             title="فتح المستند في تبويب جديد بدون حجب"
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-xl text-xs font-bold transition border border-slate-700 cursor-pointer shadow-2xs"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-xl text-xs font-bold transition border border-slate-700 cursor-pointer shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ExternalLink className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">تبويب جديد ↗</span>
@@ -274,8 +434,9 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
           <button
             type="button"
             onClick={handleDownload}
+            disabled={actionsDisabled}
             title="تحميل نسخة من الفاتورة إلى جهازك"
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition shadow-sm cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition shadow-sm cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Download className="h-3.5 w-3.5" />
             <span>تحميل</span>
@@ -302,14 +463,40 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
           }
         }}
       >
-        {isPdf ? (
-          <div 
+        {isLoadingDoc ? (
+          <div
+            role="status"
+            className="flex flex-col items-center gap-3 px-8 py-6 bg-slate-900/80 border border-slate-700 rounded-2xl text-slate-200 text-sm font-bold shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Loader2 className="h-7 w-7 animate-spin text-amber-400" />
+            <span>جاري تحميل المستند...</span>
+          </div>
+        ) : loadError ? (
+          <div
+            role="alert"
+            className="max-w-md flex flex-col items-center gap-3 px-6 py-6 bg-slate-900/90 border border-rose-500/40 rounded-2xl text-center shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <AlertTriangle className="h-8 w-8 text-rose-400" />
+            <p className="text-sm font-bold text-rose-100 leading-relaxed">{loadError}</p>
+            <button
+              type="button"
+              onClick={handleRetry}
+              className="flex items-center gap-1.5 px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-xl text-xs font-bold transition border border-slate-600 cursor-pointer"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              <span>إعادة المحاولة</span>
+            </button>
+          </div>
+        ) : isPdf ? (
+          <div
             className="w-full max-w-4xl h-[82vh] bg-white rounded-2xl overflow-hidden shadow-2xl flex flex-col border border-slate-700"
             onClick={(e) => e.stopPropagation()}
           >
             <iframe
               ref={iframeRef}
-              src={pdfBlobUrl}
+              src={frameSrc}
               title={fileName}
               onLoad={handleIframeLoad}
               className="w-full flex-1 border-0"
@@ -338,7 +525,7 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
             onClick={(e) => e.stopPropagation()}
           >
             <img
-              src={attachment.url}
+              src={displaySrc}
               alt={fileName}
               className="max-h-[82vh] max-w-[90vw] object-contain rounded-2xl shadow-2xl border border-slate-700/80 bg-white/5 select-none"
               draggable={false}

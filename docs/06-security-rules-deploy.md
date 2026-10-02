@@ -82,6 +82,63 @@
 - Org admins may detach a profile from their org, but still never move one to
   another org.
 
+### Attachments live in Firestore (Spark plan, no Cloud Storage)
+
+- The Firebase project is on the free **Spark** plan. Cloud Storage requires the paid
+  **Blaze** plan. The previous version made every upload depend on Storage (with no
+  fallback), so uploading invoices, visa documents and custody receipts failed on the
+  live site.
+- Every attachment is now stored **inside Firestore**, in chunks
+  (`src/lib/attachments.ts`, `src/lib/attachmentsCore.ts`):
+  - `attachments/{id}`: `{ id, orgId, name, mimeType, size, chunkCount, createdBy, createdAt, complete }`.
+  - `attachments/{id}/chunks/{index}`: `{ index, data }`, where `data` is a base64 slice of
+    at most 700,000 characters. Each document stays far below Firestore's 1 MiB limit.
+  - Records (requests, visas, custodies) keep `fsattach://<id>` as the attachment url.
+  - Upload order: metadata (`complete: false`), then the chunks in batches of about
+    2.1 MB (well under the 10 MiB request limit), then `complete: true`. Readers refuse an
+    incomplete attachment with an Arabic message, so a broken upload is never shown as a
+    truncated file. A failed upload removes what it wrote.
+  - Allowed: PNG, JPG/JPEG and PDF, at most **10 MB** per file after image compression
+    (20 chunks).
+- Rules (`match /attachments` in `firestore.rules`):
+  - **get:** members of the attachment's company, and super admins. A missing id is
+    refused exactly like another company's attachment, so nothing leaks.
+  - **list:** super admins only.
+  - **create:** a member of `orgId`, in their own name (`createdBy`), starting with
+    `complete: false`, with an allowed type and size.
+  - **chunks:** created only by the uploader, only while incomplete, only ids
+    `0 … chunkCount-1`. They are never rewritten, and their reads follow the parent's.
+  - **update:** the uploader sets `complete: true`, once, after the last chunk exists.
+    Nothing else can ever change.
+  - **delete:** the uploader (while still a member of that company), the company's
+    admins, and super admins. Chunks are deleted first, in the same batch as the metadata,
+    and the same batch writes the tombstone `attachmentTombstones/{id}`
+    `{ orgId, deletedBy, deletedAt }`.
+  - **Ids are single-use.** No attachment is ever created under an id that has a
+    tombstone; tombstones never change and are never removed (super admins read them).
+    The metadata cannot be deleted without its tombstone, a tombstone cannot be written
+    without deleting the metadata, and a complete attachment never loses single chunks
+    (only together with its metadata). So the file behind a saved `fsattach://<id>`
+    link (an approved or paid request, a visa, a custody receipt) can be removed, but
+    never swapped for other content by deleting and re-creating the same id; after a
+    delete the link is refused like any missing attachment.
+- **Older records keep working.** `data:` URLs stored inside documents, and https
+  Firebase Storage URLs, still display, open and download. No migration is needed.
+- **Free quota.** Spark includes 1 GiB of Firestore storage, 50,000 reads and 20,000
+  writes per day. A file takes about 1.4 × its size. Uploading it costs `chunkCount + 2`
+  writes; opening it costs `chunkCount + 1` reads, and it stays cached for the session.
+  - A 300 KB compressed photo: 1 chunk, 3 writes, 2 reads.
+  - A 10 MB PDF: 20 chunks, 22 writes, 21 reads.
+  - Optional, to save space: exempt the `data` field from indexing (Firebase Console →
+    Firestore → Indexes → Single field → Add exemption: collection `chunks`, field `data`).
+- **Cloud Storage is optional and off by default.** It is initialized only when
+  `VITE_USE_FIREBASE_STORAGE=true` (Blaze only). It is then used only to delete files
+  that older versions uploaded to Storage. Nothing else needs it.
+  - `firebase.json` no longer deploys `storage.rules` (a plain `firebase deploy` would
+    fail on Spark). The file stays in the repo for a future Blaze upgrade: then add
+    `"storage": { "rules": "storage.rules" }` back to `firebase.json` and deploy it with
+    `--only storage`.
+
 ## Before deploying
 
 1. **Super admins who sign in with email/password.** An unverified account that is a
@@ -114,9 +171,11 @@
    Until the lists exist, the new rules reject request notifications to that org's
    admins. That would make creating a request fail.
 3. **Publish `firestore.rules`** from this repo: Firebase Console → Firestore → Rules
-   → paste → Publish. With the CLI, add a `firebase.json` containing
-   `{ "firestore": { "rules": "firestore.rules" } }`, then run
+   → paste → Publish. With the CLI (the repo's `firebase.json` deploys Firestore rules
+   only), run
    `npx firebase-tools deploy --only firestore:rules --project expenses-project-ce1f9`.
+   **Only Firestore rules are deployed.** Do not deploy `storage.rules`: Storage is not
+   available on the Spark plan.
    Between steps 1 and 3, org admins cannot remove members: the old rules refuse to
    detach the profile. Super admins can.
    Never publish these rules before the new frontend is live: they refuse the old-format
@@ -126,3 +185,17 @@
    البيانات → «ترحيل المفاتيح». Running it again is safe (nothing is left to move).
 5. The in-app "Firebase config" modal no longer embeds rules to copy. Its old
    snippets (including an `allow read, write: if true` one) must never be published.
+
+### Deploying the attachments change (Firestore instead of Storage)
+
+The `attachments` section only adds a new collection, so it works with the live
+frontend as well. Publish the rules **first**, then deploy the frontend:
+
+1. **Publish `firestore.rules`** (step 3 above). The live frontend is unaffected.
+2. **Deploy the frontend** (Vercel, from `main`). From then on, uploads go to Firestore.
+   If the frontend goes live before the rules, every upload is refused (permission
+   denied) until the rules are published.
+3. **Check:** upload an invoice to a new request and open it. In Firestore → Data, an
+   `attachments/{id}` document with `complete: true` and its `chunks` appear.
+4. Leave `VITE_USE_FIREBASE_STORAGE` unset on Vercel. Set it to `true` only after a
+   Blaze upgrade (and after deploying `storage.rules` then).

@@ -32,7 +32,7 @@ import {
   ChevronDown
 } from 'lucide-react';
 import { NewRequestModal } from './NewRequestModal';
-import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
+import { InvoiceViewerModal, InvoiceViewerAttachment, AttachmentImage } from './InvoiceViewerModal';
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { newOperationKey } from '../utils/ids';
@@ -1706,9 +1706,9 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                             className="cursor-pointer group shrink-0"
                             title="معاينة الفاتورة"
                           >
-                            <img 
-                              src={activeRequest.invoiceAttachment.url} 
-                              alt="فاتورة" 
+                            <AttachmentImage
+                              url={activeRequest.invoiceAttachment.url}
+                              alt="فاتورة"
                               className="w-10 h-10 rounded-lg object-cover border border-amber-200 shadow-2xs group-hover:scale-105 group-hover:border-amber-400 transition" 
                             />
                           </button>

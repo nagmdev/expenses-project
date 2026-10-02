@@ -801,5 +801,123 @@ service cloud.firestore {
       ));
       allow write: if isSuperAdmin();
     }
+
+    // =========================================================================
+    // 17. ATTACHMENTS stored IN Firestore (invoices, visa documents, custody receipts)
+    //     The project is on the Spark plan, which has no Cloud Storage. A file is
+    //     attachments/{id} (metadata) + attachments/{id}/chunks/{index} (base64 slices
+    //     of <= 700,000 characters); records keep `fsattach://<id>`. Upload order:
+    //     metadata (complete: false) -> chunks -> complete: true (src/lib/attachmentsCore.ts).
+    // =========================================================================
+    //     An attachment id is single-use: deleting the metadata writes
+    //     attachmentTombstones/{id} in the same batch, and no attachment is ever created
+    //     under an id that has a tombstone. So the file behind a saved fsattach:// link can
+    //     be removed, but never swapped for other content (delete + re-create the same id).
+    match /attachments/{attachmentId} {
+      function attachmentFields() {
+        return ['id', 'orgId', 'name', 'mimeType', 'size', 'chunkCount', 'createdBy', 'createdAt', 'complete'];
+      }
+      function tombstonePath() {
+        return /databases/$(database)/documents/attachmentTombstones/$(attachmentId);
+      }
+
+      // Keep in step with MAX_ATTACHMENT_BYTES / ALLOWED_ATTACHMENT_MIME_TYPES (attachmentsCore.ts).
+      function isNewAttachment(a) {
+        return a.keys().hasAll(attachmentFields()) && a.keys().hasOnly(attachmentFields()) &&
+          a.id == attachmentId &&
+          a.orgId is string && a.orgId != '' &&
+          a.createdBy == request.auth.uid &&
+          a.complete == false &&
+          a.name is string && a.name.size() > 0 && a.name.size() <= 255 &&
+          a.mimeType in ['application/pdf', 'image/png', 'image/jpeg'] &&
+          a.size is int && a.size > 0 && a.size <= 10485760 &&
+          a.chunkCount is int && a.chunkCount > 0 && a.chunkCount <= 32 &&
+          a.createdAt is string;
+      }
+
+      // Members of the attachment's company (and super admins) read it. A missing id is
+      // refused like another company's attachment (resource is null), so nothing leaks.
+      allow get: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
+      allow list: if isSuperAdmin();
+      // Never under an id that was used before: tombstones are never removed, so
+      // existsAfter also covers one written in this very batch.
+      allow create: if isAuthenticated() && isNewAttachment(request.resource.data) &&
+        isOrgMember(request.resource.data.orgId) &&
+        !existsAfter(tombstonePath());
+      // The only change ever allowed: its creator marks the upload complete, once its last
+      // chunk exists. Nothing else (name, company, size, type, owner) can change.
+      allow update: if isAuthenticated() &&
+        resource.data.createdBy == request.auth.uid &&
+        resource.data.complete == false &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['complete']) &&
+        request.resource.data.complete == true &&
+        isOrgMember(resource.data.orgId) &&
+        exists(/databases/$(database)/documents/attachments/$(attachmentId)/chunks/$(string(resource.data.chunkCount - 1)));
+      // Its creator (while still a member of that company), the company's admins and super admins,
+      // always together with its tombstone (same batch), so the id can never be created again.
+      allow delete: if isAuthenticated() && (
+        isSuperAdmin() ||
+        isOrgAdmin(resource.data.orgId) ||
+        (resource.data.createdBy == request.auth.uid && isOrgMember(resource.data.orgId))
+      ) && existsAfter(tombstonePath());
+
+      match /chunks/{chunkId} {
+        function parentPath() {
+          return /databases/$(database)/documents/attachments/$(attachmentId);
+        }
+        function parent() {
+          return get(parentPath()).data;
+        }
+
+        // Same readers as the metadata. Under a missing parent only super admins (cleaning up
+        // leftovers) read anything.
+        allow get, list: if isAuthenticated() && (isSuperAdmin() || (exists(parentPath()) && isOrgMember(parent().orgId)));
+        // Only the uploader, only while the upload is not complete, only the chunk ids the
+        // metadata announced (0 .. chunkCount-1, id == index), never rewritten (no update).
+        allow create: if isAuthenticated() && exists(parentPath()) &&
+          parent().createdBy == request.auth.uid &&
+          parent().complete == false &&
+          isOrgMember(parent().orgId) &&
+          request.resource.data.keys().hasAll(['index', 'data']) &&
+          request.resource.data.keys().hasOnly(['index', 'data']) &&
+          request.resource.data.index is int &&
+          request.resource.data.index >= 0 &&
+          request.resource.data.index < parent().chunkCount &&
+          chunkId == string(request.resource.data.index) &&
+          request.resource.data.data is string &&
+          request.resource.data.data.size() > 0 &&
+          request.resource.data.data.size() <= 700000;
+        allow update: if false;
+        // Deleted together with (before) the metadata, by whoever may delete the attachment.
+        // A complete file never loses single chunks: only in the batch that deletes its
+        // metadata. Super admins may also clear chunks left without metadata.
+        allow delete: if isAuthenticated() && (
+          isSuperAdmin() || (
+            exists(parentPath()) && (
+              isOrgAdmin(parent().orgId) ||
+              (parent().createdBy == request.auth.uid && isOrgMember(parent().orgId))
+            ) &&
+            (parent().complete == false || !existsAfter(parentPath()))
+          )
+        );
+      }
+    }
+
+    // Ids of deleted attachments (see 17). Written only in the batch that deletes
+    // attachments/{id} (whose delete rule decides who may), never changed or removed.
+    match /attachmentTombstones/{attachmentId} {
+      function deletedAttachmentPath() {
+        return /databases/$(database)/documents/attachments/$(attachmentId);
+      }
+      allow get, list: if isSuperAdmin();
+      allow create: if isAuthenticated() &&
+        exists(deletedAttachmentPath()) && !existsAfter(deletedAttachmentPath()) &&
+        request.resource.data.keys().hasAll(['orgId', 'deletedBy', 'deletedAt']) &&
+        request.resource.data.keys().hasOnly(['orgId', 'deletedBy', 'deletedAt']) &&
+        request.resource.data.orgId == get(deletedAttachmentPath()).data.orgId &&
+        request.resource.data.deletedBy == request.auth.uid &&
+        request.resource.data.deletedAt is string;
+      allow update, delete: if false;
+    }
   }
 }
