@@ -128,6 +128,12 @@ export async function updateOrganization(
   return store.runTransaction(async tx => {
     const org = await tx.get<Organization>(COL.organizations, orgId);
     if (!org) throw new DomainError('not_found', 'الشركة غير موجودة.');
+    // A company without a currency field (legacy) is an EGP company everywhere else: the
+    // form re-sending its currency ('EGP') is no change, and is not written.
+    const currencyOf = (c?: string | null) => ((c || '').trim() || 'EGP').toUpperCase();
+    if (clean.currency !== undefined && currencyOf(clean.currency) === currencyOf(org.currency)) {
+      delete clean.currency;
+    }
     if (clean.currency !== undefined && clean.currency !== org.currency) {
       if (actor.role !== 'super_admin') {
         throw new DomainError('currency_immutable', 'لا يمكن لمدير الشركة تغيير العملة الأساسية للمؤسسة بعد إنشائها؛ يرجى فتح خزائن أو حسابات بالعملة الجديدة.');

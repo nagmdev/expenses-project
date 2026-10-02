@@ -770,9 +770,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // an admin provisioned before the user's first sign-in. ONE listener (an OR query)
   // feeds `myMemberships`; if the OR query is rejected we fall back to per-query
   // slots whose union is derived (never merged into another listener's state).
+  // The email lookup only for a VERIFIED email: the rules (members → isInviteeOf) honour an
+  // invitation by email only then, and an unverified account cannot self-link to it anyway.
   const buildMembershipQueries = (db: ReturnType<typeof getDb>, user: FirebaseUser) => {
     const members = collection(db!, 'members');
-    const email = user.email || '';
+    const email = user.emailVerified ? user.email || '' : '';
     return {
       combined: email
         ? query(members, or(where('userId', '==', user.uid), where('userEmail', '==', email)))

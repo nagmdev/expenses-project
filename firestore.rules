@@ -54,9 +54,10 @@ service cloud.firestore {
     }
 
     // d: a users/{uid} or members/{uid}_{org} document as returned by get() (null when
-    // missing). It grants orgId when it names that org and is not suspended.
+    // missing). It grants orgId when it names that org and is not suspended. A detached
+    // profile (orgId '') grants no company, whatever role it still carries.
     function grantsOrg(d, orgId) {
-      return d != null && d.data.get('orgId', null) == orgId && d.data.get('active', true) != false;
+      return d != null && orgId is string && orgId != '' && d.data.get('orgId', null) == orgId && d.data.get('active', true) != false;
     }
 
     // users/{uid} holds the caller's primary org and their role in THAT org only.
@@ -264,13 +265,18 @@ service cloud.firestore {
         before.data.get(linkField, '') == docId &&
         (before.data.get('orgId', '') == resource.data.get('orgId', '') || before.data.get('orgId', '') in sharedOrgIds) &&
         before.data.get('amount', null) is number &&
-        near(num(request.resource.data, counter) - num(resource.data, counter), before.data.amount);
+        // The domain adds the cent-rounded amount (toMoney) to a counter that may itself be a
+        // legacy unrounded value: compare with the rounded amount (one rounding per side).
+        near(num(request.resource.data, counter) - num(resource.data, counter), math.round(before.data.amount * 100) / 100.0);
     }
 
-    // A record with money already through it (a used budget, a paid provider) is never
-    // deleted, only deactivated (src/domain/directory.ts → hasFinancialHistory).
+    // A record with money already through it (a used budget, a paid provider, an account
+    // with a balance) is never deleted, only deactivated (src/domain/directory.ts →
+    // hasFinancialHistory, treasury.ts → assertPaymentAccountDeletable). Missing / null is
+    // zero (legacy); any other non-number (e.g. the string '250000', which the app reads
+    // with Number()) is NOT zero: refused on create, kept on delete (the owner fixes it).
     function counterIsZero(m, f) {
-      return !(m.get(f, 0) is number) || math.abs(m.get(f, 0)) < 0.005;
+      return m.get(f, 0) == null || (m.get(f, 0) is number && math.abs(m.get(f, 0)) < 0.005);
     }
 
     // The holder of a custody may file invoices against it: by UID, or by VERIFIED email
@@ -348,17 +354,23 @@ service cloud.firestore {
     // 4. MEMBERS (Company Users & RBAC)
     // =========================================================================
     match /members/{memberId} {
+      // An invitation addressed to an email is the invitee's only once Firebase verified that
+      // email (anyone can register an unverified account for any address; isGrantFor too).
+      function isInviteeOf(m) {
+        return hasVerifiedEmail() &&
+          (m.get('userEmail', '') == request.auth.token.email || m.get('userEmail', '') == verifiedEmail());
+      }
       allow get: if isAuthenticated() && (
         isMissing() ||
         isSuperAdmin() ||
         resource.data.userId == request.auth.uid ||
-        (request.auth.token.email != null && resource.data.userEmail == request.auth.token.email) ||
+        isInviteeOf(resource.data) ||
         isOrgMember(resource.data.orgId)
       );
       allow list: if isAuthenticated() && (
         isSuperAdmin() ||
         resource.data.userId == request.auth.uid ||
-        (request.auth.token.email != null && resource.data.userEmail == request.auth.token.email) ||
+        isInviteeOf(resource.data) ||
         isOrgMember(resource.data.orgId)
       );
       // The id is always <userId>_<orgId> (the rules look memberships up by that id).
@@ -409,9 +421,18 @@ service cloud.firestore {
              hasOrgRole(resource.data.orgId, ['finance', 'org_admin']));
       }
 
-      // Readable in its own company and in every company it is shared with.
-      allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(resource.data.orgId) ||
-        inSharedOrgViaProfile(resource.data.get('orgIds', [])));
+      // A single read (e.g. the disbursement's tx.get of the request's service) by a member of
+      // a sharing company whose membership there is a members/{uid}_{org} document (profile in
+      // another company). Bounded: the first four companies of the list, one read each.
+      function sharedViaMember(ids) {
+        return (ids.size() > 0 && inOrgViaMember(ids[0])) || (ids.size() > 1 && inOrgViaMember(ids[1])) ||
+          (ids.size() > 2 && inOrgViaMember(ids[2])) || (ids.size() > 3 && inOrgViaMember(ids[3]));
+      }
+
+      // Readable in its own company and in every company it is shared with (list queries:
+      // array-contains the caller's profile company).
+      allow get: if isAuthenticated() && (isMissing() || isOrgMember(resource.data.orgId) ||
+        inSharedOrgViaProfile(listOf(resource.data, 'orgIds')) || sharedViaMember(listOf(resource.data, 'orgIds')));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId) ||
         inSharedOrgViaProfile(resource.data.get('orgIds', [])));
       allow create: if (sharingOwnOnly() && counterIsZero(request.resource.data, 'spentAmount') &&
@@ -486,7 +507,9 @@ service cloud.firestore {
             (isRequester() || (invoiceOnly(keys) ? hasOrgRole(oid, ['org_admin', 'finance']) : hasOrgRole(oid, ['org_admin'])))) ||
           (from == 'clarification_requested' && keys.hasOnly(['comments', 'timeline', 'updatedAt']) &&
             appended(b, a, 'comments') && hasOrgRole(oid, ['org_admin'])) ||
-          (from == 'approved' && !keys.hasAny(frozenOnEdit()) &&
+          // (a money change on an approved request is not an edit: it goes back to pending,
+          // see decisionOk; the approval covered the old amount / currency only)
+          (from == 'approved' && !keys.hasAny(frozenOnEdit()) && !keys.hasAny(['amount', 'currency']) &&
             (invoiceOnly(keys) ? hasOrgRole(oid, ['org_admin', 'finance']) : hasOrgRole(oid, ['org_admin'])))
         );
       }
@@ -520,19 +543,24 @@ service cloud.firestore {
       }
 
       // approved (or a pending income) -> disbursed, only together with its ledger line
-      // tx-req-<id>, created in this transaction on the account named in the disbursement,
-      // for the request's amount, in the request's direction (see accountTransactions /
-      // paymentAccounts: that line is the account's only movement in this transaction).
+      // tx-req-<id>, created in THIS transaction (!exists: a line booked earlier under that id,
+      // e.g. the payment of a deleted request re-created under the same id, pays nothing) on
+      // the account named in the disbursement, for the request's amount, in the request's
+      // direction, as a 'request' line (a line explains one operation only: a custody line
+      // never pays a request), and that line is the account's only movement in this
+      // transaction (see accountTransactions / paymentAccounts).
       function disburseOk(b, a, keys, from, oid) {
         return (from == 'approved' || (from == 'pending' && b.get('requestType', 'expense') == 'income')) &&
           keys.hasOnly(['status', 'disbursement', 'timeline', 'updatedAt']) &&
           a.disbursement is map &&
           appended(b, a, 'timeline') &&
+          !exists(ledgerPath('tx-req-' + requestId)) &&
           disbursementLineOk(getAfter(ledgerPath('tx-req-' + requestId)), a, b, oid) &&
           hasOrgRole(oid, ['org_admin', 'finance']);
       }
       function disbursementLineOk(line, a, b, oid) {
         return line != null &&
+          line.data.get('referenceType', '') == 'request' &&
           line.data.get('referenceId', '') == requestId &&
           line.data.accountId == a.disbursement.get('accountId', '') &&
           line.data.type == (b.get('requestType', 'expense') == 'income' ? 'in' : 'out') &&
@@ -563,15 +591,21 @@ service cloud.firestore {
       // Create: strictly pending, authenticated member of the organization
       // The platform owner may also create a request in any state: restoring records the
       // old app version kept only in a browser (src/domain/legacyRecovery.ts).
+      // A new request carries no decision records (approver, payment, rejection): those are
+      // written only by their own transitions (domain: createExpenseRequest never sets them;
+      // legacyRecovery.restoreBlock sends such a record to the owner).
       allow create: if isSuperAdmin() || (isAuthenticated() &&
         isOrgMember(request.resource.data.orgId) &&
         request.resource.data.status == 'pending' &&
+        !request.resource.data.keys().hasAny(['disbursement', 'approvedBy', 'approvedAt', 'rejectionReason']) &&
         (request.resource.data.requesterId == request.auth.uid || isOrgAdmin(request.resource.data.orgId)));
 
       // Update: strictly guarded transitions. 'disbursed' is terminal (money has moved).
       allow update: if isAuthenticated() && (requestUpdateOk() || isSuperAdmin());
 
-      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+      // No domain flow deletes a request; a paid one is part of the books (owner only).
+      allow delete: if isSuperAdmin() ||
+        (resource.data.get('status', '') != 'disbursed' && isOrgAdmin(resource.data.orgId));
     }
 
     // =========================================================================
@@ -602,12 +636,14 @@ service cloud.firestore {
     match /paymentAccounts/{accountId} {
       // An account with a balance or any history (opening balance, money in or out) is part
       // of the books: it can be deactivated, never deleted (domain: assertPaymentAccountDeletable).
+      // Zero to the cent like the domain (toMoney(v) === 0): legacy float noise such as
+      // 0.1 + 0.2 - 0.3 is empty; a value stored as a string is not (fail closed).
       function hasNoHistory() {
-        return resource.data.get('currentBalance', 0) in [0, null] &&
-          resource.data.get('balance', 0) in [0, null] &&
-          resource.data.get('initialBalance', 0) in [0, null] &&
-          resource.data.get('totalIn', 0) in [0, null] &&
-          resource.data.get('totalOut', 0) in [0, null];
+        return counterIsZero(resource.data, 'currentBalance') &&
+          counterIsZero(resource.data, 'balance') &&
+          counterIsZero(resource.data, 'initialBalance') &&
+          counterIsZero(resource.data, 'totalIn') &&
+          counterIsZero(resource.data, 'totalOut');
       }
 
       // Org admin opens an account: an opening balance only with its opening line tx-open-<id>.
@@ -646,16 +682,20 @@ service cloud.firestore {
           lid is string && lid != '' && lid != b.get('lastLedgerId', '') &&
           a.get('currentBalance', null) is number && a.get('balance', null) == a.currentBalance &&
           !exists(ledgerPath(lid)) &&
-          lineMovesAccount(getAfter(ledgerPath(lid)).data, b, a) &&
+          movedByLine(getAfter(ledgerPath(lid)).data, b, a, lid) &&
           hasOrgRole(b.orgId, ['finance', 'org_admin']);
       }
+      function movedByLine(l, b, a, lid) {
+        return lineMovesAccount(l, b, a) && parentMirrored(b, lid, l);
+      }
 
-      // l: the line (a missing line makes .data an error, i.e. a refusal).
+      // l: the line (a missing line makes .data an error, i.e. a refusal). Every line moves
+      // at least a cent (the domain rounds amounts to cents: requirePositiveAmount / toMoney).
       function lineMovesAccount(l, b, a) {
         let before = balanceOf(b);
         let signed = l.type == 'in' ? l.amount : -l.amount;   // +amount for 'in', -amount for 'out'
         return l.accountId == accountId && l.type in ['in', 'out'] &&
-          l.amount is number && l.amount > 0 &&
+          l.amount is number && l.amount >= 0.01 &&
           near(l.get('balanceBefore', null), before) &&
           near(l.get('balanceAfter', null), a.currentBalance) &&
           near(a.currentBalance - before, signed) &&
@@ -664,6 +704,23 @@ service cloud.firestore {
           // No movement creates or deepens an overdraft (an 'in' always reduces one);
           // the only exception is the bank correction of detachLegacyWallet.
           (signed > 0 || a.currentBalance >= 0 || detachCorrection(l));
+      }
+
+      // An InstaPay (or a not-yet-detached legacy wallet) linked to another account spends that
+      // bank's money (domain: linkedParentIdOf / createMovementBatch): its movement is mirrored
+      // on the bank in the same transaction, by the bank's own NEW line <lid>-parent of the
+      // same direction and amount (the bank's rule checks that this line moves the bank). A
+      // link to an account that no longer exists moves the channel alone, as the domain does.
+      function parentMirrored(b, lid, l) {
+        let p = b.get('parentAccountId', '');
+        return !(b.get('type', '') in ['instapay', 'wallet']) || !(p is string) || p == '' || p == accountId ||
+          mirrorOk(getAfter(accountPath(p)), lid + '-parent', l);
+      }
+      function mirrorOk(parent, plid, l) {
+        return parent == null || (
+          parent.data.get('lastLedgerId', '') == plid && !exists(ledgerPath(plid)) &&
+          getAfter(ledgerPath(plid)).data.type == l.type && near(getAfter(ledgerPath(plid)).data.amount, l.amount)
+        );
       }
 
       // detachLegacyWallet: the owner-confirmed correction booked on the bank, in the same
@@ -698,7 +755,9 @@ service cloud.firestore {
             : keys.hasAny(['parentAccountId'])
               ? (p == '' || p == accountId ||
                  (t == 'instapay' && getAfter(accountPath(p)).data.get('orgId', '') == b.orgId))
-              : (p == '' || p == accountId || t in ['instapay', 'wallet'])
+              // a link left on an account that never mirrored (cash / bank: linkedParentIdOf
+              // ignores it) is inert, so such an account may be retyped
+              : (p == '' || p == accountId || t in ['instapay', 'wallet'] || !(b.get('type', '') in ['instapay', 'wallet']))
         );
       }
 
@@ -757,6 +816,8 @@ service cloud.firestore {
           isSuperAdmin();
       }
 
+      // The issue line is created in this transaction (!exists), so it is the source account's
+      // movement of this commit and explains nothing else.
       function issueOk() {
         let n = request.resource.data;
         let lid = n.get('lastLedgerId', '');
@@ -765,6 +826,7 @@ service cloud.firestore {
           n.get('remainingAmount', null) == n.totalAmount &&
           n.get('settledAmount', 0) == 0 && n.get('returnedAmount', 0) == 0 &&
           n.get('status', '') == 'active' && n.get('lastSettlementId', '') == '' &&
+          !exists(ledgerPath(lid)) &&
           issueLineOk(getAfter(ledgerPath(lid)), n) &&
           hasOrgRole(n.orgId, ['finance', 'org_admin']);
       }
@@ -786,21 +848,25 @@ service cloud.firestore {
             : replenishOk(b, a, keys);
       }
 
+      // Each delta is compared with the invoice / line amount (one cent rounding each), never
+      // with another delta the domain rounded separately (legacy unrounded thirds). The
+      // remainder strictly decreases, by an invoice of at least a cent.
       function settleOk(b, a, keys) {
         let sid = a.get('lastSettlementId', '');
         let d = num(a, 'settledAmount') - num(b, 'settledAmount');
         return keys.hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt', 'lastSettlementId']) &&
           sid is string && sid != '' && d > 0 &&
           a.get('remainingAmount', null) is number && a.remainingAmount >= 0 &&
-          near(num(b, 'remainingAmount') - a.remainingAmount, d) &&
+          num(b, 'remainingAmount') - a.remainingAmount > 0 &&
           a.get('status', null) == (a.remainingAmount == 0 ? 'settled' : b.get('status', null)) &&
           !exists(/databases/$(database)/documents/custodySettlements/$(sid)) &&
-          settlementOk(getAfter(/databases/$(database)/documents/custodySettlements/$(sid)), d) &&
+          settlementOk(getAfter(/databases/$(database)/documents/custodySettlements/$(sid)), d, num(b, 'remainingAmount') - a.remainingAmount) &&
           (isCustodyHolder(b) || hasOrgRole(b.orgId, ['finance', 'org_admin']));
       }
-      function settlementOk(s, d) {
+      function settlementOk(s, d, r) {
         return s != null && s.data.get('custodyId', '') == custodyId &&
-          s.data.get('amount', null) is number && near(s.data.amount, d);
+          s.data.get('amount', null) is number && s.data.amount >= 0.01 &&
+          near(s.data.amount, d) && near(s.data.amount, r);
       }
 
       function replenishOk(b, a, keys) {
@@ -808,10 +874,10 @@ service cloud.firestore {
         let d = num(a, 'totalAmount') - num(b, 'totalAmount');
         return keys.hasOnly(['totalAmount', 'remainingAmount', 'status', 'notes', 'updatedAt', 'lastLedgerId']) &&
           lid is string && lid != '' && d > 0 &&
-          near(num(a, 'remainingAmount') - num(b, 'remainingAmount'), d) &&
+          a.get('totalAmount', null) is number && a.get('remainingAmount', null) is number &&
           a.get('status', '') == 'active' &&
           !exists(ledgerPath(lid)) &&
-          custodyLineOk(getAfter(ledgerPath(lid)), 'custody', 'out', d) &&
+          custodyLineOk(getAfter(ledgerPath(lid)), 'custody', 'out', d, a.remainingAmount - num(b, 'remainingAmount'), b.orgId) &&
           hasOrgRole(b.orgId, ['finance', 'org_admin']);
       }
 
@@ -822,17 +888,19 @@ service cloud.firestore {
             'returnedToAccountId', 'returnedToAccountName', 'updatedAt', 'lastLedgerId']) &&
           lid is string && lid != '' && r > 0 &&
           a.get('remainingAmount', null) == 0 && a.get('status', '') == 'settled' &&
-          near(num(a, 'returnedAmount') - num(b, 'returnedAmount'), r) &&
           !exists(ledgerPath(lid)) &&
-          custodyLineOk(getAfter(ledgerPath(lid)), 'custody_return', 'in', r) &&
+          custodyLineOk(getAfter(ledgerPath(lid)), 'custody_return', 'in', r, num(a, 'returnedAmount') - num(b, 'returnedAmount'), b.orgId) &&
           getAfter(ledgerPath(lid)).data.accountId == a.get('returnedToAccountId', '') &&
           hasOrgRole(b.orgId, ['finance', 'org_admin']);
       }
 
-      function custodyLineOk(line, refType, type, amount) {
+      // The line of this custody's operation: its type, this custody, the custody's company
+      // (never another company's account), and both changed totals equal to its amount.
+      function custodyLineOk(line, refType, type, amount, amount2, orgId) {
         return line != null &&
           line.data.get('referenceType', '') == refType && line.data.get('referenceId', '') == custodyId &&
-          line.data.type == type && near(line.data.amount, amount);
+          line.data.get('orgId', '') == orgId &&
+          line.data.type == type && near(line.data.amount, amount) && near(line.data.amount, amount2);
       }
 
       allow get: if isAuthenticated() && (isMissing() || canReadCustody());
@@ -889,9 +957,14 @@ service cloud.firestore {
     match /auditLogs/{logId} {
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgAdmin(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgAdmin(resource.data.orgId));
-      // An entry can only be written in the caller's own name (no forged actors).
+      // An entry can only be written in the caller's own name (no forged actors): its UID and
+      // its sign-in email (the app writes actor.email = the Firebase user's email; actorName is
+      // the member's self-editable display name and proves nothing). An entry outside any
+      // company (platform settings, super admin changes) is the platform owner's.
       allow create: if isAuthenticated() && request.resource.data.actorId == request.auth.uid &&
-        (request.resource.data.get('orgId', '') == '' || isOrgMember(request.resource.data.orgId));
+        (request.auth.token.get('email', null) == null ||
+          request.resource.data.get('actorEmail', request.auth.token.email) == request.auth.token.email) &&
+        ((request.resource.data.get('orgId', '') != '' && isOrgMember(request.resource.data.orgId)) || isSuperAdmin());
       allow update, delete: if isSuperAdmin();
     }
 
@@ -905,10 +978,10 @@ service cloud.firestore {
     // =========================================================================
     match /counters/{counterId} {
       function mayAdvance() {
-        return (counterId.matches('^(custodies|transfers)-[0-9]{4}$') && get(profilePath()) != null && (
-            get(profilePath()).data.get('role', '') in ['finance', 'org_admin'] ||
-            hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])
-          )) ||
+        // finance / org admin of the caller's (active) profile company: a suspended or
+        // detached profile's stale role grants nothing (grantsOrg checks active and orgId).
+        return (counterId.matches('^(custodies|transfers)-[0-9]{4}$') && get(profilePath()) != null &&
+            hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])) ||
           (counterId.matches('^(requests|visa)-[0-9]{4}$') && get(profilePath()) != null &&
             get(profilePath()).data.get('active', true) != false && get(profilePath()).data.get('orgId', '') != '') ||
           isSuperAdmin();
@@ -945,9 +1018,34 @@ service cloud.firestore {
           : scope == 'department_name' ? 'departments'
           : 'members';
       }
-      // normalizeKeyValue (src/domain/common.ts) for the values the app stores.
+      // normalizeKeyValue (src/domain/common.ts) for the values the app stores. JS \s also
+      // covers \v, U+FEFF and every Unicode space separator (\p{Z}: U+00A0, U+2000-200A,
+      // U+3000…); RE2's \s is ASCII only, so they are listed explicitly.
       function keyNorm(v) {
-        return v is string ? v.lower().replace('[\\s\\-_.]+', '') : '';
+        return v is string ? v.lower().replace('[\\s\\p{Z}\\x{000B}\\x{FEFF}\\-_.]+', '') : '';
+      }
+      // encodeKeyPart (src/utils/ids.ts): base64url of the UTF-8 bytes, without padding.
+      function keyPart(v) {
+        return v.toUtf8().toBase64().replace('\\+', '-').replace('/', '_').replace('=+$', '');
+      }
+      // A key is claimed for the record it names (domain: claimUniqueKey always writes the
+      // record in the same transaction): its id is <scope>__<company>__<encoded value>, and
+      // that record, after the commit, is of the key's company and holds that value. So a
+      // key can never be squatted for a value no record of the company holds; the record's
+      // own rule decides who may write it.
+      function claimedByRecord() {
+        let k = request.resource.data;
+        let scope = k.get('scope', '');
+        let parts = keyId.split('__');
+        return scope in ['account_identifier', 'service_code', 'provider_name', 'department_name', 'member_email'] &&
+          parts.size() == 3 && parts[0] == scope &&
+          k.get('value', null) is string && k.value != '' && parts[2] == keyPart(k.value) &&
+          k.get('entityCollection', '') == keyCollection(scope) &&
+          k.entityId != '' &&
+          recordHoldsKey(getAfter(/databases/$(database)/documents/$(keyCollection(scope))/$(k.entityId)), keyField(scope), k);
+      }
+      function recordHoldsKey(after, f, k) {
+        return after != null && after.data.get('orgId', '') == k.orgId && keyNorm(after.data.get(f, '')) == k.value;
       }
       // A record changes the value its key holds (account number, provider name, service
       // code, department name, member email): the old key is released in the same
@@ -977,7 +1075,9 @@ service cloud.firestore {
       // format (company id encoded) are read by the platform owner only.
       allow get: if isAuthenticated() && (isSuperAdmin() || inKeyCompany());
       allow create: if isAuthenticated() && request.resource.data.entityId is string && (
-        isSuperAdmin() || (request.resource.data.orgId != '-' && request.resource.data.orgId == keyOrgId() && inKeyCompany())
+        (request.resource.data.orgId != '-' && request.resource.data.orgId == keyOrgId() &&
+          claimedByRecord() && inKeyCompany()) ||
+        isSuperAdmin()
       );
       allow update: if false;
       allow delete: if isAuthenticated() && (
@@ -1055,6 +1155,26 @@ service cloud.firestore {
           );
       }
 
+      // The sender identity and the delivery channel are the platform's, never the event
+      // creator's choice: as buildOutboxEvent (src/domain/outbox.ts) builds them from
+      // system_settings/email_notifications over DEFAULT_EMAIL_SETTINGS — or from those
+      // defaults alone (a tab whose settings listener has not caught up). A webhook goes only
+      // to the configured URL. The message body is the app's template output and cannot be
+      // checked here; its recipients are bound above. Defaults: DEFAULT_EMAIL_SETTINGS
+      // (src/services/emailTemplates.ts), keep in step.
+      function deliveryOk(e) {
+        let s0 = get(/databases/$(database)/documents/system_settings/email_notifications);
+        let s = s0 == null ? {} : s0.data;
+        let m = e.meta;
+        let url = s.get('webhookUrl', '');
+        return m.get('senderName', '') in [s.get('senderName', ''), 'نظام مصروفي'] &&
+          m.get('senderEmail', '') in [s.get('senderEmail', ''), 'awadhsaudi2030@gmail.com'] &&
+          m.get('replyTo', '') in [s.get('replyToEmail', ''), s.get('senderEmail', ''), 'awadhsaudi2030@gmail.com'] &&
+          (e.channel == 'webhook'
+            ? (s.get('deliveryMethod', '') == 'webhook' && url != '' && m.get('webhookUrl', '') == url)
+            : (e.channel in ['email_api', 'firestore_mail'] && m.get('webhookUrl', '') == ''));
+      }
+
       // Settings-page test email: org admins, to their org's admin recipients or themselves.
       function isTestEvent(e) {
         return e.entityType == 'system' && e.entityId == 'test' &&
@@ -1075,7 +1195,8 @@ service cloud.firestore {
           isOrgMember(request.resource.data.orgId) &&
           request.resource.data.recipients is list &&
           request.resource.data.recipients.size() > 0 && request.resource.data.recipients.size() <= 50 &&
-          (isRequestEvent(request.resource.data) || isTestEvent(request.resource.data))
+          (isRequestEvent(request.resource.data) || isTestEvent(request.resource.data)) &&
+          deliveryOk(request.resource.data)
         ));
       // Delivery-state transitions only (everything else is immutable), never out of a
       // terminal state, and each claim adds exactly one attempt, so an event is

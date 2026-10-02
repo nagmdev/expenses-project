@@ -537,7 +537,11 @@ describe('uniqueness keys are readable in their own company only', () => {
 
   it("a key can only be created under its own company's id", async () => {
     const data = { scope: 'provider_name', orgId: ORG, value: 'vodafone', entityCollection: 'providers', entityId: 'prov-x' };
-    await assertSucceeds(setDoc(doc(db(ADMIN), 'uniqueKeys', uniqueKeyDocId('provider_name', ORG, 'Vodafone')), data));
+    // claimed together with the record that holds the value (as claimUniqueKey always is)
+    const a = db(ADMIN);
+    await assertSucceeds(writeBatch(a)
+      .set(doc(a, 'providers', 'prov-x'), { orgId: ORG, name: 'Vodafone', totalPaid: 0, active: true })
+      .set(doc(a, 'uniqueKeys', uniqueKeyDocId('provider_name', ORG, 'Vodafone')), data).commit());
     // Squatting another company's value (claimed as this company's) is refused.
     await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', uniqueKeyDocId('provider_name', OTHER_ORG, 'Vodafone')), data));
     await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', uniqueKeyDocId('provider_name', OTHER_ORG, 'Vodafone')), { ...data, orgId: OTHER_ORG }));

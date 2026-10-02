@@ -191,13 +191,21 @@ export function restoreBlock(ctx: RestoreContext, rec: LegacyRecord): BlockReaso
   if (!rec.data.orgId || rec.data.orgId !== ctx.orgId) return 'other_org';
   if (rec.store.statusGated) {
     if (rec.data.status !== 'pending') return 'needs_owner';
+    // A new request carries no decision records (firestore.rules → requests create).
+    if (rec.store.collection === COL.requests &&
+        ['disbursement', 'approvedBy', 'approvedAt', 'rejectionReason'].some(f => f in rec.data)) {
+      return 'needs_owner';
+    }
     if (actor.role !== 'org_admin' && rec.data.requesterId !== actor.id) return 'no_permission';
     return null;
   }
-  // A service budget already used / a provider already paid: only the platform owner may
-  // restore those counters (firestore.rules → services / providers create).
-  if ((rec.store.collection === COL.services && toMoney(rec.data.spentAmount) !== 0) ||
-      (rec.store.collection === COL.providers && toMoney(rec.data.totalPaid) !== 0)) {
+  // A service budget already used / a provider already paid (or a counter that is not a
+  // number): only the platform owner may restore those counters (firestore.rules →
+  // services / providers create, counterIsZero).
+  const counter = rec.store.collection === COL.services ? rec.data.spentAmount
+    : rec.store.collection === COL.providers ? rec.data.totalPaid
+    : undefined;
+  if (counter !== undefined && counter !== null && (typeof counter !== 'number' || toMoney(counter) !== 0)) {
     return 'needs_owner';
   }
   return actor.role === 'org_admin' ? null : 'no_permission';

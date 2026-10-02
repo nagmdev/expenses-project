@@ -413,7 +413,8 @@ describe('legitimate operations pass', () => {
 describe('adversarial (one per finding)', () => {
   const fakeLine = (accountId: string, extra: Record<string, unknown> = {}) => ({
     id: 'x', orgId: ORG, accountId, accountName: accountId, type: 'out', amount: 300, balanceBefore: 1000, balanceAfter: 700,
-    referenceType: 'manual_adjustment', description: 'x', actorName: 'x', actorId: FIN.uid, createdAt: 'x', ...extra,
+    // 'request': the domain's disbursement line (a request is paid only by a 'request' line)
+    referenceType: 'request', description: 'x', actorName: 'x', actorId: FIN.uid, createdAt: 'x', ...extra,
   });
 
   it('[REQ-1] finance writes are evaluated (no 1000-expression wall): invoice-only on approved passes, an amount change fails by logic', async () => {
