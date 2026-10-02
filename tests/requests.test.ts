@@ -184,4 +184,35 @@ describe('disbursement — money moves exactly once', () => {
     expect(store.read('paymentAccounts', 'acc-bank')!.currentBalance).toBe(4600);
     expect(store.dump('accountTransactions').map(t => t.id).sort()).toEqual([`tx-req-${id}`, `tx-req-${id}-parent`]);
   });
+
+  it('rejects unsupported currencies in create and update', async () => {
+    const store = freshStore();
+    await expect(
+      createExpenseRequest(store, employee, { ...draft(), currency: 'XYZ' }, key(), notify, now)
+    ).rejects.toMatchObject({ code: 'invalid_currency' });
+
+    const valid = await createExpenseRequest(store, employee, { ...draft(), currency: 'EGP' }, key(), notify, now);
+    await expect(
+      updateExpenseRequest(store, employee, valid.value.id, { currency: 'FAKE' as any }, key(), now)
+    ).rejects.toMatchObject({ code: 'invalid_currency' });
+  });
+
+  it('protects orgId from being modified on an existing expense request', async () => {
+    const store = freshStore();
+    const created = await createExpenseRequest(store, employee, { ...draft(), orgId: 'org-acme' }, key(), notify, now);
+    expect(created.value.orgId).toBe('org-acme');
+
+    // Attempting to change orgId via updateExpenseRequest is stripped by PROTECTED_FIELDS
+    const updated = await updateExpenseRequest(
+      store,
+      admin,
+      created.value.id,
+      { orgId: 'org-attacker' as any, title: 'Updated Title' },
+      key(),
+      now
+    );
+    expect(updated.value.orgId).toBe('org-acme');
+    expect(store.read('requests', created.value.id)!.orgId).toBe('org-acme');
+    expect(updated.value.title).toBe('Updated Title');
+  });
 });

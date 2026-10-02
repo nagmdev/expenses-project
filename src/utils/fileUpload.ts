@@ -30,12 +30,24 @@ export async function compressImage(
       return;
     }
 
+    // Pre-read guard: reject excessively large raw files before reading to RAM
+    if (file.size > 25 * 1024 * 1024) {
+      reject(new Error(`حجم ملف الصورة كبير جداً (${formatFileSize(file.size)}). الحد الأقصى للمعالجة 25 ميجابايت.`));
+      return;
+    }
+
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('فشل قراءة ملف الصورة'));
     reader.onload = (e) => {
       const img = new Image();
       img.onerror = () => reject(new Error('فشل معالجة محتوى الصورة'));
       img.onload = () => {
+        // Decompression bomb guard
+        if (img.width > 8192 || img.height > 8192) {
+          reject(new Error('أبعاد الصورة تتجاوز الحد المسموح به (8192 بكسل).'));
+          return;
+        }
+
         let width = img.width;
         let height = img.height;
 

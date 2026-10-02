@@ -9,6 +9,7 @@ import type {
   ServiceCategory,
   ServiceProvider,
   TimelineEvent,
+  RequestAttachment,
 } from '../types';
 import { idFromKey } from '../utils/ids';
 import {
@@ -31,6 +32,7 @@ import {
 import { buildOutboxEvent, enqueueOutbox, outboxEventId } from './outbox';
 import type { DataStore } from './store';
 import { applyMovement, readAccountWithParent } from './treasury';
+import { isSupportedCurrency, normalizeCurrency } from './analytics';
 
 export interface NotifyContext {
   settings: EmailNotificationSettings;
@@ -79,6 +81,10 @@ export async function createExpenseRequest(
   if (!draft.orgId) throw new DomainError('missing_org', 'يرجى تحديد الشركة أو المؤسسة التابع لها الطلب.');
   const amount = toMoney(draft.amount);
   if (!(amount > 0)) throw new DomainError('invalid_amount', 'يرجى إدخال مبلغ صحيح أكبر من الصفر.');
+  const reqCurrency = normalizeCurrency(draft.currency, 'EGP');
+  if (!isSupportedCurrency(reqCurrency)) {
+    throw new DomainError('invalid_currency', `العملة المحددة (${draft.currency}) غير مدعومة في النظام المالي.`);
+  }
 
   const id = idFromKey('req', operationKey);
   const nowIso = now.toISOString();
@@ -151,6 +157,7 @@ const PROTECTED_FIELDS: Array<keyof ExpenseRequest | 'operationKey'> = [
   'id',
   'requestNumber',
   'status',
+  'orgId',
   'requesterId',
   'requesterName',
   'requesterEmail',
@@ -176,6 +183,12 @@ export async function updateExpenseRequest(
   if (clean.amount !== undefined) {
     clean.amount = toMoney(clean.amount);
     if (!(clean.amount > 0)) throw new DomainError('invalid_amount', 'يرجى إدخال مبلغ صحيح أكبر من الصفر.');
+  }
+  if (clean.currency !== undefined) {
+    clean.currency = normalizeCurrency(clean.currency, 'EGP');
+    if (!isSupportedCurrency(clean.currency)) {
+      throw new DomainError('invalid_currency', `العملة المحددة (${clean.currency}) غير مدعومة في النظام المالي.`);
+    }
   }
   const eventId = `tl-${operationKey}`;
 
@@ -230,7 +243,7 @@ export type RequestAction =
   | { type: 'approve'; note?: string }
   | { type: 'reject'; reason: string }
   | { type: 'clarify'; question: string }
-  | { type: 'reply'; replyText: string; attachmentName?: string };
+  | { type: 'reply'; replyText: string; attachmentName?: string; attachment?: RequestAttachment };
 
 interface TransitionRule {
   from: RequestStatus[];
@@ -361,11 +374,8 @@ export async function transitionExpenseRequest(
         timelineDescription = action.question.trim();
         break;
       case 'reply':
-        if (action.attachmentName?.trim()) {
-          attachments = [
-            ...attachments,
-            { id: `att-${operationKey}`, name: action.attachmentName.trim(), size: '850 KB', type: 'pdf', uploadedAt: ts },
-          ];
+        if (action.attachment) {
+          attachments = [...attachments, action.attachment];
           patch.attachments = attachments;
         }
         comments.push({
@@ -376,7 +386,9 @@ export async function transitionExpenseRequest(
           content: action.replyText.trim(),
           type: 'clarification_reply',
           createdAt: nowIso,
-          ...(action.attachmentName?.trim() ? { attachmentName: action.attachmentName.trim() } : {}),
+          ...(action.attachment?.name || action.attachmentName?.trim()
+            ? { attachmentName: (action.attachment?.name || action.attachmentName)!.trim() }
+            : {}),
         });
         timelineTitle = 'قام طالب الصرف بتقديم التوضيح والمستندات';
         timelineDescription = action.replyText.trim();

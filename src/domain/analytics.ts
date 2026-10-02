@@ -48,6 +48,15 @@ export interface AggregateMetricsOptions {
   baseCurrency?: string;
 }
 
+export const SUPPORTED_CURRENCY_CODES = new Set([
+  'EGP', 'SAR', 'USD', 'EUR', 'AED', 'GBP', 'KWD', 'QAR', 'BHD', 'OMR', 'JOD'
+]);
+
+export function isSupportedCurrency(cur?: string | null): boolean {
+  if (!cur) return false;
+  return SUPPORTED_CURRENCY_CODES.has(cur.trim().toUpperCase());
+}
+
 export function normalizeCurrency(cur?: string | null, fallback = 'EGP'): string {
   const cleaned = (cur || '').trim().toUpperCase();
   return cleaned || fallback.trim().toUpperCase() || 'EGP';

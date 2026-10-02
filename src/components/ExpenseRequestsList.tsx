@@ -419,9 +419,12 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
 
   // The batch is paid from ONE account: of the batch's company and currency, and it must
   // cover every expense in it (no account ever goes below zero).
-  const batchOrgIds = new Set(selectedBatchRequests.map(r => r.orgId));
-  const batchCurrencies = new Set(selectedBatchRequests.map(r => currencyCode(r.currency)));
-  const singleBatchCurrency = batchCurrencies.size === 1 ? Array.from(batchCurrencies)[0] : null;
+  const { batchOrgIds, batchCurrencies, singleBatchCurrency } = useMemo(() => {
+    const orgs = new Set(selectedBatchRequests.map(r => r.orgId));
+    const curs = new Set(selectedBatchRequests.map(r => currencyCode(r.currency)));
+    const single = curs.size === 1 ? Array.from(curs)[0] : null;
+    return { batchOrgIds: orgs, batchCurrencies: curs, singleBatchCurrency: single };
+  }, [selectedBatchRequests]);
   const batchAccounts = paymentAccounts.filter(
     a =>
       a.active !== false &&
