@@ -17,6 +17,7 @@ import {
   DomainError,
   assertOrgWritable,
   assertRole,
+  auditIdFor,
   normalizeEmail,
   pad,
   paymentMethodLabel,
@@ -208,10 +209,13 @@ export async function updateExpenseRequest(
       throw new DomainError('locked', 'تم اعتماد الطلب ولا يمكن لمقدمه تعديله الآن.');
     }
 
+    // The edit form sends the whole request: an amount / currency that is the stored one
+    // (also a legacy request without a currency, read as EGP, or an amount never rounded) is
+    // not a change and is not rewritten, so an approved request keeps its approval.
+    if (clean.amount !== undefined && clean.amount === toMoney(req.amount)) delete clean.amount;
+    if (clean.currency !== undefined && clean.currency === normalizeCurrency(req.currency, 'EGP')) delete clean.currency;
     // Changing money on an approved request invalidates the approval.
-    const moneyChanged =
-      (clean.amount !== undefined && clean.amount !== req.amount) ||
-      (clean.currency !== undefined && clean.currency !== req.currency);
+    const moneyChanged = clean.amount !== undefined || clean.currency !== undefined;
 
     // firestore.rules → requests: finance attaches / replaces the invoice of a request it did
     // not file (or of any approved request) and nothing else; re-opening an approved request
@@ -421,7 +425,13 @@ export async function transitionExpenseRequest(
         ? 'clarification_requested'
         : 'clarification_replied';
     const recipients = action.type === 'reply' ? notify.adminRecipients || [] : [updated.requesterEmail || ''];
-    const eventId = enqueueOutbox(
+    // The reply email to the admins is the requester's: by UID, or by a VERIFIED email
+    // (firestore.rules → outbox isRequesterOf). A requester recognised only by an unverified
+    // email (an admin-provisioned password account replying on a request filed under an older
+    // id) still saves the reply; only the email is not sent.
+    const mayNotify = action.type !== 'reply' || actor.role === 'super_admin' ||
+      req.requesterId === actor.id || actor.emailVerified !== false;
+    const eventId = !mayNotify ? null : enqueueOutbox(
       tx,
       buildOutboxEvent({
         eventId: outboxEventId(emailEvent, requestId, operationKey),
@@ -571,7 +581,9 @@ export async function disburseExpenseRequest(
         orgName: notify.org?.name,
         details: `${isIncome ? 'تأكيد توريد' : 'صرف'} الطلب ${req.requestNumber} بمبلغ ${formatAmount(amount)} ${reqCurrency} عبر "${account.name}" (مرجع: ${disbursement.referenceNumber}${input.batchId ? ` | دفعة مجمعة ${input.batchId}` : ''})`,
       },
-      `audit-disburse-${requestId}`,
+      // Keyed by the operation (as every other flow): an id derived from the request alone
+      // could be pre-created by anyone and would then refuse the payment's audit write.
+      auditIdFor(operationKey, 'disburse'),
       nowIso,
     );
     const updated = { ...req, ...patch } as ExpenseRequest;

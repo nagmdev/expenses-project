@@ -31,6 +31,7 @@ import {
   type UniqueScope,
 } from './common';
 import type { DataStore, DocData } from './store';
+import { newOperationKey } from '../utils/ids';
 
 export const LEGACY_RESTORES = 'legacyRestores';
 
@@ -241,6 +242,11 @@ export async function restoreRecord(
   if (blocked) return { record: rec, outcome: blocked };
   const nowIso = now.toISOString();
   const { actor } = ctx;
+  // The audit entry is keyed by this attempt, never by the record id: anyone can create an
+  // audit entry in their own company, and one pre-created under a predictable id would make
+  // the restore's audit write an (always refused) overwrite. The marker makes the restore
+  // happen once, so a fresh key per attempt never duplicates the entry.
+  const auditKey = `restore-${newOperationKey()}`;
   try {
     const outcome = await store.runTransaction(async tx => {
       if (await tx.get(LEGACY_RESTORES, markerId(rec))) return 'handled' as const;
@@ -278,7 +284,7 @@ export async function restoreRecord(
           orgId: rec.data.orgId || '',
           details: `استرجاع سجل كان محفوظاً على المتصفح فقط (${source === 'file' ? 'من ملف نسخة احتياطية' : 'من هذا المتصفح'}) إلى قاعدة البيانات — ${rec.store.label}: ${rec.title}`,
         },
-        auditIdFor(`restore-${markerId(rec)}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 300)),
+        auditIdFor(auditKey),
         nowIso,
       );
       return 'restored' as const;

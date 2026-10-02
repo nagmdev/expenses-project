@@ -180,12 +180,17 @@ service cloud.firestore {
     //    sign-in, see forceRefreshUserState).
     //  - email: unchanged, or the caller's own verified address. Admin tooling looks
     //    profiles up by email, so nobody may claim someone else's address.
+    //  - verifiedEmail: unchanged, or the caller's own verified address. It is the account's
+    //    proof of its address (see /users): nobody else may write it.
     // `before` is {} on create.
     function isOwnProfileWrite(userId, before) {
       let after = request.resource.data;
       return isAuthenticated() && request.auth.uid == userId && (
         sameField(after, before, 'email', null) ||
         (hasVerifiedEmail() && after.get('email', null) == verifiedEmail())
+      ) && (
+        sameField(after, before, 'verifiedEmail', null) ||
+        (hasVerifiedEmail() && after.get('verifiedEmail', null) == verifiedEmail())
       ) && (
         (sameField(after, before, 'role', null) && sameField(after, before, 'orgId', null) && sameField(after, before, 'active', true)) ||
         (after.get('orgId', null) in [null, ''] && after.get('role', 'employee') == 'employee') ||
@@ -314,17 +319,23 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if isAuthenticated() && (isMissing() || request.auth.uid == userId || isSuperAdmin() || (resource.data.orgId != null && isOrgAdmin(resource.data.orgId)));
       allow list: if isAuthenticated() && (isSuperAdmin() || (resource.data.orgId != null && isOrgAdmin(resource.data.orgId)));
+      // users/{uid}.verifiedEmail is the account's own proof of its address, written only by
+      // that account from its verified token (isOwnProfileWrite). The app re-uses a UID for an
+      // email in another company only on that proof (directory.ts → verifiedLoginUidOf): a
+      // membership's (userId, userEmail) pair is only what some company's admin wrote.
       // Self-writes never grant a role or org the caller was not given (isOwnProfileWrite).
       allow create: if isAuthenticated() && (
         isSuperAdmin() ||
         isOwnProfileWrite(userId, {}) ||
-        (isOrgAdmin(request.resource.data.orgId) && request.resource.data.role != 'super_admin')
+        (isOrgAdmin(request.resource.data.orgId) && request.resource.data.role != 'super_admin' &&
+          !request.resource.data.keys().hasAny(['verifiedEmail']))
       );
       // Org admins manage profiles in their org, and may detach one from it (member
       // removed: org cleared, role reset), but never move a profile to another org.
       allow update: if isSuperAdmin() || (
         isOrgAdmin(resource.data.orgId) &&
-        request.resource.data.role != 'super_admin' && (
+        request.resource.data.role != 'super_admin' &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['verifiedEmail']) && (
           request.resource.data.orgId == resource.data.orgId ||
           (request.resource.data.get('orgId', null) in [null, ''] && request.resource.data.get('role', 'employee') == 'employee')
         )
@@ -378,11 +389,23 @@ service cloud.firestore {
         request.resource.data.role != 'super_admin' &&
         memberId == request.resource.data.userId + '_' + request.resource.data.orgId &&
         !request.resource.data.keys().hasAny(payoutKeys()));
+      // Who a membership belongs to changes only from a placeholder (a member invited by
+      // email who never had a login: pending-<email>, temp_…, usr-…) to the account whose own
+      // profile links to this membership in the same commit (directory.ts → updateMemberRecord).
+      // A membership of a real login is never re-pointed to another one.
+      function userIdChangeOk() {
+        let uid = request.resource.data.get('userId', '');
+        return !(resource.data.get('userId', '') is string && resource.data.get('userId', '').matches('[A-Za-z0-9]{20,40}')) &&
+          uid is string && uid.matches('[A-Za-z0-9]{20,40}') &&
+          getAfter(/databases/$(database)/documents/users/$(uid)) != null &&
+          getAfter(/databases/$(database)/documents/users/$(uid)).data.get('memberId', null) == memberId;
+      }
       allow update: if isSuperAdmin() || (
         isOrgAdmin(resource.data.orgId) &&
         request.resource.data.role != 'super_admin' &&
         request.resource.data.orgId == resource.data.orgId &&
         noPayoutAddedOrChanged() &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['userId']) || userIdChangeOk()) &&
         // The owner's and the admin's own membership: name / contact only, never role or status.
         (!isProtectedMembership(resource.data) ||
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(grantFields()))
@@ -423,16 +446,20 @@ service cloud.firestore {
 
       // A single read (e.g. the disbursement's tx.get of the request's service) by a member of
       // a sharing company whose membership there is a members/{uid}_{org} document (profile in
-      // another company). Bounded: the first four companies of the list, one read each.
+      // another company). Bounded: the first six companies of the list, one read each.
       function sharedViaMember(ids) {
         return (ids.size() > 0 && inOrgViaMember(ids[0])) || (ids.size() > 1 && inOrgViaMember(ids[1])) ||
-          (ids.size() > 2 && inOrgViaMember(ids[2])) || (ids.size() > 3 && inOrgViaMember(ids[3]));
+          (ids.size() > 2 && inOrgViaMember(ids[2])) || (ids.size() > 3 && inOrgViaMember(ids[3])) ||
+          (ids.size() > 4 && inOrgViaMember(ids[4])) || (ids.size() > 5 && inOrgViaMember(ids[5]));
       }
 
       // Readable in its own company and in every company it is shared with (list queries:
-      // array-contains the caller's profile company).
-      allow get: if isAuthenticated() && (isMissing() || isOrgMember(resource.data.orgId) ||
-        inSharedOrgViaProfile(listOf(resource.data, 'orgIds')) || sharedViaMember(listOf(resource.data, 'orgIds')));
+      // array-contains the caller's profile company). At most 10 reads: the profile, the own
+      // company's membership, the two super-admin lookups, then six sharing companies.
+      allow get: if isAuthenticated() && (isMissing() ||
+        inOrgViaProfile(resource.data.orgId) || inOrgViaMember(resource.data.orgId) ||
+        inSharedOrgViaProfile(listOf(resource.data, 'orgIds')) || isSuperAdmin() ||
+        sharedViaMember(listOf(resource.data, 'orgIds')));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId) ||
         inSharedOrgViaProfile(resource.data.get('orgIds', [])));
       allow create: if (sharingOwnOnly() && counterIsZero(request.resource.data, 'spentAmount') &&
@@ -1018,11 +1045,22 @@ service cloud.firestore {
           : scope == 'department_name' ? 'departments'
           : 'members';
       }
-      // normalizeKeyValue (src/domain/common.ts) for the values the app stores. JS \s also
-      // covers \v, U+FEFF and every Unicode space separator (\p{Z}: U+00A0, U+2000-200A,
-      // U+3000…); RE2's \s is ASCII only, so they are listed explicitly.
+      // normalizeKeyValue (src/domain/common.ts), character for character: only A-Z are
+      // lower-cased (lower() is not used: whether it maps non-ASCII capitals, and how, need not
+      // match JavaScript's toLowerCase), and exactly JavaScript's \s (listed: RE2's \s is ASCII
+      // only, \p{Z} differs from it) plus '-', '_', '.' are dropped. Keep KEY_IGNORED identical.
+      function asciiLower(v) {
+        return v.replace('A', 'a').replace('B', 'b').replace('C', 'c').replace('D', 'd').replace('E', 'e')
+          .replace('F', 'f').replace('G', 'g').replace('H', 'h').replace('I', 'i').replace('J', 'j')
+          .replace('K', 'k').replace('L', 'l').replace('M', 'm').replace('N', 'n').replace('O', 'o')
+          .replace('P', 'p').replace('Q', 'q').replace('R', 'r').replace('S', 's').replace('T', 't')
+          .replace('U', 'u').replace('V', 'v').replace('W', 'w').replace('X', 'x').replace('Y', 'y')
+          .replace('Z', 'z');
+      }
       function keyNorm(v) {
-        return v is string ? v.lower().replace('[\\s\\p{Z}\\x{000B}\\x{FEFF}\\-_.]+', '') : '';
+        return v is string
+          ? asciiLower(v).replace('[\\t\\n\\x{000B}\\f\\r \\x{00A0}\\x{1680}\\x{2000}-\\x{200A}\\x{2028}\\x{2029}\\x{202F}\\x{205F}\\x{3000}\\x{FEFF}\\-_.]+', '')
+          : '';
       }
       // encodeKeyPart (src/utils/ids.ts): base64url of the UTF-8 bytes, without padding.
       function keyPart(v) {
@@ -1260,10 +1298,29 @@ service cloud.firestore {
     //      so a restored record that is later deleted on purpose never comes back.
     // =========================================================================
     match /legacyRestores/{markerId} {
+      // A marker is written only by the restore it records (restoreRecord: record + marker in
+      // one transaction): its id is <collection>__<docId> of a restorable collection, and that
+      // record is created by this very commit in the marker's company. So nobody can block the
+      // restore of a record (of their own company or another's) with a marker for nothing.
+      function restoredRecordPath() {
+        return /databases/$(database)/documents/$(request.resource.data.collection)/$(request.resource.data.docId);
+      }
+      function marksRestoreInCommit() {
+        let m = request.resource.data;
+        return m.get('collection', '') in ['visaRequests', 'requests', 'departments', 'services', 'providers'] &&
+          m.get('docId', '') is string && m.docId != '' && m.docId.matches('[^/]+') &&
+          markerId == m.collection + '__' + m.docId &&
+          !exists(restoredRecordPath()) &&
+          getAfter(restoredRecordPath()) != null &&
+          getAfter(restoredRecordPath()).data.get('orgId', '') == m.orgId;
+      }
       allow get: if isAuthenticated();
       allow create: if isAuthenticated() && request.resource.data.restoredBy == request.auth.uid &&
-        (isSuperAdmin() || (request.resource.data.get('orgId', '') != '' && isOrgMember(request.resource.data.orgId)));
-      allow update, delete: if false;
+        (isSuperAdmin() || (request.resource.data.get('orgId', '') is string && request.resource.data.get('orgId', '') != '' &&
+          marksRestoreInCommit() && isOrgMember(request.resource.data.orgId)));
+      allow update: if false;
+      // The platform owner may clear a marker (e.g. one written before markers were bound).
+      allow delete: if isSuperAdmin();
     }
 
     // =========================================================================

@@ -4,7 +4,7 @@
  * base64-encoded) are moved once by the platform owner.
  */
 import { describe, expect, it } from 'vitest';
-import { legacyUniqueKeyDocId, uniqueKeyDocId, type Actor } from '../src/domain/common';
+import { legacyUniqueKeyDocId, normalizeKeyValue, readUniqueKey, uniqueKeyDocId, type Actor } from '../src/domain/common';
 import { createEntity, migrateLegacyUniqueKeys, uniqueKeyOwnersOf, type UniqueKeyOwner } from '../src/domain/directory';
 import type { ServiceProvider } from '../src/types';
 import { ORG, admin, freshStore, key } from './helpers';
@@ -130,5 +130,37 @@ describe('migrateLegacyUniqueKeys (platform owner, once after the rules update)'
       { scope: 'department_name', orgId: ORG, value: 'IT', collection: 'departments', id: 'dept-1' },
       { scope: 'account_identifier', orgId: ORG, value: 'EG001', collection: 'paymentAccounts', id: 'acc-1' },
     ]);
+  });
+});
+
+describe('normalizeKeyValue (must match firestore.rules → uniqueKeys keyNorm character for character)', () => {
+  it('lower-cases A-Z only and drops exactly the JavaScript whitespace plus - _ .', () => {
+    expect(normalizeKeyValue(' Vodafone-EG_1.0 ')).toBe('vodafoneeg10');
+    expect(normalizeKeyValue('ko\u3000DAK\u00A0\uFEFF\u2028\u000B')).toBe('kodak');
+    // non-ASCII capitals are kept (the rules' lower() need not map them like JavaScript)
+    expect(normalizeKeyValue('SOCIÉTÉ')).toBe('sociÉtÉ');
+    expect(normalizeKeyValue('\u212Aodak')).toBe('\u212Aodak');
+    // not JavaScript whitespace: kept
+    expect(normalizeKeyValue('a\u180Eb\u200Bc')).toBe('a\u180Eb\u200Bc');
+    for (let c = 0; c < 0x10000; c++) {
+      const ch = String.fromCharCode(c);
+      if (/[A-Z\-_.]/.test(ch)) continue;
+      expect(normalizeKeyValue(`x${ch}y`) === 'xy').toBe(/\s/.test(ch));
+    }
+  });
+
+  it('a value that normalizes to nothing ("-", "...") has no key: nothing is read or claimed', async () => {
+    const store = freshStore();
+    let reads = 0;
+    await store.runTransaction(async tx => {
+      const counting = { ...tx, get: async (c: string, id: string) => { reads++; return tx.get(c, id); } } as typeof tx;
+      const k = await readUniqueKey(counting, 'account_identifier', ORG, ' - ');
+      expect(k.owner).toBeNull();
+    });
+    expect(reads).toBe(0);
+    for (const name of ['...', '_']) {
+      await createEntity(store, admin, 'provider', (id: string) => ({ id, orgId: ORG, name, totalPaid: 0, active: true } as ServiceProvider), () => 'x', key(), now);
+    }
+    expect(store.dump('uniqueKeys').filter((k: any) => k.value === '')).toHaveLength(0);
   });
 });

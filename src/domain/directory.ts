@@ -400,7 +400,9 @@ export async function updateEntity<T extends { id: string; orgId: string; name?:
     const after = { ...current, ...clean } as T;
     const oldValue = spec.keyOf(current);
     const newValue = spec.keyOf(after);
-    const changedKey = newValue.toLowerCase() !== oldValue.toLowerCase();
+    // Compared as keys (normalizeKeyValue, as the rules do): toLowerCase would also fold
+    // non-ASCII capitals, which the key keeps.
+    const changedKey = normalizeKeyValue(newValue) !== normalizeKeyValue(oldValue);
     let oldKey = changedKey ? await readKeyIfAny(tx, spec.scope, current.orgId, oldValue) : null;
     let newKey = changedKey ? await readKeyIfAny(tx, spec.scope, current.orgId, newValue) : null;
     if (newKey && isKeyTakenByOther(newKey, id)) throw new DomainError('duplicate', spec.duplicateMessage(newValue));
@@ -738,11 +740,38 @@ export async function createMember(
 export const isRealUid = (id?: string) => Boolean(id && /^[A-Za-z0-9]{20,40}$/.test(id));
 
 /**
- * The login (real UID) a person's memberships already point to, or '' when there is none
- * — e.g. only email-invited (pending) memberships: such a person has no known login yet.
+ * The login (real UID) a person's memberships CLAIM, or '' when there is none — e.g. only
+ * email-invited (pending) memberships. A form hint only ("this email seems to have a login"):
+ * a membership's (userId, userEmail) pair is whatever some company's admin wrote, so it is
+ * never used to link an account (see verifiedLoginUidOf).
  */
 export const knownLoginUidOf = (memberships: Array<Pick<OrganizationMember, 'userId'>>): string =>
   memberships.find(m => isRealUid(m.userId))?.userId || '';
+
+/**
+ * The login (real UID) that may be re-used for `email` when the person is added to another
+ * company, or '' when none is PROVEN. Any org admin can write a membership pairing an account
+ * it controls with someone else's email, so a UID found next to an email is a claim, not
+ * proof: it is re-used only when that account recorded the address itself, from its verified
+ * sign-in token (users/{uid}.verifiedEmail, which firestore.rules let nobody else write).
+ * Otherwise the person is added by email (pending-<email>), which only the verified owner of
+ * the address can take. `readVerifiedEmail` returns a profile's verifiedEmail (null when the
+ * profile is missing or not readable).
+ */
+export async function verifiedLoginUidOf(
+  memberships: Array<Pick<OrganizationMember, 'userId' | 'userEmail'>>,
+  email: string,
+  readVerifiedEmail: (uid: string) => Promise<string | null | undefined>,
+): Promise<string> {
+  const target = normalizeEmail(email);
+  if (!target) return '';
+  const uids = Array.from(new Set(memberships.filter(m => isRealUid(m.userId) && normalizeEmail(m.userEmail) === target).map(m => m.userId)));
+  for (const uid of uids) {
+    const proven = await readVerifiedEmail(uid).catch(() => null);
+    if (normalizeEmail(proven) === target) return uid;
+  }
+  return '';
+}
 
 /**
  * A login account created by an earlier, unfinished attempt of the same provisioning intent
@@ -1144,8 +1173,56 @@ const inOrderOf = <T extends { orgId: string }>(targets: string[], list: T[]) =>
   [...list].sort((a, b) => targets.indexOf(a.orgId) - targets.indexOf(b.orgId));
 
 /**
- * Adds one person to every selected company in ONE transaction (members/{userId}_{orgId}
- * per company, like createMember). Companies where they already belong are skipped.
+ * Companies per transaction of a multi-company add. The rules read the caller's membership
+ * in every company a commit writes to (plus the profile and the two super-admin lookups), and
+ * a commit may read at most 20 documents: 15 companies stay within it. Every document id is
+ * derived from the operation key, so each transaction is idempotent and a retry with the same
+ * key completes the companies an interrupted run did not reach.
+ */
+export const ORGS_PER_TRANSACTION = 15;
+
+interface OrgChunkResult<T> {
+  created: T[];
+  replayed: T[];
+  skipped: MultiOrgSkip[];
+}
+
+async function runInOrgChunks<T extends { orgId: string }>(
+  store: DataStore,
+  targets: string[],
+  runChunk: (chunk: string[]) => Promise<OrgChunkResult<T>>,
+  takenEverywhere: (skipped: MultiOrgSkip[]) => DomainError,
+): Promise<MutationOutcome<MultiOrgResult<T>>> {
+  const chunks: string[][] = [];
+  for (let i = 0; i < targets.length; i += ORGS_PER_TRANSACTION) chunks.push(targets.slice(i, i + ORGS_PER_TRANSACTION));
+  // An unknown or archived company still fails the whole operation before anything is
+  // written. Read-only, chunk by chunk too: a transaction's commit re-checks every document
+  // it read against the rules, within the same per-commit read budget.
+  if (chunks.length > 1) {
+    for (const chunk of chunks) {
+      await store.runTransaction(async tx => {
+        for (const orgId of chunk) await readTargetOrg(tx, orgId);
+      });
+    }
+  }
+  const all: OrgChunkResult<T> = { created: [], replayed: [], skipped: [] };
+  for (const chunk of chunks) {
+    const part = await runChunk(chunk);
+    all.created.push(...part.created);
+    all.replayed.push(...part.replayed);
+    all.skipped.push(...part.skipped);
+  }
+  if (all.created.length === 0) {
+    if (all.replayed.length > 0) return { value: { created: inOrderOf(targets, all.replayed), skipped: all.skipped }, changed: false, reason: 'duplicate_operation' };
+    throw takenEverywhere(all.skipped);
+  }
+  return { value: { created: inOrderOf(targets, [...all.replayed, ...all.created]), skipped: all.skipped }, changed: true };
+}
+
+/**
+ * Adds one person to every selected company (members/{userId}_{orgId} per company, like
+ * createMember), ORGS_PER_TRANSACTION companies per transaction. Companies where they
+ * already belong are skipped.
  * Nobody but the platform owner is super admin: the role is always refused here.
  */
 export async function createMemberInOrgs(
@@ -1167,12 +1244,12 @@ export async function createMemberInOrgs(
   const nowIso = now.toISOString();
   type Stored = OrganizationMember & { operationKey?: string };
 
-  return store.runTransaction(async tx => {
+  const runChunk = (chunk: string[]) => store.runTransaction(async (tx): Promise<OrgChunkResult<Stored>> => {
     // Read phase for every company (a transaction allows no read after its first write).
     const replayed: Stored[] = [];
     const skipped: MultiOrgSkip[] = [];
     const toCreate: Array<{ org: Organization; member: Stored & { operationKey: string }; key: UniqueKeyRead | null }> = [];
-    for (const orgId of targets) {
+    for (const orgId of chunk) {
       const org = await readTargetOrg(tx, orgId);
       const id = `${userId}_${orgId}`;
       const existing = await tx.get<Stored>(COL.members, id);
@@ -1196,16 +1273,7 @@ export async function createMemberInOrgs(
       });
     }
 
-    if (toCreate.length === 0) {
-      if (replayed.length > 0) return { value: { created: inOrderOf(targets, replayed), skipped }, changed: false, reason: 'duplicate_operation' };
-      const name = skipped[0]?.existingName;
-      throw new DomainError(
-        'duplicate',
-        targets.length === 1
-          ? `${who} مسجل بالفعل في هذه المؤسسة${name ? ` باسم "${name}"` : ''}.`
-          : `${who} مسجل بالفعل في كل الشركات المختارة.`,
-      );
-    }
+    if (toCreate.length === 0) return { created: [], replayed, skipped };
 
     const recipientUpdates = toCreate
       .map(({ org, member }) => recipientUpdateFor(member.orgId, org, [], isNotificationRecipient(member) ? [member.userEmail] : []))
@@ -1233,14 +1301,25 @@ export async function createMemberInOrgs(
         nowIso,
       );
     }
-    return { value: { created: inOrderOf(targets, [...replayed, ...toCreate.map(c => c.member)]), skipped }, changed: true };
+    return { created: toCreate.map(c => c.member), replayed, skipped };
+  });
+
+  return runInOrgChunks(store, targets, runChunk, skipped => {
+    const name = skipped[0]?.existingName;
+    return new DomainError(
+      'duplicate',
+      targets.length === 1
+        ? `${who} مسجل بالفعل في هذه المؤسسة${name ? ` باسم "${name}"` : ''}.`
+        : `${who} مسجل بالفعل في كل الشركات المختارة.`,
+    );
   });
 }
 
 /**
- * Creates one provider / department / service document per selected company in ONE
- * transaction (id = entityIdInOrg(kind, operationKey, orgId)); each company keeps its own
- * orgId, totals and unique name key. Companies where the name is taken are skipped.
+ * Creates one provider / department / service document per selected company
+ * (id = entityIdInOrg(kind, operationKey, orgId)), ORGS_PER_TRANSACTION companies per
+ * transaction; each company keeps its own orgId, totals and unique name key. Companies
+ * where the name is taken are skipped.
  */
 export async function createEntityInOrgs<T extends { id: string; orgId: string }>(
   store: DataStore,
@@ -1261,11 +1340,11 @@ export async function createEntityInOrgs<T extends { id: string; orgId: string }
     return { ...build(id, orgId, nowIso), id, orgId } as T;
   });
 
-  return store.runTransaction(async tx => {
+  const runChunk = (chunk: string[]) => store.runTransaction(async (tx): Promise<OrgChunkResult<T>> => {
     const replayed: T[] = [];
     const skipped: MultiOrgSkip[] = [];
     const toCreate: Array<{ org: Organization; entity: T; key: UniqueKeyRead | null }> = [];
-    for (const entity of drafts) {
+    for (const entity of drafts.filter(d => chunk.includes(d.orgId))) {
       const org = await readTargetOrg(tx, entity.orgId);
       const existing = await tx.get<T>(spec.collection, entity.id);
       if (existing) {
@@ -1282,11 +1361,7 @@ export async function createEntityInOrgs<T extends { id: string; orgId: string }
       toCreate.push({ org, entity, key });
     }
 
-    if (toCreate.length === 0) {
-      if (replayed.length > 0) return { value: { created: inOrderOf(targets, replayed), skipped }, changed: false, reason: 'duplicate_operation' };
-      const value = spec.keyOf(drafts[0]);
-      throw new DomainError('duplicate', targets.length === 1 ? spec.duplicateMessage(value) : spec.duplicateInAllMessage(value));
-    }
+    if (toCreate.length === 0) return { created: [], replayed, skipped };
 
     for (const { entity, key } of toCreate) {
       tx.set(spec.collection, entity.id, entity);
@@ -1309,7 +1384,12 @@ export async function createEntityInOrgs<T extends { id: string; orgId: string }
         nowIso,
       );
     }
-    return { value: { created: inOrderOf(targets, [...replayed, ...toCreate.map(c => c.entity)]), skipped }, changed: true };
+    return { created: toCreate.map(c => c.entity), replayed, skipped };
+  });
+
+  return runInOrgChunks(store, targets, runChunk, () => {
+    const value = spec.keyOf(drafts[0]);
+    return new DomainError('duplicate', targets.length === 1 ? spec.duplicateMessage(value) : spec.duplicateInAllMessage(value));
   });
 }
 

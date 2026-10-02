@@ -18,6 +18,7 @@ import {
   formatAmount,
   isKeyTakenByOther,
   localDate,
+  normalizeKeyValue,
   pad,
   readCounter,
   readUniqueKey,
@@ -416,7 +417,7 @@ export async function updatePaymentAccount(
       }
     }
     const newIdentifier = typeof clean.accountIdentifier === 'string' ? clean.accountIdentifier.trim() : undefined;
-    const identifierChanged = newIdentifier !== undefined && newIdentifier.toLowerCase() !== (account.accountIdentifier || '').trim().toLowerCase();
+    const identifierChanged = newIdentifier !== undefined && normalizeKeyValue(newIdentifier) !== normalizeKeyValue(account.accountIdentifier);
     let oldKey = null as Awaited<ReturnType<typeof readUniqueKey>> | null;
     let newKey = null as Awaited<ReturnType<typeof readUniqueKey>> | null;
     if (identifierChanged) {
@@ -810,7 +811,9 @@ export async function settleCustodyItem(
       throw new DomainError('forbidden', 'ليس لديك صلاحية تسوية هذه العهدة.');
     }
 
-    if (amount > Number(custody.remainingAmount || 0)) {
+    // Compared in cents, like every other balance check: a legacy remainder with float noise
+    // (0.7 + 0.1 = 0.7999999999999999) is the 0.80 the holder sees and may settle.
+    if (amount > toMoney(custody.remainingAmount)) {
       throw new DomainError('insufficient_funds', 'مبلغ التسوية أكبر من المبلغ المتبقي في العهدة.');
     }
 

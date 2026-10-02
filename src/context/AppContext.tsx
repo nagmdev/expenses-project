@@ -124,6 +124,7 @@ import {
   updateMemberRecord,
   updateOrganization as updateOrganizationOp,
   uniqueKeyOwnersOf,
+  verifiedLoginUidOf,
   type UniqueKeyMigration,
 } from '../domain/directory';
 import {
@@ -750,6 +751,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [userDocProfile, setUserDocProfile] = useState<{
     id?: string;
     email?: string;
+    /** Written by the account itself from a verified token (firestore.rules → users). */
+    verifiedEmail?: string;
     name?: string;
     role?: Role;
     orgId?: string;
@@ -1049,6 +1052,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!db) return;
     linkOwnProfile(db, firebaseUser, target).catch(err => console.warn('[identity] profile re-link rejected:', err?.message || err));
   }, [firebaseUser, superAdminStatusResolved, isSuperAdmin, userDocLoaded, membershipsLoaded, profileState]);
+
+  // Record the account's own proof of its address (users/{uid}.verifiedEmail, writable only
+  // by the account itself from a verified token). Admins re-use this login for the same email
+  // in another company only on that proof (directory.ts → verifiedLoginUidOf). Once per value.
+  const verifiedEmailAttempt = useRef('');
+  useEffect(() => {
+    if (!firebaseUser || !emailVerified || !userDocLoaded || !userDocProfile) return;
+    const email = normalizeEmail(firebaseUser.email);
+    if (!email || normalizeEmail(userDocProfile.verifiedEmail) === email) return;
+    const attempt = `${firebaseUser.uid}|${email}`;
+    if (verifiedEmailAttempt.current === attempt) return;
+    verifiedEmailAttempt.current = attempt;
+    const db = getDb();
+    if (!db) return;
+    setDoc(doc(db, 'users', firebaseUser.uid), { verifiedEmail: email }, { merge: true })
+      .catch(err => console.warn('[identity] verified email not recorded:', err?.message || err));
+  }, [firebaseUser, emailVerified, userDocLoaded, userDocProfile]);
 
   // Suspended accounts (active: false) get no org data under firestore.rules; the UI
   // says so instead of showing an empty or "awaiting assignment" screen.
@@ -1574,6 +1594,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     name: currentUser.name,
     email: currentUser.email,
     role: resolvedRole,
+    emailVerified,
     ...(isSuperAdmin || !effectiveOrgId || effectiveOrgId === 'all' ? {} : { orgId: effectiveOrgId }),
   };
 
@@ -2056,10 +2077,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // =========================================================================
   // MEMBERS
   // =========================================================================
-  // Re-use the real UID if this person already signed in / belongs to another org
-  // (never for an empty email: that would match an unrelated member without one).
-  const knownUidForEmail = (email: string) =>
-    email ? rawMembers.find(m => normalizeEmail(m.userEmail) === email && isRealUid(m.userId))?.userId : undefined;
+  // Re-use the real UID of this email's login only when that account PROVED the address
+  // (users/{uid}.verifiedEmail): a membership pairing a UID with an email is an admin's claim,
+  // and any org admin can write one for an account it controls. Profiles this user cannot
+  // read prove nothing. Without proof the person is added by email (pending invitation).
+  const knownUidForEmail = async (email: string): Promise<string> => {
+    const db = getDb();
+    if (!email || !db) return '';
+    return verifiedLoginUidOf(rawMembers, email, async uid => {
+      const snap = await getDoc(doc(db, 'users', uid));
+      return snap.exists() ? String(snap.data()?.verifiedEmail || '') : null;
+    });
+  };
 
   const addMember = async (memberData: Omit<OrganizationMember, 'id' | 'joinedAt'>, opts?: MutationOptions) => {
     const email = normalizeEmail(memberData.userEmail);
@@ -2070,7 +2099,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         throw new Error(`البريد الإلكتروني (${memberData.userEmail}) مسجل بالفعل في هذه المؤسسة باسم "${existingInOrg.userName}"`);
       }
     }
-    const knownUid = knownUidForEmail(email);
+    const knownUid = isRealUid(memberData.userId) ? '' : await knownUidForEmail(email);
     const opKey = opts?.idempotencyKey || newOperationKey();
     await mutate('addMember', opts?.idempotencyKey || fingerprint(memberData.orgId, email || memberData.userName), store =>
       createMember(store, actor, { ...memberData, userId: isRealUid(memberData.userId) ? memberData.userId : knownUid || '' }, opKey)
@@ -2122,7 +2151,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const targets = normalizeOrgIds(orgIds);
     const email = normalizeEmail(memberData.userEmail);
     const key = opts?.idempotencyKey;
-    const knownUid = knownUidForEmail(email);
+    const knownUid = isRealUid(memberData.userId) ? '' : await knownUidForEmail(email);
     const opKey = key || newOperationKey();
     return runMultiOrgAdd<OrganizationMember & { operationKey?: string }>({
       targets,

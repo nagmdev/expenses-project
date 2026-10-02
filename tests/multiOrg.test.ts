@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { DomainError, uniqueKeyDocId, type Actor } from '../src/domain/common';
 import {
   MAX_ORGS_PER_OPERATION,
+  ORGS_PER_TRANSACTION,
   PLATFORM_OWNER_EMAILS,
   createEntityInOrgs,
   createMemberInOrgs,
@@ -15,6 +16,7 @@ import {
   knownLoginUidOf,
   pendingUserIdForEmail,
   reusableProvisionedAccount,
+  verifiedLoginUidOf,
 } from '../src/domain/directory';
 import type { MemoryStore } from '../src/domain/store';
 import type { Department, OrganizationMember, ServiceProvider } from '../src/types';
@@ -193,6 +195,26 @@ describe('createMemberInOrgs — one person, several companies', () => {
     expect(audits(store)).toHaveLength(0);
   });
 
+  it('more companies than ORGS_PER_TRANSACTION: one commit per chunk (rules read budget), same result, a retry writes nothing', async () => {
+    const store = multiOrgStore();
+    const many = Array.from({ length: 2 * ORGS_PER_TRANSACTION + 3 }, (_, i) => `org-m${i}`);
+    for (const o of many) store.seed('organizations', o, { id: o, name: o, code: o, currency: 'EGP', budget: 1, description: '', notificationRecipients: [] });
+    const k = key();
+    const res = await createMemberInOrgs(store, owner, person({ role: 'org_admin' }), many, k, now);
+    expect(res.value.created.map(m => m.orgId)).toEqual(many);
+    expect(store.commits).toBe(3);
+    expect(audits(store)).toHaveLength(many.length);
+    const again = await createMemberInOrgs(store, owner, person({ role: 'org_admin' }), many, k, now);
+    expect(again.changed).toBe(false);
+    expect(again.value.created).toHaveLength(many.length);
+    expect(store.commits).toBe(3);
+    // an archived company anywhere in the list fails the operation before any chunk is written
+    store.seed('organizations', many[40 % many.length], { ...store.read('organizations', many[40 % many.length])!, archived: true, status: 'archived' });
+    await expect(createEntityInOrgs(store, owner, 'department', many, (id, orgId, nowIso) => ({ id, orgId, name: 'Ops', createdAt: nowIso } as Department), () => 'x', key(), now))
+      .rejects.toMatchObject({ code: 'archived_org' });
+    expect(store.dump('departments')).toHaveLength(0);
+  });
+
   it('re-uses a known real UID for every company', async () => {
     const store = multiOrgStore();
     const uid = 'uidKnownAccount000000000001';
@@ -321,5 +343,26 @@ describe('provisioning a login for a company member', () => {
     expect(reusableProvisionedAccount(account, ' X@Acme.test ')).toBe(account);
     expect(() => reusableProvisionedAccount(account, 'y@acme.test')).toThrow(DomainError);
     expect(() => reusableProvisionedAccount(account, 'y@acme.test')).toThrow(expect.objectContaining({ code: 'identity_changed' }));
+  });
+});
+
+describe('re-using a login for an email (verifiedLoginUidOf)', () => {
+  const uid = 'uidKnownAccount000000000001';
+  const other = 'uidAttacker0000000000000001';
+  const memberships = [
+    { userId: other, userEmail: 'cfo@other.test' },          // an org admin paired its own account with the email
+    { userId: uid, userEmail: ' CFO@Other.test ' },
+    { userId: pendingUserIdForEmail('cfo@other.test'), userEmail: 'cfo@other.test' },
+  ];
+  it('a membership pairing a UID with the email is a claim, not proof: only the account that recorded the address itself is re-used', async () => {
+    const profiles: Record<string, string> = { [uid]: 'cfo@other.test', [other]: 'attacker@evil.test' };
+    expect(knownLoginUidOf(memberships)).toBe(other);
+    expect(await verifiedLoginUidOf(memberships, 'cfo@other.test', async id => profiles[id] ?? null)).toBe(uid);
+  });
+
+  it('no proof, an unreadable profile or an empty email: no login (the person is added by email)', async () => {
+    expect(await verifiedLoginUidOf(memberships, 'cfo@other.test', async () => null)).toBe('');
+    expect(await verifiedLoginUidOf(memberships, 'cfo@other.test', async () => { throw new Error('permission-denied'); })).toBe('');
+    expect(await verifiedLoginUidOf(memberships, '', async () => 'cfo@other.test')).toBe('');
   });
 });

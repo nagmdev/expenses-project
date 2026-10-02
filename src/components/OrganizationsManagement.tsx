@@ -751,8 +751,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
         // The email of the login the memberships belong to (from the result, never from the form).
         let accountEmail = cleanEmail;
         let remainingOrgIds = targetOrgIds;
-        // An existing person keeps the same login (UID) in every company.
-        let knownUid = provisionKnownUid;
+        // An existing person keeps the same login (UID) in every company — but only a login
+        // that proved this email (addMemberToOrgs resolves it: verifiedLoginUidOf); a UID that
+        // a membership merely pairs with the email is never linked. Without proof the person
+        // is added by email and opens the companies once signed in with that verified email.
+        let knownUid = '';
         let linkKey = idempotencyKey;
 
         if (!isExistingAccount) {
@@ -3776,7 +3779,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   <div className="bg-sky-50 border border-sky-200 text-sky-900 p-2.5 rounded-xl text-[11px] leading-relaxed">
                     هذا البريد مسجل بالفعل في:{' '}
                     <strong>{Array.from(new Set(existingMembershipsForEmail.map(m => orgNameOf(m.orgId)))).join('، ')}</strong>.
-                    {' '}سيُضاف بنفس حسابه الحالي إلى الشركات المختارة الأخرى (لا حاجة لكلمة مرور جديدة)، والشركات المسجل بها تظهر غير متاحة.
+                    {' '}سيُضاف إلى الشركات المختارة الأخرى (لا حاجة لكلمة مرور جديدة): بنفس حسابه الحالي إن كان قد وثّق بريده، وإلا بدعوة على البريد تُفتح له بعد توثيق بريده. والشركات المسجل بها تظهر غير متاحة.
                   </div>
                 )}
                 {provisionHasPendingOnly && (

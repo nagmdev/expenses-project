@@ -1,5 +1,5 @@
 /**
- * Adversarial and legitimacy suite for firestore.rules (rules-spec-v1, round r1).
+ * Adversarial and legitimacy suite for firestore.rules (rules-spec-v1, rounds r1 and r2).
  *
  * An attacker uses the raw Firestore Web SDK with their own credentials (single writes,
  * batches, transactions, chosen ids, fields the domain never writes); every legitimate
@@ -8,12 +8,13 @@
  *
  * A test whose name carries a finding id ([RQ-n], [AG-n], [CUS-n], [O1], [U1], [M1], [C1],
  * [A1], [L1]...) reproduces that round-r1 finding and asserts the now-correct outcome
- * (the attack is refused / the legitimate operation works). "[known, accepted]" tests
+ * (the attack is refused / the legitimate operation works); [TEN2-n] and [R2-xx] do the same
+ * for the round-r2 findings (tenancy lane / legitimacy lane). "[known, accepted]" tests
  * document a behaviour that is deliberately NOT enforced by the rules (see the commit
  * message / spec §11). Every other test is coverage.
  *
  * Sections (each seeds its own data): requests and counters, custodies, tenancy and
- * identity, legitimate operations.
+ * identity, legitimate operations, round r2 (tenancy lane, legitimacy lane).
  */
 import { readFileSync } from 'fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -41,16 +42,18 @@ import {
   createOrganization,
   deleteEntity,
   ensureOrgNotificationRecipients,
+  knownLoginUidOf,
   removeMember,
   removeOrganization,
   syncOwnMembership,
   updateEntity,
   updateMemberRecord,
   updateOrganization,
+  verifiedLoginUidOf,
 } from '../src/domain/directory';
 import { addVisaPayment, createVisaRequest, decideVisaRequest, deleteVisaRequest, updateVisaRequest } from '../src/domain/visa';
 import { LEGACY_STORES, restoreBlock, restoreRecord, type LegacyRecord } from '../src/domain/legacyRecovery';
-import { toMoney, uniqueKeyDocId, type Actor } from '../src/domain/common';
+import { normalizeEmail, normalizeKeyValue, toMoney, uniqueKeyDocId, type Actor } from '../src/domain/common';
 import { DEFAULT_EMAIL_SETTINGS } from '../src/services/emailTemplates';
 
 const ORG = 'org-acme';
@@ -2498,6 +2501,783 @@ describe('legitimate operations (real domain, every role, legacy data)', () => {
       await updateEntity(s, a, 'department', d.value.id, { name: 'MA dept 2' } as any, () => ({ actionType: 'rename', details: 'x' }), key());
       await updatePaymentAccount(s, a, 'acc-cash', { name: 'renamed by MA', accountIdentifier: 'MA-CASH' }, key());
       await adjustAccountBalance(s, a, { accountId: 'acc-cash', type: 'out', amount: 0.01, description: 'x' }, key());
+    });
+  });
+});
+
+// =============================================================================
+// Round r2. [TEN2-n]: tenancy lane; [R2-xx]: legitimacy lane. Each section seeds its own data.
+// =============================================================================
+describe('round r2: identity, audit ids, restore markers, keys (tenancy lane)', () => {
+  const SUSP_ADMIN = { uid: 'uidSuspAdmin0000000000001', email: 'sadmin@acme.test' };
+  const CFO = { uid: 'uidCfoAccount000000000001', email: 'cfo@acme.test' };   // a real person of ORG, verified
+  const VICTIM_EMAIL = 'cfo@other.test';                                     // not registered anywhere yet
+  const verifiedEmailVia = (f: Firestore) => async (uid: string) => {
+    const snap = await getDoc(doc(f, 'users', uid));
+    return snap.exists() ? (snap.data()?.verifiedEmail ?? null) : null;
+  };
+  const allMembers = async (f: Firestore) => (await getDocs(collection(f, 'members'))).docs.map(d => ({ id: d.id, ...d.data() } as any));
+  const rec = (c: string, id: string, data: Record<string, unknown>): LegacyRecord =>
+    ({ store: LEGACY_STORES.find(s => s.collection === c)!, id, data: { id, ...data }, title: id });
+
+  beforeEach(async () => {
+    await env.clearFirestore();
+    await seed(async f => {
+      await setDoc(doc(f, 'organizations', ORG), { id: ORG, name: 'Acme', code: 'ACME', currency: 'EGP', notificationRecipients: [ADMIN.email], createdAt: '2026-01-01' });
+      await setDoc(doc(f, 'organizations', OTHER_ORG), { id: OTHER_ORG, name: 'Other', code: 'OTH', currency: 'EGP', notificationRecipients: [CAIRO_ADMIN.email], createdAt: '2026-01-01' });
+      await setDoc(doc(f, 'organizations', THIRD_ORG), { id: THIRD_ORG, name: 'Third', code: 'TRD', currency: 'EGP', notificationRecipients: [], createdAt: '2026-01-01' });
+      for (const [u, role, org] of [[ADMIN, 'org_admin', ORG], [FIN, 'finance', ORG], [EMP, 'employee', ORG], [DE, 'data_entry', ORG], [CFO, 'employee', ORG],
+        [CAIRO_FIN, 'finance', OTHER_ORG], [CAIRO_ADMIN, 'org_admin', OTHER_ORG], [CAIRO_EMP, 'employee', OTHER_ORG]] as const) {
+        await setDoc(doc(f, 'users', u.uid), { orgId: org, role, active: true, email: u.email, memberId: `${u.uid}_${org}` });
+        await setDoc(doc(f, 'members', `${u.uid}_${org}`), { orgId: org, userId: u.uid, userEmail: u.email, role, active: true, userName: u.email });
+      }
+      for (const [u, role] of [[MULTI_FIN, 'finance'], [MULTI_ADMIN, 'org_admin']] as const) {
+        await setDoc(doc(f, 'users', u.uid), { orgId: OTHER_ORG, role: 'employee', active: true, email: u.email, memberId: `${u.uid}_${OTHER_ORG}` });
+        await setDoc(doc(f, 'members', `${u.uid}_${OTHER_ORG}`), { orgId: OTHER_ORG, userId: u.uid, userEmail: u.email, role: 'employee', active: true, userName: u.email });
+        await setDoc(doc(f, 'members', `${u.uid}_${ORG}`), { orgId: ORG, userId: u.uid, userEmail: u.email, role, active: true, userName: u.email });
+      }
+      for (const [u, role] of [[SUSP_FIN, 'finance'], [SUSP_ADMIN, 'org_admin']] as const) {
+        await setDoc(doc(f, 'users', u.uid), { orgId: ORG, role, active: false, email: u.email, memberId: `${u.uid}_${ORG}` });
+        await setDoc(doc(f, 'members', `${u.uid}_${ORG}`), { orgId: ORG, userId: u.uid, userEmail: u.email, role, active: false, userName: u.email });
+      }
+
+      await setDoc(doc(f, 'paymentAccounts', 'acc-cash'), account('acc-cash', 1000, { accountIdentifier: 'EG001' }));
+      await setDoc(doc(f, 'paymentAccounts', 'acc-bank'), account('acc-bank', 5000, { type: 'bank', accountIdentifier: 'EG777' }));
+      await setDoc(doc(f, 'paymentAccounts', 'acc-ob'), account('acc-ob', 9000, { orgId: OTHER_ORG, type: 'bank', accountIdentifier: 'OB1' }));
+      await setDoc(doc(f, 'services', 'srv-1'), { orgId: ORG, name: 'Cloud', code: 'CLD', spentAmount: 0 });
+      await setDoc(doc(f, 'providers', 'prov-1'), { orgId: ORG, name: 'Vodafone', totalPaid: 0, active: true });
+      await setDoc(doc(f, 'providers', 'prov-k'), { orgId: ORG, name: 'Kodak', totalPaid: 0, active: true });
+      await setDoc(doc(f, 'departments', 'dept-1'), { orgId: ORG, name: 'IT' });
+      await setDoc(doc(f, 'requests', 'r-pay'), approvedRequest('r-pay', 100));
+
+      const k = (scope: any, org: string, v: string, coll: string, id: string) =>
+        setDoc(doc(f, 'uniqueKeys', uniqueKeyDocId(scope, org, v)), { scope, orgId: org, value: normalizeKeyValue(v), entityCollection: coll, entityId: id });
+      await k('account_identifier', ORG, 'EG001', 'paymentAccounts', 'acc-cash');
+      await k('account_identifier', ORG, 'EG777', 'paymentAccounts', 'acc-bank');
+      await k('provider_name', ORG, 'Vodafone', 'providers', 'prov-1');
+      await k('provider_name', ORG, 'Kodak', 'providers', 'prov-k');
+      await k('service_code', ORG, 'CLD', 'services', 'srv-1');
+      await k('department_name', ORG, 'IT', 'departments', 'dept-1');
+      await k('member_email', ORG, EMP.email, 'members', `${EMP.uid}_${ORG}`);
+      await k('account_identifier', OTHER_ORG, 'OB1', 'paymentAccounts', 'acc-ob');
+    });
+  });
+
+  describe('findings', () => {
+    it('[TEN2-1] a membership pairing an account with someone else\'s email is only a claim: adding that email to another company links nobody, the attacker gets nothing there', async () => {
+      // ORG's admin pairs an account it controls with the email of a person about to join OTHER_ORG.
+      // Granting ORG access to any account is the org admin's call, so the write itself is allowed.
+      await assertSucceeds(setDoc(doc(db(ADMIN), 'members', `${STRANGER.uid}_${ORG}`), {
+        orgId: ORG, userId: STRANGER.uid, userEmail: VICTIM_EMAIL, userName: 'CFO', role: 'employee', active: true,
+      }));
+      const owner = db(OWNER);
+      const forVictim = (await allMembers(owner)).filter(m => normalizeEmail(m.userEmail) === VICTIM_EMAIL);
+      expect(knownLoginUidOf(forVictim)).toBe(STRANGER.uid);                            // the claim exists ...
+      const proven = await verifiedLoginUidOf(forVictim, VICTIM_EMAIL, verifiedEmailVia(owner));
+      expect(proven).toBe('');                                                          // ... but proves nothing
+      const res = await createMemberInOrgs(store(OWNER), actor(OWNER, 'super_admin'),
+        { userId: proven, userName: 'CFO', userEmail: VICTIM_EMAIL, role: 'finance', department: 'Finance', jobTitle: 'CFO', active: true } as any, [OTHER_ORG], key());
+      expect(res.value.created[0].userId).toMatch(/^pending-/);                         // an invitation by email
+      await assertFails(getDoc(doc(db(STRANGER), 'paymentAccounts', 'acc-ob')));
+      // ... which only the verified owner of the address can take
+      await assertFails(setDoc(doc(db(STRANGER), 'users', STRANGER.uid), { orgId: OTHER_ORG, role: 'finance', active: true, memberId: res.value.created[0].id }));
+      await assertFails(setDoc(doc(db({ uid: 'uidSquatter00000000000001', email: VICTIM_EMAIL }, false), 'users', 'uidSquatter00000000000001'),
+        { orgId: OTHER_ORG, role: 'finance', active: true, memberId: res.value.created[0].id }));
+    });
+
+    it('[TEN2-1] users/{uid}.verifiedEmail is written by that account only, from its verified token', async () => {
+      const a = db(ADMIN);
+      await assertFails(setDoc(doc(a, 'users', STRANGER.uid), { orgId: ORG, role: 'employee', active: true, verifiedEmail: VICTIM_EMAIL }));
+      await assertSucceeds(setDoc(doc(a, 'users', STRANGER.uid), { orgId: ORG, role: 'employee', active: true }));
+      await assertFails(updateDoc(doc(a, 'users', STRANGER.uid), { verifiedEmail: VICTIM_EMAIL }));
+      await assertFails(updateDoc(doc(a, 'users', EMP.uid), { verifiedEmail: EMP.email }));
+      await assertFails(updateDoc(doc(db(STRANGER), 'users', STRANGER.uid), { verifiedEmail: VICTIM_EMAIL }));
+      await assertFails(updateDoc(doc(db(EMP, false), 'users', EMP.uid), { verifiedEmail: EMP.email }));   // unverified token
+      await assertSucceeds(setDoc(doc(db(EMP), 'users', EMP.uid), { verifiedEmail: EMP.email }, { merge: true }));
+      // once recorded, an org admin's edits of the profile keep it as it is
+      await assertFails(setDoc(doc(a, 'users', EMP.uid), { orgId: ORG, role: 'employee', active: true }));      // whole set drops it
+      await assertSucceeds(setDoc(doc(a, 'users', EMP.uid), { name: 'Emp' }, { merge: true }));
+    });
+
+    it('[TEN2-1] legit: a person who proved the email keeps the same login in another company; an unproven one is invited by email', async () => {
+      await setDoc(doc(db(CFO), 'users', CFO.uid), { verifiedEmail: CFO.email }, { merge: true });
+      const owner = db(OWNER);
+      const members = await allMembers(owner);
+      const uid = await verifiedLoginUidOf(members, CFO.email, verifiedEmailVia(owner));
+      expect(uid).toBe(CFO.uid);
+      await createMemberInOrgs(store(OWNER), actor(OWNER, 'super_admin'),
+        { userId: uid, userName: 'CFO', userEmail: CFO.email, role: 'finance', department: 'F', jobTitle: 'CFO', active: true } as any, [OTHER_ORG], key());
+      await assertSucceeds(getDoc(doc(db(CFO), 'paymentAccounts', 'acc-ob')));
+      // EMP never recorded a verified email (e.g. an admin-provisioned password account)
+      expect(await verifiedLoginUidOf(members, EMP.email, verifiedEmailVia(owner))).toBe('');
+      // an org admin reads only profiles of its own company: another company's profile proves nothing to it
+      await setDoc(doc(db(CAIRO_EMP), 'users', CAIRO_EMP.uid), { verifiedEmail: CAIRO_EMP.email }, { merge: true });
+      expect(await verifiedLoginUidOf(members, CAIRO_EMP.email, verifiedEmailVia(owner))).toBe(CAIRO_EMP.uid);
+      expect(await verifiedLoginUidOf(members, CAIRO_EMP.email, verifiedEmailVia(db(ADMIN)))).toBe('');
+    });
+
+    it('[TEN2-1] (variant) a membership of a real login is never re-pointed to another UID; a placeholder still moves to the account linked to it', async () => {
+      await assertFails(updateDoc(doc(db(ADMIN), 'members', `${EMP.uid}_${ORG}`), { userId: STRANGER.uid }));
+      await assertFails(updateDoc(doc(db(ADMIN), 'members', `${EMP.uid}_${ORG}`), { userId: 'pending-x' }));
+      // legit: invited by email (placeholder), the person signed in and linked its profile to it
+      const pendingId = `pending-bmV3aGlyZUBhY21lLnRlc3Q_${ORG}`;
+      await seed(async f => {
+        await setDoc(doc(f, 'members', pendingId), { orgId: ORG, userId: `pending-bmV3aGlyZUBhY21lLnRlc3Q`, userEmail: NEWHIRE.email, role: 'employee', active: true, userName: 'NH' });
+        await setDoc(doc(f, 'users', NEWHIRE.uid), { orgId: ORG, role: 'employee', active: true, memberId: pendingId });
+      });
+      // ... but not to an account whose profile does not link to it
+      await assertFails(updateDoc(doc(db(ADMIN), 'members', pendingId), { userId: STRANGER.uid }));
+      await updateMemberRecord(store(ADMIN), actor(ADMIN, 'org_admin', ORG), pendingId, { userName: 'New Hire' }, [NEWHIRE.uid], key());
+      expect((await read('members', pendingId))!.userId).toBe(NEWHIRE.uid);
+    });
+
+    it('[TEN2-2] an audit entry pre-created by another company\'s member under the old payment id (audit-disburse-<id>) no longer blocks the payment', async () => {
+      await assertSucceeds(setDoc(doc(db(CAIRO_EMP), 'auditLogs', 'audit-disburse-r-pay'), {
+        actorId: CAIRO_EMP.uid, actorEmail: CAIRO_EMP.email, orgId: OTHER_ORG, actionType: 'update', details: 'x',
+      }));
+      const k = key();
+      const res = await disburseExpenseRequest(store(FIN), actor(FIN, 'finance', ORG), 'r-pay', { paymentMethod: 'cash', referenceNumber: 'R1', accountId: 'acc-cash' } as any, k, notify);
+      expect(res.changed).toBe(true);
+      expect(await read('auditLogs', `audit-${k}-disburse`)).toMatchObject({ orgId: ORG, actorId: FIN.uid });
+    });
+
+    it('[TEN2-3] a restore marker is written only with the restore of its record, in the marker\'s company', async () => {
+      const marker = (orgId: string, by: string, extra: Record<string, unknown> = {}) =>
+        ({ collection: 'requests', docId: 'req-104', orgId, restoredBy: by, restoredAt: 'x', source: 'browser', ...extra });
+      await assertFails(setDoc(doc(db(CAIRO_EMP), 'legacyRestores', 'requests__req-104'), marker(OTHER_ORG, CAIRO_EMP.uid)));
+      await assertFails(setDoc(doc(db(CAIRO_EMP), 'legacyRestores', 'requests__req-104'), marker(ORG, CAIRO_EMP.uid)));
+      await assertFails(setDoc(doc(db(ADMIN), 'legacyRestores', 'requests__req-104'), marker(ORG, ADMIN.uid)));           // no record
+      await assertFails(setDoc(doc(db(ADMIN), 'legacyRestores', 'requests__req-999'), marker(ORG, ADMIN.uid)));           // id of another record
+      await assertFails(setDoc(doc(db(ADMIN), 'legacyRestores', 'departments__dept-1'),                                     // record exists already
+        marker(ORG, ADMIN.uid, { collection: 'departments', docId: 'dept-1' })));
+      await assertFails(setDoc(doc(db(ADMIN), 'legacyRestores', 'paymentAccounts__acc-x'),                                  // not restorable
+        marker(ORG, ADMIN.uid, { collection: 'paymentAccounts', docId: 'acc-x' })));
+      const a = db(ADMIN);
+      // a record of another company created in the same commit does not carry ORG's marker either
+      await assertFails(writeBatch(a)
+        .set(doc(a, 'departments', 'dept-r'), { id: 'dept-r', orgId: ORG, name: 'Restored' })
+        .set(doc(a, 'legacyRestores', 'departments__dept-r'), marker(OTHER_ORG, ADMIN.uid, { collection: 'departments', docId: 'dept-r' }))
+        .commit());
+      await assertSucceeds(writeBatch(a)
+        .set(doc(a, 'departments', 'dept-r'), { id: 'dept-r', orgId: ORG, name: 'Restored' })
+        .set(doc(a, 'legacyRestores', 'departments__dept-r'), marker(ORG, ADMIN.uid, { collection: 'departments', docId: 'dept-r' }))
+        .commit());
+      // markers are permanent for everyone but the platform owner (who clears a stale one)
+      await assertFails(deleteDoc(doc(a, 'legacyRestores', 'departments__dept-r')));
+      await assertSucceeds(deleteDoc(doc(db(OWNER), 'legacyRestores', 'departments__dept-r')));
+    });
+
+    it('[TEN2-3] another company\'s member can no longer pre-block a restore (marker or old-format audit id): the org admin restores both records', async () => {
+      await setDoc(doc(db(CAIRO_EMP), 'legacyRestores', 'requests__req-104'), { orgId: OTHER_ORG, restoredBy: CAIRO_EMP.uid }).catch(() => undefined);
+      await assertSucceeds(setDoc(doc(db(CAIRO_EMP), 'auditLogs', 'audit-restore-requests__req-105'),
+        { actorId: CAIRO_EMP.uid, actorEmail: CAIRO_EMP.email, orgId: OTHER_ORG, actionType: 'create', details: 'x' }));
+      const ctx = { actor: actor(ADMIN, 'org_admin', ORG), orgId: ORG };
+      const a = await restoreRecord(store(ADMIN), ctx, rec('requests', 'req-104', { orgId: ORG, status: 'pending', amount: 10, requesterId: EMP.uid, requesterEmail: EMP.email, title: 'x' }), 'file');
+      const b = await restoreRecord(store(ADMIN), ctx, rec('requests', 'req-105', { orgId: ORG, status: 'pending', amount: 10, requesterId: EMP.uid, requesterEmail: EMP.email, title: 'x' }), 'file');
+      expect([a.outcome, b.outcome]).toEqual(['restored', 'restored']);
+      // a second attempt is "handled" (its marker), never a second record or audit entry
+      expect((await restoreRecord(store(ADMIN), ctx, rec('requests', 'req-104', { orgId: ORG, status: 'pending', amount: 10, requesterId: EMP.uid, title: 'x' }), 'file')).outcome).toBe('handled');
+    });
+
+    it('[TEN2-4] the rules and the domain agree on which renames keep a key: same key for the domain → never released; another key → released', async () => {
+      const kProvK = uniqueKeyDocId('provider_name', ORG, 'Kodak');
+      const same = ['KODAK', 'Ko dak', 'K-o.d_a k', 'Kodak ', '\uFEFFKodak', 'ko\u3000DAK', 'Ko\u00A0dak', 'Ko\u2028dak', 'Ko\u000Bdak'];
+      const other = ['\u212Aodak', 'Kodak\u180E', 'Kodäk', 'KODAK2', 'Ko\u200Bdak'];
+      const a = db(ADMIN);
+      for (const v of [...same, ...other]) {
+        await seed(async f => {
+          await setDoc(doc(f, 'providers', 'prov-k'), { orgId: ORG, name: 'Kodak', totalPaid: 0, active: true });
+          await setDoc(doc(f, 'uniqueKeys', kProvK), { scope: 'provider_name', orgId: ORG, value: 'kodak', entityCollection: 'providers', entityId: 'prov-k' });
+        });
+        const release = writeBatch(a).update(doc(a, 'providers', 'prov-k'), { name: v }).delete(doc(a, 'uniqueKeys', kProvK)).commit();
+        if (normalizeKeyValue(v) === 'kodak') await assertFails(release);
+        else await assertSucceeds(release);
+      }
+      expect(same.every(v => normalizeKeyValue(v) === 'kodak')).toBe(true);
+      expect(other.some(v => normalizeKeyValue(v) === 'kodak')).toBe(false);
+      // non-ASCII capitals are kept as they are (case-sensitive) on both sides
+      expect(normalizeKeyValue('SOCIÉTÉ')).toBe('sociÉtÉ');
+      expect(normalizeKeyValue('\u212Aodak')).toBe('\u212Aodak');
+    });
+
+    it('[TEN2-4] through the domain: a Kelvin-sign "Kodak" is its own key; renaming to it claims that key, so a second one is a duplicate', async () => {
+      await updateEntity(store(ADMIN), actor(ADMIN, 'org_admin', ORG), 'provider', 'prov-k', { name: '\u212Aodak' } as any, () => ({ actionType: 'rename', details: 'x' }), key());
+      expect(await read('uniqueKeys', uniqueKeyDocId('provider_name', ORG, '\u212Aodak'))).toMatchObject({ entityId: 'prov-k' });
+      await expect(createEntity(store(DE), actor(DE, 'data_entry', ORG), 'provider', (id: string) => ({ id, orgId: ORG, name: '\u212AODAK', totalPaid: 0, active: true } as any), () => 'x', key()))
+        .rejects.toMatchObject({ code: 'duplicate' });
+      // renaming "société" to "SOCIÉTÉ" moves the key (both sides see two values)
+      const p = await createEntity(store(DE), actor(DE, 'data_entry', ORG), 'provider', (id: string) => ({ id, orgId: ORG, name: 'société', totalPaid: 0, active: true } as any), () => 'x', key());
+      await updateEntity(store(ADMIN), actor(ADMIN, 'org_admin', ORG), 'provider', p.value.id, { name: 'SOCIÉTÉ' } as any, () => ({ actionType: 'rename', details: 'x' }), key());
+      expect(await read('uniqueKeys', uniqueKeyDocId('provider_name', ORG, 'SOCIÉTÉ'))).toMatchObject({ entityId: p.value.id });
+      expect(await read('uniqueKeys', uniqueKeyDocId('provider_name', ORG, 'société'))).toBeUndefined();
+    });
+
+    it('[TEN2-5] legit: data entry / org admin add and rename providers and departments whose names have non-ASCII capitals', async () => {
+      for (const name of ['Électricité du Caire', 'Москва Трейд', 'Öztürk Holding', 'ΔΕΗ Hellas']) {
+        const p = await createEntity(store(DE), actor(DE, 'data_entry', ORG), 'provider', (id: string) => ({ id, orgId: ORG, name, totalPaid: 0, active: true } as any), () => 'x', key());
+        expect(await read('uniqueKeys', uniqueKeyDocId('provider_name', ORG, name))).toMatchObject({ entityId: p.value.id });
+      }
+      await updateEntity(store(ADMIN), actor(ADMIN, 'org_admin', ORG), 'department', 'dept-1', { name: 'Équipe IT' } as any, () => ({ actionType: 'rename', details: 'x' }), key());
+      expect(await read('uniqueKeys', uniqueKeyDocId('department_name', ORG, 'Équipe IT'))).toMatchObject({ entityId: 'dept-1' });
+    });
+
+    it('[TEN2-5] (U+180E) legit: a name containing U+180E (not whitespace for JavaScript) is claimed', async () => {
+      const res = await createEntity(store(DE), actor(DE, 'data_entry', ORG), 'provider', (id: string) => ({ id, orgId: ORG, name: 'Mon\u180Egol Trade', totalPaid: 0, active: true } as any), () => 'x', key());
+      expect(res.changed).toBe(true);
+    });
+  });
+
+  describe('coverage', () => {
+    it('organizations: suspended org admin, an unverified stranger claiming the admin email, other companies and multi-company employees cannot edit', async () => {
+      await assertFails(updateDoc(doc(db(SUSP_ADMIN), 'organizations', ORG), { name: 'x' }));
+      await assertFails(updateDoc(doc(db({ uid: 'uidImpostorX0000000000001', email: ADMIN.email }, false), 'organizations', ORG), { name: 'x' }));
+      await assertFails(updateDoc(doc(db(MULTI_ADMIN), 'organizations', OTHER_ORG), { name: 'x' }));   // employee in its profile company
+      await assertFails(updateDoc(doc(db(CAIRO_ADMIN), 'organizations', ORG), { notificationRecipients: [CAIRO_ADMIN.email] }));
+      await assertFails(setDoc(doc(db(ADMIN), 'organizations', ORG), { archived: false }, { merge: true }));   // adding a missing key is a change
+      await assertSucceeds(updateDoc(doc(db(ADMIN, false), 'organizations', ORG), { description: 'd' }));  // unverified org admin: uid-based
+    });
+
+    it('organizations: org admin renames a legacy company without currency / recipients through the domain; owner changes the currency of an empty company', async () => {
+      await seed(f => setDoc(doc(f, 'organizations', ORG), { id: ORG, name: 'Acme', code: 'ACME', createdAt: '2026-01-01' }));
+      await updateOrganization(store(ADMIN), actor(ADMIN, 'org_admin', ORG), ORG, { name: 'Acme 2', currency: 'EGP', budget: 10 } as any, key());
+      expect(await read('organizations', ORG)).toMatchObject({ name: 'Acme 2', budget: 10 });
+      expect((await read('organizations', ORG))!.currency).toBeUndefined();
+      await ensureOrgNotificationRecipients(store(ADMIN), actor(ADMIN, 'org_admin', ORG), ORG, [{ id: 'm', orgId: ORG, userId: ADMIN.uid, userEmail: ADMIN.email, role: 'org_admin', active: true } as any]);
+      expect((await read('organizations', ORG))!.notificationRecipients).toEqual([ADMIN.email]);
+      await updateOrganization(store(OWNER), actor(OWNER, 'super_admin'), THIRD_ORG, { currency: 'USD' }, key(), new Date(), []);
+      expect((await read('organizations', THIRD_ORG))!.currency).toBe('USD');
+      await expect(updateOrganization(store(OWNER), actor(OWNER, 'super_admin'), ORG, { currency: 'USD' }, key(), new Date(), ['acc-bank'])).rejects.toMatchObject({ code: 'currency_immutable' });
+    });
+
+    it('uniqueKeys: names with Arabic, lower-case accents, ß, ligatures, zero-width and ASCII capitals are claimed and renamed by the domain', async () => {
+      for (const name of ['مؤسسة النور', 'société générale', 'Straße', 'ﬁle Co', 'Zero\u200BWidth', 'ACME Ltd']) {
+        const p = await createEntity(store(DE), actor(DE, 'data_entry', ORG), 'provider', (id: string) => ({ id, orgId: ORG, name, totalPaid: 0, active: true } as any), () => 'x', key());
+        expect(await read('uniqueKeys', uniqueKeyDocId('provider_name', ORG, name))).toMatchObject({ entityId: p.value.id });
+        await updateEntity(store(ADMIN), actor(ADMIN, 'org_admin', ORG), 'provider', p.value.id, { name: `${name} 2` } as any, () => ({ actionType: 'rename', details: 'x' }), key());
+        expect(await read('uniqueKeys', uniqueKeyDocId('provider_name', ORG, name))).toBeUndefined();
+      }
+    });
+
+    it('uniqueKeys: claims by another company, suspended, stranger, wrong id encoding / scope / collection / extra parts are refused', async () => {
+      const kProvK = uniqueKeyDocId('provider_name', ORG, 'Kodak');
+      const good = { scope: 'provider_name', orgId: ORG, value: 'kodak', entityCollection: 'providers', entityId: 'prov-k' };
+      await seed(f => deleteDoc(doc(f, 'uniqueKeys', kProvK)));    // a legacy record without its key
+      for (const u of [CAIRO_ADMIN, CAIRO_EMP, SUSP_FIN, STRANGER]) await assertFails(setDoc(doc(db(u), 'uniqueKeys', kProvK), good));
+      await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', `${kProvK}__x`), good));
+      await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', kProvK.replace('provider_name', 'department_name')), { ...good, scope: 'department_name' }));
+      await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', kProvK), { ...good, entityCollection: 'departments' }));
+      await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', kProvK), { ...good, value: 'Kodak' }));
+      await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', 'provider_name__org-acme__S29kYWs'), { ...good }));   // id encodes 'Kodak'
+      await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', kProvK), { ...good, orgId: OTHER_ORG }));
+      await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', kProvK), { ...good, entityId: 'prov-k/x/y' }));
+      await assertSucceeds(setDoc(doc(db(MULTI_ADMIN), 'uniqueKeys', kProvK), good));   // multi-company admin, its second company
+    });
+
+    it('uniqueKeys: no release of another company\'s key (via ORG\'s record, by ORG staff, by a multi-company member); finance may clear a number', async () => {
+      const kAcc = uniqueKeyDocId('account_identifier', ORG, 'EG001');
+      const kOth = uniqueKeyDocId('account_identifier', OTHER_ORG, 'OB1');
+      const fin = db(FIN);
+      await assertFails(writeBatch(fin).update(doc(fin, 'paymentAccounts', 'acc-cash'), { accountIdentifier: 'EG9' }).delete(doc(fin, 'uniqueKeys', kOth)).commit());
+      await assertFails(writeBatch(fin).update(doc(fin, 'paymentAccounts', 'acc-ob'), { accountIdentifier: 'OB2' }).delete(doc(fin, 'uniqueKeys', kOth)).commit());
+      const m = db(MULTI_FIN);
+      await assertFails(writeBatch(m).update(doc(m, 'paymentAccounts', 'acc-ob'), { accountIdentifier: 'OB2' }).delete(doc(m, 'uniqueKeys', kOth)).commit());
+      await assertSucceeds(writeBatch(fin).update(doc(fin, 'paymentAccounts', 'acc-cash'), { accountIdentifier: '' }).delete(doc(fin, 'uniqueKeys', kAcc)).commit());
+      expect(await read('uniqueKeys', kOth)).toBeTruthy();
+    });
+
+    it('[known, accepted] the registry is cooperative: a raw record write by a role that may edit the record does not consult it', async () => {
+      await assertSucceeds(updateDoc(doc(db(FIN), 'paymentAccounts', 'acc-bank'), { accountIdentifier: 'EG001' }));
+      await assertFails(updateDoc(doc(db(EMP), 'paymentAccounts', 'acc-bank'), { accountIdentifier: 'EG002' }));
+      expect(await read('uniqueKeys', uniqueKeyDocId('account_identifier', ORG, 'EG001'))).toMatchObject({ entityId: 'acc-cash' });
+    });
+
+    it('uniqueKeys: finance re-numbers an account through the domain; another account takes the freed number; the old one cannot be taken twice', async () => {
+      await updatePaymentAccount(store(FIN), actor(FIN, 'finance', ORG), 'acc-cash', { accountIdentifier: 'EG002' }, key());
+      await updatePaymentAccount(store(ADMIN), actor(ADMIN, 'org_admin', ORG), 'acc-bank', { accountIdentifier: 'EG001' }, key());
+      expect(await read('uniqueKeys', uniqueKeyDocId('account_identifier', ORG, 'EG001'))).toMatchObject({ entityId: 'acc-bank' });
+      await expect(updatePaymentAccount(store(FIN), actor(FIN, 'finance', ORG), 'acc-cash', { accountIdentifier: 'eg-001' }, key())).rejects.toMatchObject({ code: 'duplicate' });
+    });
+
+    it('members / users: self-escalation (merge, whole set, batch with a forged membership, link to a suspended / someone else\'s grant)', async () => {
+      const e = db(EMP);
+      await assertFails(setDoc(doc(e, 'members', `${EMP.uid}_${ORG}`), { role: 'finance' }, { merge: true }));
+      await assertFails(setDoc(doc(e, 'members', `${EMP.uid}_${ORG}`), { orgId: ORG, userId: EMP.uid, userEmail: EMP.email, role: 'org_admin', active: true, userName: 'e' }));
+      await assertFails(writeBatch(e)
+        .set(doc(e, 'members', `${EMP.uid}_${THIRD_ORG}`), { orgId: THIRD_ORG, userId: EMP.uid, userEmail: EMP.email, role: 'org_admin', active: true })
+        .update(doc(e, 'users', EMP.uid), { orgId: THIRD_ORG, role: 'org_admin', memberId: `${EMP.uid}_${THIRD_ORG}` })
+        .commit());
+      await assertFails(updateDoc(doc(db(SUSP_FIN), 'users', SUSP_FIN.uid), { active: true, memberId: `${ADMIN.uid}_${ORG}`, role: 'org_admin' }));
+      await assertSucceeds(updateDoc(doc(db(MULTI_FIN), 'users', MULTI_FIN.uid), { orgId: ORG, role: 'finance', active: true, memberId: `${MULTI_FIN.uid}_${ORG}` }));
+      await assertFails(updateDoc(doc(db(MULTI_FIN), 'users', MULTI_FIN.uid), { orgId: ORG, role: 'org_admin', active: true, memberId: `${MULTI_FIN.uid}_${ORG}` }));
+    });
+
+    it('members / users: org admin gives no membership elsewhere to itself, no super_admin, no payout data, no foreign profile edits', async () => {
+      const a = db(ADMIN);
+      await assertFails(setDoc(doc(a, 'members', `${ADMIN.uid}_${OTHER_ORG}`), { orgId: OTHER_ORG, userId: ADMIN.uid, userEmail: ADMIN.email, role: 'org_admin', active: true }));
+      await assertFails(setDoc(doc(a, 'members', `${STRANGER.uid}_${ORG}`), { orgId: ORG, userId: STRANGER.uid, userEmail: STRANGER.email, role: 'super_admin', active: true }));
+      await assertFails(setDoc(doc(a, 'members', `${STRANGER.uid}_${ORG}`), { orgId: ORG, userId: STRANGER.uid, userEmail: STRANGER.email, role: 'employee', active: true, iban: 'EG1' }));
+      await assertFails(setDoc(doc(a, 'members', `x_${ORG}`), { orgId: ORG, userId: STRANGER.uid, userEmail: STRANGER.email, role: 'employee', active: true }));
+      await assertFails(updateDoc(doc(a, 'users', CAIRO_ADMIN.uid), { role: 'employee' }));
+      await assertFails(setDoc(doc(a, 'users', CAIRO_ADMIN.uid), { orgId: ORG, role: 'employee' }));
+    });
+
+    it('members / users: suspended members get nothing in their company (reads and writes)', async () => {
+      for (const [c, id] of [['members', `${EMP.uid}_${ORG}`], ['paymentAccounts', 'acc-cash'], ['requests', 'r-pay'], ['organizations', ORG], ['uniqueKeys', uniqueKeyDocId('provider_name', ORG, 'Vodafone')]] as const) {
+        await assertFails(getDoc(doc(db(SUSP_FIN), c, id)));
+        await assertFails(getDoc(doc(db(SUSP_ADMIN), c, id)));
+      }
+      await assertFails(setDoc(doc(db(SUSP_ADMIN), 'members', `${STRANGER.uid}_${ORG}`), { orgId: ORG, userId: STRANGER.uid, userEmail: STRANGER.email, role: 'employee', active: true }));
+      await assertFails(updateDoc(doc(db(SUSP_ADMIN), 'members', `${SUSP_FIN.uid}_${ORG}`), { active: true }));
+      await assertFails(setDoc(doc(db(SUSP_FIN), 'requests', 'rq-s'), { id: 'rq-s', orgId: ORG, status: 'pending', requesterId: SUSP_FIN.uid, amount: 1, timeline: [], comments: [] }));
+    });
+
+    it('members / users: org admin edits a member email (key moves), suspends and re-activates it', async () => {
+      const me = actor(ADMIN, 'org_admin', ORG);
+      await updateMemberRecord(store(ADMIN), me, `${EMP.uid}_${ORG}`, { userEmail: 'emp.new@acme.test' }, [EMP.uid], key());
+      expect(await read('uniqueKeys', uniqueKeyDocId('member_email', ORG, EMP.email))).toBeUndefined();
+      expect(await read('uniqueKeys', uniqueKeyDocId('member_email', ORG, 'emp.new@acme.test'))).toMatchObject({ entityId: `${EMP.uid}_${ORG}` });
+      await updateMemberRecord(store(ADMIN), me, `${EMP.uid}_${ORG}`, { active: false }, [EMP.uid], key());
+      expect((await read('users', EMP.uid))!.active).toBe(false);
+      await updateMemberRecord(store(ADMIN), me, `${EMP.uid}_${ORG}`, { active: true }, [EMP.uid], key());
+      expect((await read('users', EMP.uid))!.active).toBe(true);
+    });
+
+    it('counters: suspended / stranger refused, non-integer jumps refused; another company\'s member advances the shared request counter (cost only)', async () => {
+      await assertFails(setDoc(doc(db(SUSP_FIN), 'counters', 'requests-2026'), { value: 1 }));
+      await assertFails(setDoc(doc(db(STRANGER), 'counters', 'requests-2026'), { value: 1 }));
+      await assertSucceeds(setDoc(doc(db(CAIRO_EMP), 'counters', 'requests-2026'), { value: 1 }));
+      await assertFails(updateDoc(doc(db(CAIRO_EMP), 'counters', 'requests-2026'), { value: 1.5 }));
+      await assertFails(updateDoc(doc(db(CAIRO_EMP), 'counters', 'requests-2026'), { value: '2' }));
+      await assertFails(setDoc(doc(db(CAIRO_EMP), 'counters', 'custodies-2026'), { value: 1 }));
+      await assertFails(setDoc(doc(db(MULTI_ADMIN), 'counters', 'transfers-2026'), { value: 1 }));   // known §11.4 (profile company only)
+      await assertSucceeds(setDoc(doc(db(CAIRO_FIN), 'counters', 'transfers-2026'), { value: 1 }));
+    });
+
+    it('audit: only in a company the caller is an active member of, under its own sign-in email, never overwritten', async () => {
+      await assertFails(setDoc(doc(db(CAIRO_EMP), 'auditLogs', 'a1'), { actorId: CAIRO_EMP.uid, orgId: ORG, actionType: 'x' }));
+      await assertFails(setDoc(doc(db(SUSP_ADMIN), 'auditLogs', 'a2'), { actorId: SUSP_ADMIN.uid, orgId: ORG, actionType: 'x' }));
+      await assertFails(setDoc(doc(db(MULTI_FIN), 'auditLogs', 'a3'), { actorId: MULTI_FIN.uid, actorEmail: OWNER.email, orgId: ORG, actionType: 'x' }));
+      await assertSucceeds(setDoc(doc(db(MULTI_FIN), 'auditLogs', 'a4'), { actorId: MULTI_FIN.uid, actorEmail: MULTI_FIN.email, orgId: ORG, actionType: 'x' }));
+      await assertFails(setDoc(doc(db(MULTI_FIN), 'auditLogs', 'a4'), { actorId: MULTI_FIN.uid, orgId: ORG, actionType: 'y' }));
+      await assertFails(getDoc(doc(db(MULTI_FIN), 'auditLogs', 'a4')));
+      await assertSucceeds(getDoc(doc(db(MULTI_ADMIN), 'auditLogs', 'a4')));
+    });
+
+    it('outbox: another company\'s member cannot address ORG\'s admins through its own request; foreign request ids; webhook / attempts refused', async () => {
+      const c = db(CAIRO_EMP);
+      await assertSucceeds(setDoc(doc(c, 'requests', 'rq-c'), { id: 'rq-c', orgId: OTHER_ORG, status: 'pending', requesterId: CAIRO_EMP.uid, requesterEmail: CAIRO_EMP.email, amount: 1, currency: 'EGP', title: 't', timeline: [], comments: [] }));
+      const ev = (id: string, entityId: string, extra: Record<string, unknown> = {}) => ({
+        id, orgId: OTHER_ORG, eventType: 'new_request', entityType: 'request', entityId, channel: 'email_api', recipients: [CAIRO_ADMIN.email],
+        message: { subject: 's', html: 'h', text: '', snippet: '' },
+        meta: { senderName: DEFAULT_EMAIL_SETTINGS.senderName, senderEmail: DEFAULT_EMAIL_SETTINGS.senderEmail, replyTo: DEFAULT_EMAIL_SETTINGS.replyToEmail, provider: 'auto' },
+        status: 'pending', attempts: 0, maxAttempts: 6, nextAttemptAt: 'x', createdBy: CAIRO_EMP.uid, createdAt: 'x', updatedAt: 'x', ...extra,
+      });
+      await assertFails(setDoc(doc(c, 'outbox', 'new_request__rq-c'), ev('new_request__rq-c', 'rq-c', { recipients: [ADMIN.email] })));
+      await assertFails(setDoc(doc(c, 'outbox', 'new_request__rq-c'), ev('new_request__rq-c', 'rq-c', { orgId: ORG, recipients: [ADMIN.email] })));
+      await assertFails(setDoc(doc(c, 'outbox', 'new_request__r-pay'), ev('new_request__r-pay', 'r-pay', { orgId: ORG, recipients: [ADMIN.email] })));
+      await assertFails(setDoc(doc(c, 'outbox', 'new_request__rq-c'), ev('new_request__rq-c', 'rq-c', { channel: 'webhook', meta: { ...ev('', '').meta, webhookUrl: 'https://evil.test' } })));
+      await assertFails(setDoc(doc(c, 'outbox', 'new_request__rq-c'), ev('new_request__rq-c', 'rq-c', { maxAttempts: 11 })));
+      await assertSucceeds(setDoc(doc(c, 'outbox', 'new_request__rq-c'), ev('new_request__rq-c', 'rq-c')));
+      await assertFails(getDocs(query(collection(db(FIN), 'outbox'), where('orgId', '==', OTHER_ORG))));
+      await assertFails(updateDoc(doc(c, 'outbox', 'new_request__rq-c'), { status: 'sending', attempts: 1, recipients: [ADMIN.email] }));
+    });
+
+    it('cross-company: multi-company members keep their second-company role out of their profile company in every financial collection', async () => {
+      await seed(async f => {
+        await setDoc(doc(f, 'requests', 'r-o'), { ...approvedRequest('r-o', 5), orgId: OTHER_ORG, requesterId: CAIRO_EMP.uid, requesterEmail: CAIRO_EMP.email });
+        await setDoc(doc(f, 'custodies', 'c-o'), { id: 'c-o', orgId: OTHER_ORG, employeeId: CAIRO_EMP.uid, totalAmount: 1, remainingAmount: 1, status: 'active' });
+        await setDoc(doc(f, 'accountTransactions', 't-o'), { id: 't-o', orgId: OTHER_ORG, accountId: 'acc-ob', type: 'in', amount: 1 });
+        await setDoc(doc(f, 'visaRequests', 'v-o'), { orgId: OTHER_ORG, requesterId: CAIRO_EMP.uid, status: 'pending' });
+      });
+      for (const u of [MULTI_FIN, MULTI_ADMIN]) {
+        const f = db(u);
+        for (const [c, id] of [['paymentAccounts', 'acc-ob'], ['requests', 'r-o'], ['custodies', 'c-o'], ['accountTransactions', 't-o'], ['visaRequests', 'v-o']] as const) {
+          await assertFails(getDoc(doc(f, c, id)));
+          await assertFails(getDocs(query(collection(f, c), where('orgId', '==', OTHER_ORG))));
+        }
+        await assertFails(updateDoc(doc(f, 'requests', 'r-o'), { status: 'rejected', rejectionReason: 'x' }));
+        await assertFails(updateDoc(doc(f, 'paymentAccounts', 'acc-ob'), { name: 'x' }));
+      }
+      const res = await createExpenseRequest(store(MULTI_FIN), actor(MULTI_FIN, 'finance', ORG), { orgId: ORG, title: 't', amount: 5, currency: 'EGP', attachments: [] } as any, key(), notify);
+      expect(res.changed).toBe(true);
+    });
+  });
+});
+
+describe('round r2: legitimate operations (empty keys, multi-company forms, shared services, legacy data)', () => {
+  const GROUP_ADMIN = { uid: 'uidGroupAdmin00000000001', email: 'group@acme.test' };   // org admin of ORG (profile) + of many companies (members)
+  const GROUP_DE = { uid: 'uidGroupDataEntry000000001', email: 'gde@acme.test' };      // data entry of ORG (profile) + of many companies (members)
+  const groupOrg = (i: number) => `org-g${String(i).padStart(2, '0')}`;
+  const groupIds = (count: number) => Array.from({ length: count }, (_, i) => groupOrg(i + 1));
+  const providerIn = (name: string) => (id: string, orgId: string) => ({ id, orgId, name, totalPaid: 0, active: true } as any);
+  const deptIn = (name: string) => (id: string, orgId: string, nowIso: string) => ({ id, orgId, name, createdAt: nowIso } as any);
+  const draft = (extra: Record<string, unknown> = {}) => ({
+    orgId: ORG, title: 'Laptop', description: 'd', justification: 'j', amount: 120.5, currency: 'EGP', urgency: 'medium',
+    requestType: 'expense', preferredPaymentMethod: 'instapay', paymentAccountDetails: 'x@instapay', serviceCategoryId: 'srv-1',
+    serviceCategoryName: 'Cloud', providerId: 'prov-1', providerName: 'Vodafone', attachments: [], ...extra,
+  }) as any;
+  // Many companies: GROUP_ADMIN is org admin and GROUP_DE data entry in each (members/{uid}_{org}).
+  const seedGroup = (count: number) => seed(async f => {
+    for (let i = 1; i <= count; i++) {
+      const o = groupOrg(i);
+      await setDoc(doc(f, 'organizations', o), { id: o, name: `G${i}`, code: `G${i}`, currency: 'EGP', notificationRecipients: [] });
+      await setDoc(doc(f, 'members', `${GROUP_ADMIN.uid}_${o}`), { orgId: o, userId: GROUP_ADMIN.uid, userEmail: GROUP_ADMIN.email, role: 'org_admin', active: true, userName: 'g' });
+      await setDoc(doc(f, 'members', `${GROUP_DE.uid}_${o}`), { orgId: o, userId: GROUP_DE.uid, userEmail: GROUP_DE.email, role: 'data_entry', active: true, userName: 'gde' });
+    }
+  });
+
+  beforeEach(async () => {
+    await env.clearFirestore();
+    await seed(async f => {
+      await setDoc(doc(f, 'organizations', ORG), { id: ORG, name: 'Acme', code: 'ACME', currency: 'EGP', notificationRecipients: [ADMIN.email] });
+      await setDoc(doc(f, 'organizations', OTHER_ORG), { id: OTHER_ORG, name: 'Other', code: 'OTH', currency: 'EGP', notificationRecipients: [] });
+      for (const [u, role, org] of [[ADMIN, 'org_admin', ORG], [FIN, 'finance', ORG], [EMP, 'employee', ORG], [DE, 'data_entry', ORG], [GROUP_ADMIN, 'org_admin', ORG], [GROUP_DE, 'data_entry', ORG]] as const) {
+        await setDoc(doc(f, 'users', u.uid), { orgId: org, role, active: true, memberId: `${u.uid}_${org}` });
+        await setDoc(doc(f, 'members', `${u.uid}_${org}`), { orgId: org, userId: u.uid, userEmail: u.email, role, active: true, userName: u.email });
+      }
+      for (const [u, role] of [[MULTI_FIN, 'finance'], [MULTI_ADMIN, 'org_admin']] as const) {
+        await setDoc(doc(f, 'users', u.uid), { orgId: OTHER_ORG, role: 'employee', active: true, memberId: `${u.uid}_${OTHER_ORG}` });
+        await setDoc(doc(f, 'members', `${u.uid}_${OTHER_ORG}`), { orgId: OTHER_ORG, userId: u.uid, userEmail: u.email, role: 'employee', active: true, userName: u.email });
+        await setDoc(doc(f, 'members', `${u.uid}_${ORG}`), { orgId: ORG, userId: u.uid, userEmail: u.email, role, active: true, userName: u.email });
+      }
+      await setDoc(doc(f, 'paymentAccounts', 'acc-cash'), account('acc-cash', 1000));
+      await setDoc(doc(f, 'paymentAccounts', 'acc-bank'), account('acc-bank', 5000, { type: 'bank' }));
+      await setDoc(doc(f, 'paymentAccounts', 'acc-insta'), account('acc-insta', 5000, { type: 'instapay', parentAccountId: 'acc-bank', parentAccountName: 'acc-bank' }));
+      await setDoc(doc(f, 'paymentAccounts', 'acc-bank2'), account('acc-bank2', 3000, { type: 'bank' }));
+      await setDoc(doc(f, 'paymentAccounts', 'acc-insta2'), account('acc-insta2', 3000, { type: 'instapay', parentAccountId: 'acc-bank2', parentAccountName: 'acc-bank2' }));
+      await setDoc(doc(f, 'paymentAccounts', 'acc-wallet-old'), account('acc-wallet-old', 600, { type: 'wallet', parentAccountId: 'acc-bank2', parentAccountName: 'acc-bank2', initialBalance: 1000, totalOut: 400 }));
+      await setDoc(doc(f, 'services', 'srv-1'), { orgId: ORG, name: 'Cloud', code: 'CLD', spentAmount: 0, active: true });
+      await setDoc(doc(f, 'providers', 'prov-1'), { orgId: ORG, name: 'Vodafone', totalPaid: 500, active: true });
+      await setDoc(doc(f, 'custodies', 'cus-1'), custody('cus-1'));
+    });
+  });
+
+  describe('[R2-K1] unique values that normalize to nothing ("-", "...") have no key', () => {
+    it('[R2-K1] org admin opens a cash box whose number is "-", and a second one with the same placeholder', async () => {
+      for (const name of ['خزينة الفرع', 'خزينة 2']) {
+        const res = await createPaymentAccount(store(ADMIN), actor(ADMIN, 'org_admin', ORG), { orgId: ORG, name, type: 'cash', accountIdentifier: '-', currency: 'EGP', active: true, initialBalance: 250 } as any, key());
+        expect(res.changed).toBe(true);
+      }
+      expect(await read('uniqueKeys', uniqueKeyDocId('account_identifier', ORG, '-'))).toBeUndefined();
+    });
+
+    it('[R2-K1] finance edits an account number to "-" (old key released) and back to a real number (key claimed); the empty-number account is deleted', async () => {
+      await seed(f => setDoc(doc(f, 'uniqueKeys', uniqueKeyDocId('account_identifier', ORG, 'acc-cash')), { scope: 'account_identifier', orgId: ORG, value: 'acccash', entityCollection: 'paymentAccounts', entityId: 'acc-cash' }));
+      await updatePaymentAccount(store(FIN), actor(FIN, 'finance', ORG), 'acc-cash', { accountIdentifier: '-' }, key());
+      expect(await read('uniqueKeys', uniqueKeyDocId('account_identifier', ORG, 'acc-cash'))).toBeUndefined();
+      await updatePaymentAccount(store(FIN), actor(FIN, 'finance', ORG), 'acc-cash', { accountIdentifier: 'EG-55' }, key());
+      expect(await read('uniqueKeys', uniqueKeyDocId('account_identifier', ORG, 'EG-55'))).toMatchObject({ entityId: 'acc-cash' });
+      const empty = await createPaymentAccount(store(ADMIN), actor(ADMIN, 'org_admin', ORG), { orgId: ORG, name: 'e', type: 'cash', accountIdentifier: '_', currency: 'EGP', active: true, initialBalance: 0 } as any, key());
+      await deletePaymentAccount(store(ADMIN), actor(ADMIN, 'org_admin', ORG), empty.value.id, key());
+    });
+
+    it('[R2-K1] org admin adds a service whose code is "-"; data entry adds a provider named "..."', async () => {
+      expect((await createEntity(store(ADMIN), actor(ADMIN, 'org_admin', ORG), 'service', (id: string) => ({ id, orgId: ORG, name: 'بدون كود', code: '-', spentAmount: 0, active: true } as any), () => 'x', key())).changed).toBe(true);
+      expect((await createEntity(store(DE), actor(DE, 'data_entry', ORG), 'provider', (id: string) => ({ id, orgId: ORG, name: '...', totalPaid: 0, active: true } as any), () => 'x', key())).changed).toBe(true);
+    });
+
+    it('the rules still refuse claiming an empty key; "0" and "N/A" are claimed normally', async () => {
+      const a = db(ADMIN);
+      await assertFails(writeBatch(a)
+        .update(doc(a, 'paymentAccounts', 'acc-cash'), { accountIdentifier: '-' })
+        .set(doc(a, 'uniqueKeys', uniqueKeyDocId('account_identifier', ORG, '-')), { scope: 'account_identifier', orgId: ORG, value: '', entityCollection: 'paymentAccounts', entityId: 'acc-cash' })
+        .commit());
+      for (const id of ['0', 'N/A']) {
+        const r = await createPaymentAccount(store(ADMIN), actor(ADMIN, 'org_admin', ORG), { orgId: ORG, name: `c${id}`, type: 'cash', accountIdentifier: id, currency: 'EGP', active: true, initialBalance: 0 } as any, key());
+        expect(await read('uniqueKeys', uniqueKeyDocId('account_identifier', ORG, id))).toMatchObject({ entityId: r.value.id });
+      }
+    });
+  });
+
+  describe('[R2-B1] multi-company add forms ("select all companies"): ORGS_PER_TRANSACTION companies per commit', () => {
+    for (const count of [17, 18, 19]) {
+      it(`${count >= 18 ? '[R2-B1] ' : ''}org admin of ${count} companies adds a provider to all of them`, async () => {
+        await seedGroup(count);
+        const p = await createEntityInOrgs(store(GROUP_ADMIN), actor(GROUP_ADMIN, 'org_admin'), 'provider', groupIds(count), providerIn('V'), () => 'x', key());
+        expect(p.value.created).toHaveLength(count);
+      });
+    }
+
+    it('[R2-B1] org admin of 20 companies adds a member (employee) and a provider to all of them', async () => {
+      await seedGroup(20);
+      const m = await createMemberInOrgs(store(GROUP_ADMIN), actor(GROUP_ADMIN, 'org_admin'), { userId: '', userEmail: 'joiner3@group.test', userName: 'J', role: 'employee', jobTitle: 'j', department: 'd' } as any, groupIds(20), key());
+      expect(m.value.created).toHaveLength(20);
+      const p = await createEntityInOrgs(store(GROUP_ADMIN), actor(GROUP_ADMIN, 'org_admin'), 'provider', groupIds(20), providerIn('V'), () => 'x', key());
+      expect(p.value.created).toHaveLength(20);
+    });
+
+    it('[R2-B1] data entry of 20 companies adds a department to all of them', async () => {
+      await seedGroup(20);
+      const d = await createEntityInOrgs(store(GROUP_DE), actor(GROUP_DE, 'data_entry'), 'department', groupIds(20), deptIn('Ops'), () => 'x', key());
+      expect(d.value.created).toHaveLength(20);
+    });
+
+    it('[R2-B1] org admin of 40 companies (three commits): skipped companies, a retry with the same key is a no-op, taken everywhere is a duplicate', async () => {
+      await seedGroup(40);
+      await seed(f => setDoc(doc(f, 'members', `pending-x_${groupOrg(17)}`), { orgId: groupOrg(17), userId: 'pending-x', userEmail: 'joiner4@group.test', role: 'employee', active: true, userName: 'Old' }));
+      await seed(f => setDoc(doc(f, 'uniqueKeys', uniqueKeyDocId('member_email', groupOrg(17), 'joiner4@group.test')), { scope: 'member_email', orgId: groupOrg(17), value: 'joiner4@group.test', entityCollection: 'members', entityId: `pending-x_${groupOrg(17)}` }));
+      const k = key();
+      const input = { userId: '', userEmail: 'joiner4@group.test', userName: 'J', role: 'finance', jobTitle: 'j', department: 'd' } as any;
+      const m = await createMemberInOrgs(store(GROUP_ADMIN), actor(GROUP_ADMIN, 'org_admin'), input, groupIds(40), k);
+      expect(m.value.created).toHaveLength(39);
+      expect(m.value.skipped).toEqual([{ orgId: groupOrg(17), reason: 'already_member', existingName: 'Old' }]);
+      expect(m.value.created.map(c => c.orgId)).toEqual(groupIds(40).filter(o => o !== groupOrg(17)));
+      const again = await createMemberInOrgs(store(GROUP_ADMIN), actor(GROUP_ADMIN, 'org_admin'), input, groupIds(40), k);
+      expect(again.changed).toBe(false);
+      expect(again.value.created).toHaveLength(39);
+      await expect(createMemberInOrgs(store(GROUP_ADMIN), actor(GROUP_ADMIN, 'org_admin'), input, [groupOrg(17)], key())).rejects.toMatchObject({ code: 'duplicate' });
+    });
+
+    it('owner adds a provider to 30 companies, and a provider, a department and a member to 16 companies', async () => {
+      await seedGroup(30);
+      const s = store(OWNER);
+      const a = actor(OWNER, 'super_admin');
+      expect((await createEntityInOrgs(s, a, 'provider', groupIds(30), providerIn('Group Vendor'), () => 'x', key())).value.created).toHaveLength(30);
+      await createEntityInOrgs(s, a, 'department', groupIds(16), deptIn('HR'), () => 'x', key());
+      await createMemberInOrgs(s, a, { userId: '', userEmail: 'joiner@group.test', userName: 'J', role: 'employee', jobTitle: 'j', department: 'd' } as any, groupIds(16), key());
+    });
+  });
+
+  describe('[R2-S1] shared services: a multi-company member pays a request of a company listed late in orgIds', () => {
+    const sharedWith = (orgIds: string[]) => seed(async f => {
+      for (const o of orgIds) if (o.startsWith('org-g')) await setDoc(doc(f, 'organizations', o), { id: o, name: o, code: o, currency: 'EGP', notificationRecipients: [] });
+      await setDoc(doc(f, 'services', 'srv-shared'), { orgId: orgIds[0], orgIds, name: 'Group Cloud', code: 'GCL', spentAmount: 0, active: true });
+      await setDoc(doc(f, 'requests', 'rs1'), approvedRequest('rs1', 45.5, { serviceCategoryId: 'srv-shared', providerId: 'prov-1' }));
+    });
+
+    it('[R2-S1] request company at index 4 of orgIds, paid by the multi-company finance member', async () => {
+      await sharedWith([groupOrg(1), groupOrg(2), groupOrg(3), groupOrg(4), ORG]);
+      const res = await disburseExpenseRequest(store(MULTI_FIN), actor(MULTI_FIN, 'finance', ORG), 'rs1', { paymentMethod: 'cash', referenceNumber: 'S', accountId: 'acc-cash' }, key(), notifyAll);
+      expect(res.changed).toBe(true);
+      expect((await read('services', 'srv-shared'))!.spentAmount).toBe(45.5);
+    });
+
+    it('[R2-S1] (org admin variant) request company at index 5 (the 6th company), paid by the multi-company org admin from the InstaPay', async () => {
+      await sharedWith([groupOrg(1), groupOrg(2), groupOrg(3), groupOrg(4), groupOrg(5), ORG]);
+      const res = await disburseExpenseRequest(store(MULTI_ADMIN), actor(MULTI_ADMIN, 'org_admin', ORG), 'rs1', { paymentMethod: 'instapay', referenceNumber: 'S', accountId: 'acc-insta' }, key(), notifyAll);
+      expect(res.changed).toBe(true);
+    });
+
+    it('[R2-S1, known limit] a member whose membership is not its profile reads a shared service only among its first six companies (single-read budget)', async () => {
+      await sharedWith([groupOrg(1), groupOrg(2), groupOrg(3), groupOrg(4), groupOrg(5), groupOrg(6), ORG]);
+      await assertFails(getDoc(doc(db(MULTI_FIN), 'services', 'srv-shared')));
+      // the profile-company staff and the owner read it wherever it is listed
+      await assertSucceeds(getDoc(doc(db(FIN), 'services', 'srv-shared')));
+      await assertSucceeds(getDoc(doc(db(OWNER), 'services', 'srv-shared')));
+      await disburseExpenseRequest(store(FIN), actor(FIN, 'finance', ORG), 'rs1', { paymentMethod: 'cash', referenceNumber: 'S', accountId: 'acc-cash' }, key(), notifyAll);
+    });
+
+    it('a stranger and another company\'s member read nothing; a member of the owning company does', async () => {
+      await sharedWith([groupOrg(1), groupOrg(2), groupOrg(3), groupOrg(4), groupOrg(5), ORG]);
+      await assertFails(getDoc(doc(db(STRANGER), 'services', 'srv-shared')));
+      await assertFails(getDoc(doc(db(CAIRO_EMP), 'services', 'srv-shared')));
+      await seed(f => setDoc(doc(f, 'members', `${GROUP_DE.uid}_${groupOrg(1)}`), { orgId: groupOrg(1), userId: GROUP_DE.uid, userEmail: GROUP_DE.email, role: 'data_entry', active: true }));
+      await assertSucceeds(getDoc(doc(db(GROUP_DE), 'services', 'srv-shared')));
+    });
+  });
+
+  describe('legacy data edge cases', () => {
+    it('[R2-D1] the holder files the last invoice for exactly the remainder shown (0.80) on a legacy custody whose remainder is 0.7 + 0.1', async () => {
+      await seed(f => setDoc(doc(f, 'custodies', 'c-noise'), custody('c-noise', { totalAmount: 1000, settledAmount: 999.2, remainingAmount: 0.7 + 0.1 })));
+      const res = await settleCustodyItem(store(EMP), actor(EMP, 'employee', ORG), { custodyId: 'c-noise', amount: 0.8, description: 'last invoice' }, key());
+      expect(res.changed).toBe(true);
+      expect((await read('custodies', 'c-noise'))!.status).toBe('settled');
+    });
+
+    it('[R2-D1] (larger value) old app remainder 1000 - 0.1 - 0.7 = 999.1999999999999, the holder settles the 999.20 shown; a cent more is refused', async () => {
+      await seed(f => setDoc(doc(f, 'custodies', 'c-noise2'), custody('c-noise2', { settledAmount: 0.8, remainingAmount: 1000 - 0.1 - 0.7 })));
+      await expect(settleCustodyItem(store(EMP), actor(EMP, 'employee', ORG), { custodyId: 'c-noise2', amount: 999.21, description: 'x' }, key())).rejects.toMatchObject({ code: 'insufficient_funds' });
+      const res = await settleCustodyItem(store(EMP), actor(EMP, 'employee', ORG), { custodyId: 'c-noise2', amount: 999.2, description: 'x' }, key());
+      expect(res.changed).toBe(true);
+    });
+
+    it('noise above the shown value: remainder 0.1 + 0.2 settled with 0.30, then replenished and returned', async () => {
+      await seed(async f => {
+        await setDoc(doc(f, 'custodies', 'c-up'), custody('c-up', { remainingAmount: 0.1 + 0.2, settledAmount: 999.7 }));
+        await setDoc(doc(f, 'custodies', 'c-up2'), custody('c-up2', { remainingAmount: 0.1 + 0.2, settledAmount: 999.7, sourceAccountId: 'acc-insta' }));
+      });
+      await settleCustodyItem(store(EMP), actor(EMP, 'employee', ORG), { custodyId: 'c-up', amount: 0.3, description: 'x' }, key());
+      expect(await read('custodies', 'c-up')).toMatchObject({ remainingAmount: 0, status: 'settled' });
+      await replenishCustody(store(FIN), actor(FIN, 'finance', ORG), { custodyId: 'c-up', amount: 0.01, sourceAccountId: 'acc-wallet-old' }, key());
+      await returnCustodyRemainders(store(FIN), actor(FIN, 'finance', ORG), { custodyIds: ['c-up', 'c-up2'], targetAccountId: 'acc-insta2' }, key());
+      expect((await read('paymentAccounts', 'acc-bank2'))!.currentBalance).toBe(toMoney(3000 - 0.01 + 0.01 + 0.3));
+    });
+
+    // NewRequestModal (edit) sends the whole form: amount: Number(amount), currency: currency || org currency || 'EGP', ...
+    const formPayload = (req: Record<string, any>, extra: Record<string, unknown> = {}) => ({
+      title: req.title + ' (edited)', description: 'd', justification: 'j', amount: Number(req.amount), currency: req.currency || 'EGP',
+      serviceCategoryId: req.serviceCategoryId, serviceCategoryName: 'Cloud', providerId: req.providerId, providerName: 'Vodafone',
+      urgency: 'medium', requestType: 'expense', attachments: [], preferredPaymentMethod: 'instapay', paymentAccountDetails: 'x', orgId: ORG, ...extra,
+    });
+
+    it('[R2-Q1] org admin fixes the title of an APPROVED legacy request without a currency field: it stays approved and finance pays it', async () => {
+      const legacy = approvedRequest('lq1', 250, { serviceCategoryId: 'srv-1', providerId: 'prov-1' }) as Record<string, any>;
+      delete legacy.currency;
+      await seed(f => setDoc(doc(f, 'requests', 'lq1'), legacy));
+      await updateExpenseRequest(store(ADMIN), actor(ADMIN, 'org_admin', ORG), 'lq1', formPayload(legacy) as any, key());
+      expect(await read('requests', 'lq1')).toMatchObject({ status: 'approved', title: 't (edited)' });
+      expect((await read('requests', 'lq1'))!.currency).toBeUndefined();
+      await disburseExpenseRequest(store(FIN), actor(FIN, 'finance', ORG), 'lq1', { paymentMethod: 'cash', referenceNumber: 'L', accountId: 'acc-cash' }, key(), notify);
+    });
+
+    it('[R2-Q1] org admin fixes the title of an APPROVED legacy request whose amount is an unrounded third: it stays approved; a real money change re-opens it', async () => {
+      const legacy = approvedRequest('lq2', 1000 / 3, { serviceCategoryId: 'srv-1' });
+      await seed(f => setDoc(doc(f, 'requests', 'lq2'), legacy));
+      await updateExpenseRequest(store(ADMIN), actor(ADMIN, 'org_admin', ORG), 'lq2', formPayload(legacy) as any, key());
+      expect(await read('requests', 'lq2')).toMatchObject({ status: 'approved', amount: 1000 / 3 });
+      await updateExpenseRequest(store(ADMIN), actor(ADMIN, 'org_admin', ORG), 'lq2', formPayload(legacy, { amount: 334 }) as any, key());
+      expect(await read('requests', 'lq2')).toMatchObject({ status: 'pending', amount: 334 });
+    });
+
+    it('requester edits a pending legacy request (no currency, no timeline) with the full form; finance attaches the invoice to an approved legacy one and pays it', async () => {
+      const legacy = approvedRequest('lq3', 99.99, { status: 'pending' }) as Record<string, any>;
+      delete legacy.currency; delete legacy.timeline; delete legacy.comments;
+      await seed(async f => {
+        await setDoc(doc(f, 'requests', 'lq3'), legacy);
+        const ap = approvedRequest('lq4', 10) as Record<string, any>; delete ap.currency;
+        await setDoc(doc(f, 'requests', 'lq4'), ap);
+      });
+      await updateExpenseRequest(store(EMP), actor(EMP, 'employee', ORG), 'lq3', formPayload(legacy, { amount: 100.01 }) as any, key());
+      const att = { id: 'att-x', name: 'inv.pdf', url: 'fsattach://att-x', type: 'application/pdf', size: 10, uploadedAt: 'x' };
+      await updateExpenseRequest(store(FIN), actor(FIN, 'finance', ORG), 'lq4', { invoiceAttachment: att, attachments: [att] } as any, key());
+      await disburseExpenseRequest(store(FIN), actor(FIN, 'finance', ORG), 'lq4', { paymentMethod: 'cash', referenceNumber: 'L4', accountId: 'acc-cash' }, key(), notifyAll);
+    });
+
+    it('[R2-N1] an employee with an UNVERIFIED email replies to a clarification on its legacy request filed under an older id (notifications on): saved, no email', async () => {
+      await seed(f => setDoc(doc(f, 'requests', 'lr-old'), approvedRequest('lr-old', 75.5, { status: 'clarification_requested', requesterId: 'mem-legacy-emp' })));
+      const res = await transitionExpenseRequest(store(EMP, false), { ...actor(EMP, 'employee', ORG), emailVerified: false }, 'lr-old', { type: 'reply', replyText: 'here' }, key(), notifyAll);
+      expect(res.value.status).toBe('pending');
+      expect(res.outboxEventIds).toEqual([]);
+    });
+
+    it('control: the same reply with a VERIFIED email sends the email; the unverified one with notifications off', async () => {
+      await seed(async f => {
+        await setDoc(doc(f, 'requests', 'lr-old2'), approvedRequest('lr-old2', 75.5, { status: 'clarification_requested', requesterId: 'mem-legacy-emp' }));
+        await setDoc(doc(f, 'requests', 'lr-old3'), approvedRequest('lr-old3', 75.5, { status: 'clarification_requested', requesterId: 'mem-legacy-emp' }));
+      });
+      const sent = await transitionExpenseRequest(store(EMP), { ...actor(EMP, 'employee', ORG), emailVerified: true }, 'lr-old2', { type: 'reply', replyText: 'here' }, key(), notifyAll);
+      expect(sent.outboxEventIds).toHaveLength(1);
+      await transitionExpenseRequest(store(EMP, false), { ...actor(EMP, 'employee', ORG), emailVerified: false }, 'lr-old3', { type: 'reply', replyText: 'here' }, key(), notify);
+    });
+
+    it('full cycle by every role with notifications on: data entry files, org admin clarifies twice, reply with attachment, finance approves, multi-company finance pays from the legacy wallet', async () => {
+      const r = await createExpenseRequest(store(DE), actor(DE, 'data_entry', ORG), draft({ amount: 291.65 }), key(), notifyAll);
+      await transitionExpenseRequest(store(ADMIN), actor(ADMIN, 'org_admin', ORG), r.value.id, { type: 'clarify', question: 'q1' }, key(), notifyAll);
+      await transitionExpenseRequest(store(ADMIN), actor(ADMIN, 'org_admin', ORG), r.value.id, { type: 'clarify', question: 'q2' }, key(), notifyAll);
+      await transitionExpenseRequest(store(DE), actor(DE, 'data_entry', ORG), r.value.id, { type: 'reply', replyText: 'a', attachment: { id: 'a1', name: 'r.pdf', url: 'fsattach://a1', type: 'pdf', size: '1', uploadedAt: 'x' } as any }, key(), notifyAll);
+      await transitionExpenseRequest(store(FIN), actor(FIN, 'finance', ORG), r.value.id, { type: 'approve', note: 'ok' }, key(), notifyAll);
+      await disburseExpenseRequest(store(MULTI_FIN), actor(MULTI_FIN, 'finance', ORG), r.value.id, { paymentMethod: 'digital_wallet', referenceNumber: 'W', accountId: 'acc-wallet-old' }, key(), notifyAll);
+      expect((await read('paymentAccounts', 'acc-bank2'))!.currentBalance).toBe(toMoney(3000 - 291.65));
+      expect((await read('services', 'srv-1'))!.spentAmount).toBe(291.65);
+      expect((await read('providers', 'prov-1'))!.totalPaid).toBe(toMoney(500 + 291.65));
+    });
+
+    it('batch disbursement from an InstaPay: five approved requests sharing one service and one provider (bank mirrored each time), then a retry', async () => {
+      const ids = ['b1', 'b2', 'b3', 'b4', 'b5'];
+      const amounts = [0.1, 0.2, 1000 / 3, 291.65, 70.82];
+      await seed(async f => { for (let i = 0; i < 5; i++) await setDoc(doc(f, 'requests', ids[i]), approvedRequest(ids[i], amounts[i], { serviceCategoryId: 'srv-1', providerId: 'prov-1' })); });
+      const keys = ids.map(() => key());
+      for (let i = 0; i < 5; i++) await disburseExpenseRequest(store(ADMIN), actor(ADMIN, 'org_admin', ORG), ids[i], { paymentMethod: 'instapay', referenceNumber: `B${i}`, accountId: 'acc-insta', batchId: 'batch-1' }, keys[i], notifyAll);
+      for (let i = 0; i < 5; i++) {
+        const again = await disburseExpenseRequest(store(ADMIN), actor(ADMIN, 'org_admin', ORG), ids[i], { paymentMethod: 'instapay', referenceNumber: `B${i}`, accountId: 'acc-insta', batchId: 'batch-1' }, keys[i], notifyAll);
+        expect(again.changed).toBe(false);
+      }
+      const total = amounts.reduce((s, a) => toMoney(s + toMoney(a)), 0);
+      expect((await read('paymentAccounts', 'acc-bank'))!.currentBalance).toBe(toMoney(5000 - total));
+      expect((await read('services', 'srv-1'))!.spentAmount).toBe(total);
+    });
+  });
+
+  describe('20-step random sequences with rotating roles (finance, org admin, owner, multi-company finance / org admin)', () => {
+    const roles: Array<[{ uid: string; email: string }, Actor['role'], string | undefined]> = [
+      [FIN, 'finance', ORG], [ADMIN, 'org_admin', ORG], [OWNER, 'super_admin', undefined], [MULTI_FIN, 'finance', ORG], [MULTI_ADMIN, 'org_admin', ORG],
+    ];
+    const run = async (accountId: string, start: number, seedNo: number, other: string) => {
+      let s = seedNo;
+      const rnd = () => { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648; };
+      const amt = (max: number) => Math.max(0.01, toMoney(rnd() * max));
+      let balance = toMoney(start);
+      const custodies: string[] = [];
+      const log: string[] = [];
+      await seed(f => setDoc(doc(f, 'visaRequests', `vs-${seedNo}`), { orgId: ORG, requestNumber: 'VS', status: 'approved', totalAmount: 1e6, paidAmount: 0, remainingBalance: 1e6, payments: [], currency: 'EGP', travelerName: 'T' }));
+      for (let i = 0; i < 20; i++) {
+        const [u, role, org] = roles[Math.floor(rnd() * roles.length)];
+        // multi-company members cannot advance custody / transfer counters of their second company (spec §11.4, known)
+        const multi = u === MULTI_FIN || u === MULTI_ADMIN;
+        const st = store(u);
+        const a = actor(u, role, org);
+        const kind = Math.floor(rnd() * 10);
+        const label = `${i}:${u.email}:${kind}`;
+        try {
+          if (kind === 0 || balance < 5) {
+            const x = amt(500) + (rnd() < 0.5 ? 1 / 3 : 0.1 + 0.2);
+            const r = await adjustAccountBalance(st, a, { accountId, type: 'in', amount: x, description: 's' }, key());
+            balance = toMoney(balance + r.value.amount); log.push(`${label} in ${r.value.amount}`);
+          } else if (kind === 1) {
+            const x = Math.min(balance, amt(balance)); await adjustAccountBalance(st, a, { accountId, type: 'out', amount: x, description: 's' }, key());
+            balance = toMoney(balance - x); log.push(`${label} out ${x}`);
+          } else if (kind === 2) {
+            const x = Math.min(balance, amt(300)); const id = `rq-${seedNo}-${i}`;
+            await seed(f => setDoc(doc(f, 'requests', id), approvedRequest(id, x, { serviceCategoryId: 'srv-1', providerId: 'prov-1' })));
+            await disburseExpenseRequest(st, a, id, { paymentMethod: 'cash', referenceNumber: id, accountId }, key(), notifyAll);
+            balance = toMoney(balance - x); log.push(`${label} pay ${x}`);
+          } else if (kind === 3) {
+            const x = amt(200) + 1 / 3; const id = `inc-${seedNo}-${i}`;
+            await seed(f => setDoc(doc(f, 'requests', id), approvedRequest(id, x, { status: 'pending', requestType: 'income' })));
+            await disburseExpenseRequest(st, a, id, { paymentMethod: 'cash', referenceNumber: id, accountId }, key(), notifyAll);
+            balance = toMoney(balance + toMoney(x)); log.push(`${label} income ${toMoney(x)}`);
+          } else if (kind === 4 && !multi) {
+            const x = Math.min(balance, amt(250)); await transferBetweenAccounts(st, a, { fromAccountId: accountId, toAccountId: other, amount: x }, key());
+            balance = toMoney(balance - x); log.push(`${label} transfer out ${x}`);
+          } else if (kind === 5 && !multi) {
+            const x = amt(250); await transferBetweenAccounts(st, a, { fromAccountId: other, toAccountId: accountId, amount: x }, key());
+            balance = toMoney(balance + x); log.push(`${label} transfer in ${x}`);
+          } else if (kind === 6 && !multi) {
+            const x = Math.min(balance, amt(150));
+            const c = await issueCustody(st, a, { orgId: ORG, employeeId: EMP.uid, employeeName: 'emp', employeeEmail: EMP.email, amount: x, sourceAccountId: accountId }, key());
+            custodies.push(c.value.id); balance = toMoney(balance - x); log.push(`${label} custody ${x}`);
+            const inv = Math.min(x, amt(x)); await settleCustodyItem(store(EMP), actor(EMP, 'employee', ORG), { custodyId: c.value.id, amount: inv, description: 'inv' }, key());
+          } else if (kind === 7 && custodies.length) {
+            const x = Math.min(balance, amt(100)); await replenishCustody(st, a, { custodyId: custodies[custodies.length - 1], amount: x, sourceAccountId: accountId }, key());
+            balance = toMoney(balance - x); log.push(`${label} replenish ${x}`);
+          } else if (kind === 8 && custodies.length) {
+            const cid = custodies.pop()!; const rem = toMoney((await read('custodies', cid))!.remainingAmount);
+            if (rem > 0) {
+              await returnCustodyRemainders(st, a, { custodyIds: [cid], targetAccountId: accountId }, key());
+              balance = toMoney(balance + rem); log.push(`${label} return ${rem}`);
+            }
+          } else {
+            const x = Math.min(balance, amt(120)); await addVisaPayment(st, a, `vs-${seedNo}`, { amount: x, accountId, method: 'cash' } as any, key());
+            balance = toMoney(balance - x); log.push(`${label} visa ${x}`);
+          }
+        } catch (err: any) {
+          throw new Error(`step ${label} failed after [${log.join(' | ')}]: ${err?.code || ''} ${err?.message || err}`);
+        }
+        expect((await read('paymentAccounts', accountId))!.currentBalance).toBe(balance);
+      }
+    };
+
+    it('seed 11: legacy cash account with drifted totals and an unrounded third balance', async () => {
+      await seed(f => setDoc(doc(f, 'paymentAccounts', 'q-cash'), { ...account('q-cash', 2000 / 3 + 0.1 + 0.2), initialBalance: 5000, totalIn: 12.345, totalOut: 0.1 + 0.2 }));
+      await run('q-cash', 2000 / 3 + 0.1 + 0.2, 11, 'acc-bank2');
+    });
+
+    it('seed 23: the BANK behind an InstaPay (the InstaPay is the transfer counterpart, so the bank also moves as its mirror)', async () => {
+      await run('acc-bank', 5000, 23, 'acc-insta2');
+    });
+
+    it('seed 37: an InstaPay (each step mirrored on its bank), counterpart a legacy linked wallet', async () => {
+      await run('acc-insta', 5000, 37, 'acc-wallet-old');
+    });
+
+    it('seed 41: a legacy account with no balance fields at all (bank, no totals, no initialBalance)', async () => {
+      await seed(f => setDoc(doc(f, 'paymentAccounts', 'q-bare'), { orgId: ORG, name: 'q-bare', type: 'bank', accountIdentifier: 'QB', active: true }));
+      await run('q-bare', 0, 41, 'acc-cash');
+    });
+
+    it('seed 53: an overdrawn legacy account (starts at -120.75)', async () => {
+      await seed(f => setDoc(doc(f, 'paymentAccounts', 'q-neg'), { ...account('q-neg', -120.75), initialBalance: 0, totalOut: 120.75 }));
+      await run('q-neg', -120.75, 53, 'acc-bank2');
     });
   });
 });

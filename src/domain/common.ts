@@ -32,6 +32,12 @@ export interface Actor {
    * shares with this one) is refused at once instead of by the database rules.
    */
   orgId?: string;
+  /**
+   * Whether the sign-in token carries a VERIFIED email (what the rules see). The app sets it;
+   * left out it is treated as verified. The rules accept an unverified email as nothing more
+   * than a label, so a step that relies on the email alone is skipped when it is false.
+   */
+  emailVerified?: boolean;
 }
 
 /** Error carrying a user-facing (Arabic) message and a stable machine code. */
@@ -46,8 +52,21 @@ export const isDomainError = (e: unknown): e is DomainError => e instanceof Doma
 
 export const normalizeEmail = (email?: string | null) => (email || '').trim().toLowerCase();
 
+/**
+ * The characters a unique value ignores: JavaScript's \s (every whitespace and line
+ * terminator, U+FEFF included) plus '-', '_' and '.'. Spelled out because firestore.rules
+ * (uniqueKeys → keyNorm) must strip EXACTLY the same set: keep the two lists identical.
+ */
+const KEY_IGNORED = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\-_.]+/g;
+
+/**
+ * The value a uniqueness key holds. Only A-Z are lower-cased: the rules can reproduce that
+ * exactly (their lower() is not guaranteed to follow JavaScript's full Unicode case
+ * mapping), so the database and the app always agree on whether two values are the same
+ * key. A name with non-ASCII capitals (É, Ö, Cyrillic, Greek) is therefore case-sensitive.
+ */
 export const normalizeKeyValue = (value?: string | null) =>
-  (value || '').trim().toLowerCase().replace(/[\s\-_.]+/g, '');
+  (value || '').replace(/[A-Z]+/g, s => s.toLowerCase()).replace(KEY_IGNORED, '');
 
 export function timelineTimestamp(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
@@ -194,6 +213,9 @@ export function legacyUniqueKeyDocId(scope: UniqueScope, orgId: string, value: s
 
 export async function readUniqueKey(tx: TxContext, scope: UniqueScope, orgId: string, value: string): Promise<UniqueKeyRead> {
   const docId = uniqueKeyDocId(scope, orgId, value);
+  // A value that normalizes to nothing ("-", "...", "_") has no key: it would make every such
+  // record a duplicate of every other, and the rules refuse claiming it (uniqueKeys → claimedByRecord).
+  if (normalizeKeyValue(value) === '') return { docId, scope, orgId, value, owner: null };
   const snap = await tx.get<{ entityCollection: string; entityId: string }>(COL.uniqueKeys, docId);
   return {
     docId,
@@ -205,6 +227,7 @@ export async function readUniqueKey(tx: TxContext, scope: UniqueScope, orgId: st
 }
 
 export function claimUniqueKey(tx: TxContext, key: UniqueKeyRead, entity: { collection: string; id: string }, nowIso: string) {
+  if (normalizeKeyValue(key.value) === '') return; // no key for an empty value (see readUniqueKey)
   tx.set(COL.uniqueKeys, key.docId, {
     scope: key.scope,
     orgId: key.orgId,
