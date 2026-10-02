@@ -104,7 +104,20 @@ export async function createOrganization(
   });
 }
 
-export async function updateOrganization(store: DataStore, actor: Actor, orgId: string, updates: Partial<Organization>, operationKey: string, now: Date = new Date()) {
+/**
+ * `accountIds`: every treasury account of the company the caller knows (the default ones are
+ * always checked too). The base currency can only change while none of them has a balance or
+ * any history (paymentAccountHasHistory) — the rules cannot check this for the platform owner.
+ */
+export async function updateOrganization(
+  store: DataStore,
+  actor: Actor,
+  orgId: string,
+  updates: Partial<Organization>,
+  operationKey: string,
+  now: Date = new Date(),
+  accountIds: readonly string[] = [],
+) {
   assertRole(actor, ['super_admin', 'org_admin'], 'تعديل بيانات الشركة متاح للإدارة فقط.');
   const clean: Record<string, any> = { ...updates };
   delete clean.id;
@@ -119,9 +132,9 @@ export async function updateOrganization(store: DataStore, actor: Actor, orgId: 
       if (actor.role !== 'super_admin') {
         throw new DomainError('currency_immutable', 'لا يمكن لمدير الشركة تغيير العملة الأساسية للمؤسسة بعد إنشائها؛ يرجى فتح خزائن أو حسابات بالعملة الجديدة.');
       }
-      const candidateIds = Array.from(new Set([`${org.id}_cash`, ...defaultAccountsFor(org).map(a => a.id!).filter(Boolean)]));
+      const candidateIds = Array.from(new Set([...defaultAccountsFor(org).map(a => a.id!), ...accountIds].filter(Boolean)));
       const accounts = await Promise.all(candidateIds.map(id => tx.get<PaymentAccount>(COL.paymentAccounts, id)));
-      if (accounts.some(a => Boolean(a && a.orgId === orgId && (toMoney(a.balance) !== 0 || toMoney(a.totalIn) !== 0 || toMoney(a.totalOut) !== 0)))) {
+      if (accounts.some(a => Boolean(a && a.orgId === orgId && paymentAccountHasHistory(a)))) {
         throw new DomainError('currency_immutable', 'لا يمكن تغيير العملة الأساسية للمؤسسة بعد وجود حركات أو أرصدة مالية؛ يرجى فتح خزائن وحسابات بالعملة الجديدة.');
       }
     }
@@ -369,6 +382,7 @@ export async function updateEntity<T extends { id: string; orgId: string; name?:
   // Counters maintained by financial transactions are never overwritten from a form.
   delete clean.spentAmount;
   delete clean.totalPaid;
+  delete clean.lastDisbursedRequestId;
   const nowIso = now.toISOString();
 
   return store.runTransaction(async tx => {
@@ -381,9 +395,14 @@ export async function updateEntity<T extends { id: string; orgId: string; name?:
     const oldValue = spec.keyOf(current);
     const newValue = spec.keyOf(after);
     const changedKey = newValue.toLowerCase() !== oldValue.toLowerCase();
-    const oldKey = changedKey ? await readKeyIfAny(tx, spec.scope, current.orgId, oldValue) : null;
-    const newKey = changedKey ? await readKeyIfAny(tx, spec.scope, current.orgId, newValue) : null;
+    let oldKey = changedKey ? await readKeyIfAny(tx, spec.scope, current.orgId, oldValue) : null;
+    let newKey = changedKey ? await readKeyIfAny(tx, spec.scope, current.orgId, newValue) : null;
     if (newKey && isKeyTakenByOther(newKey, id)) throw new DomainError('duplicate', spec.duplicateMessage(newValue));
+    // Same normalized value (only case / spacing / dashes changed): the key stays as it is.
+    if (oldKey && newKey && oldKey.docId === newKey.docId) {
+      oldKey = null;
+      newKey = null;
+    }
 
     tx.update(spec.collection, id, { ...clean, updatedAt: nowIso });
     if (oldKey) releaseUniqueKey(tx, oldKey, id);
@@ -848,10 +867,14 @@ export async function updateMemberRecord(
     const after = { ...mem, ...clean } as OrganizationMember;
     const emailChanged = clean.userEmail !== undefined && clean.userEmail !== normalizeEmail(mem.userEmail);
     const orgChanged = clean.orgId !== undefined && clean.orgId !== mem.orgId;
-    const oldKey = (emailChanged || orgChanged) && mem.userEmail ? await readUniqueKey(tx, 'member_email', mem.orgId, mem.userEmail) : null;
-    const newKey = (emailChanged || orgChanged) && after.userEmail ? await readUniqueKey(tx, 'member_email', after.orgId, after.userEmail) : null;
+    let oldKey = (emailChanged || orgChanged) && mem.userEmail ? await readUniqueKey(tx, 'member_email', mem.orgId, mem.userEmail) : null;
+    let newKey = (emailChanged || orgChanged) && after.userEmail ? await readUniqueKey(tx, 'member_email', after.orgId, after.userEmail) : null;
     if (newKey && isKeyTakenByOther(newKey, memberId)) {
       throw new DomainError('duplicate', `البريد الإلكتروني (${after.userEmail}) مسجل لموظف آخر في هذه المؤسسة.`);
+    }
+    if (oldKey && newKey && oldKey.docId === newKey.docId) {
+      oldKey = null;
+      newKey = null;
     }
 
     const realUids = Array.from(new Set(linkedUserIds.filter(isRealUid)));

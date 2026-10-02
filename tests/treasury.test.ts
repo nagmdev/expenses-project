@@ -22,7 +22,6 @@ import { addVisaPayment, createVisaRequest, decideVisaRequest } from '../src/dom
 import { createOrganization } from '../src/domain/directory';
 import { createExpenseRequest, disburseExpenseRequest, transitionExpenseRequest } from '../src/domain/requests';
 import { requirePositiveAmount, type Actor } from '../src/domain/common';
-import type { TxContext } from '../src/domain/store';
 import { ORG, admin, burst, draft, employee, finance, freshStore, key, notify, otherEmployee, seedAccount } from './helpers';
 
 const now = new Date('2026-09-28T10:00:00.000Z');
@@ -206,44 +205,26 @@ describe('visa payments', () => {
 describe('movement batch', () => {
   const base = { referenceType: 'manual_adjustment' as const, description: 'd', parentDescription: 'p', actor: finance, nowIso: now.toISOString() };
 
-  it('chains movements on the same account AND on an InstaPay parent; each account is written once', async () => {
+  it('an account (or the InstaPay parent behind it) is moved at most once per transaction (one ledger line = lastLedgerId)', async () => {
     const store = freshStore();
     seedAccount(store, 'bank', 1000, { type: 'bank' });
     seedAccount(store, 'insta', 500, { type: 'instapay', parentAccountId: 'bank' });
-    const accountWrites: string[] = [];
+    seedAccount(store, 'cash', 100);
     await store.runTransaction(async tx => {
       const insta = await readAccountWithParent(tx, 'insta');
       const bank = await readAccountWithParent(tx, 'bank');
+      const cash = await readAccountWithParent(tx, 'cash');
       const batch = createMovementBatch();
-      batch.add({ ...base, account: insta.account, parent: insta.parent, type: 'out', amount: 300, allowOverdraft: false, ledgerId: 'L1' }); // insta 500→200, bank 1000→700
-      batch.add({ ...base, account: bank.account, parent: bank.parent, type: 'out', amount: 600, allowOverdraft: false, ledgerId: 'L2' }); // bank 700→100
-      // Chained: the bank now holds 100, not the 1000 read at the start → refused, and nothing recorded.
-      expect(() => batch.add({ ...base, account: bank.account, parent: null, type: 'out', amount: 200, allowOverdraft: false, ledgerId: 'L3' }))
-        .toThrow(expect.objectContaining({ code: 'insufficient_funds' }));
-      batch.add({ ...base, account: insta.account, parent: insta.parent, type: 'in', amount: 50, allowOverdraft: false, ledgerId: 'L4' }); // insta 200→250, bank 100→150
-      expect(batch.writeCount).toBe(2 + 5);
-      const spy: TxContext = {
-        get: tx.get,
-        set: tx.set,
-        delete: tx.delete,
-        update(c, id, data) {
-          if (c === 'paymentAccounts') accountWrites.push(id);
-          tx.update(c, id, data);
-        },
-      };
-      batch.write(spy);
+      batch.add({ ...base, account: insta.account, parent: insta.parent, type: 'out', amount: 300, allowOverdraft: false, ledgerId: 'L1' });
+      expect(() => batch.add({ ...base, account: bank.account, parent: bank.parent, type: 'out', amount: 1, allowOverdraft: false, ledgerId: 'L2' })).toThrow(/One ledger line per account/);
+      expect(() => batch.add({ ...base, account: insta.account, parent: insta.parent, type: 'in', amount: 1, allowOverdraft: false, ledgerId: 'L3' })).toThrow(/One ledger line per account/);
+      batch.add({ ...base, account: cash.account, parent: cash.parent, type: 'in', amount: 5, allowOverdraft: false, ledgerId: 'L4' });
+      batch.write(tx);
     });
-    expect(accountWrites.sort()).toEqual(['bank', 'insta']);
-    expect(store.read('paymentAccounts', 'insta')).toMatchObject({ currentBalance: 250, balance: 250, totalIn: 50, totalOut: 300 });
-    expect(store.read('paymentAccounts', 'bank')).toMatchObject({ currentBalance: 150, balance: 150, totalIn: 50, totalOut: 900 });
-    const chain = Object.fromEntries(store.dump('accountTransactions').map(t => [t.id, [t.accountId, t.balanceBefore, t.balanceAfter]]));
-    expect(chain).toEqual({
-      L1: ['insta', 500, 200],
-      'L1-parent': ['bank', 1000, 700],
-      L2: ['bank', 700, 100],
-      L4: ['insta', 200, 250],
-      'L4-parent': ['bank', 100, 150],
-    });
+    expect(store.read('paymentAccounts', 'insta')).toMatchObject({ currentBalance: 200, lastLedgerId: 'L1' });
+    expect(store.read('paymentAccounts', 'bank')).toMatchObject({ currentBalance: 700, lastLedgerId: 'L1-parent' });
+    expect(store.read('paymentAccounts', 'cash')).toMatchObject({ currentBalance: 105, lastLedgerId: 'L4' });
+    expect(store.dump('accountTransactions').map(t => t.id).sort()).toEqual(['L1', 'L1-parent', 'L4']);
   });
 
   it('applyMovement keeps its exact output (ids incl. "-parent", fields, account patch, errors)', async () => {
@@ -555,7 +536,8 @@ describe('custody return — the remainder goes back to a treasury exactly once'
 
     const commits = store.commits;
     const res = await giveBack(store, [a.value.id, b.value.id, c.value.id], key(), { targetAccountId: 'bank', notes: 'تصفية نهاية الشهر' });
-    expect(store.commits).toBe(commits + 1); // one transaction
+    // one transaction per custody: firestore.rules bind an account's balance change to ONE ledger line
+    expect(store.commits).toBe(commits + 3);
     expect(res.value.totalReturned).toBe(500 + 500 + 900);
     expect(res.value.returned.map(r => [r.employeeName, r.amount, r.accountId])).toEqual([
       [employee.name, 500, 'bank'],

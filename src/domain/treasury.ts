@@ -142,6 +142,8 @@ interface RunningAccount {
   totalIn: number;
   totalOut: number;
   updatedAt?: string;
+  /** The account's ONE ledger line of this transaction (written as lastLedgerId; see firestore.rules → paymentAccounts). */
+  lastLedgerId?: string;
 }
 
 /**
@@ -163,12 +165,13 @@ export function createMovementBatch() {
 
   const stateOf = (doc: AccountDoc): RunningAccount =>
     running.get(doc.id) ?? { doc, balance: balanceOf(doc), totalIn: Number(doc.totalIn || 0), totalOut: Number(doc.totalOut || 0) };
-  const moved = (s: RunningAccount, type: TransactionType, amount: number, after: number, nowIso: string): RunningAccount => ({
+  const moved = (s: RunningAccount, type: TransactionType, amount: number, after: number, nowIso: string, ledgerId: string): RunningAccount => ({
     doc: s.doc,
     balance: after,
     totalIn: toMoney(s.totalIn + (type === 'in' ? amount : 0)),
     totalOut: toMoney(s.totalOut + (type === 'out' ? amount : 0)),
     updatedAt: nowIso,
+    lastLedgerId: ledgerId,
   });
   const claimLedgerId = (id: string) => {
     if (ledgerIds.has(id)) throw new Error(`Duplicate ledger id in one movement batch: ${id}`);
@@ -179,6 +182,11 @@ export function createMovementBatch() {
     const { account, type, amount, actor, nowIso } = input;
     const parent = input.parent && input.parent.id !== account.id ? input.parent : null;
 
+    // firestore.rules bind an account's balance change to ONE new ledger line (its
+    // lastLedgerId): an account (or InstaPay parent) is moved at most once per transaction.
+    if (running.has(account.id) || (parent && running.has(parent.id))) {
+      throw new Error(`One ledger line per account per transaction: ${running.has(account.id) ? account.id : parent!.id}`);
+    }
     const acc = stateOf(account);
     const before = acc.balance;
     if (!input.allowOverdraft && type === 'out' && before < amount) {
@@ -233,8 +241,8 @@ export function createMovementBatch() {
         }
       : null;
 
-    running.set(account.id, moved(acc, type, amount, after, nowIso));
-    if (parent && par) running.set(parent.id, moved(par, type, amount, parentAfter, nowIso));
+    running.set(account.id, moved(acc, type, amount, after, nowIso, input.ledgerId));
+    if (parent && par) running.set(parent.id, moved(par, type, amount, parentAfter, nowIso, parentLedgerId));
     ledgers.push(ledger);
     if (parentLedger) ledgers.push(parentLedger);
     return { balanceBefore: before, balanceAfter: after, ledger, parentLedger };
@@ -248,6 +256,7 @@ export function createMovementBatch() {
         totalIn: s.totalIn,
         totalOut: s.totalOut,
         updatedAt: s.updatedAt,
+        lastLedgerId: s.lastLedgerId,
       });
     });
     ledgers.forEach(l => tx.set(COL.accountTransactions, l.id, l));
@@ -297,9 +306,10 @@ export function buildAccountDoc(id: string, input: NewAccountInput, nowIso: stri
 
 /** Writes account + opening-balance ledger entry + uniqueness key (caller already did the reads). */
 export function writeNewAccount(tx: TxContext, actor: Actor, account: PaymentAccount, identifierKey: Awaited<ReturnType<typeof readUniqueKey>> | null, nowIso: string) {
-  tx.set(COL.paymentAccounts, account.id, account);
-  if (identifierKey) claimUniqueKey(tx, identifierKey, { collection: COL.paymentAccounts, id: account.id }, nowIso);
   const opening = toMoney(account.initialBalance);
+  // An opening balance exists only with its opening ledger line (firestore.rules → paymentAccounts create).
+  tx.set(COL.paymentAccounts, account.id, opening !== 0 ? { ...account, lastLedgerId: `tx-open-${account.id}` } : account);
+  if (identifierKey) claimUniqueKey(tx, identifierKey, { collection: COL.paymentAccounts, id: account.id }, nowIso);
   if (opening !== 0) {
     const openingTx: AccountTransaction = {
       id: `tx-open-${account.id}`,
@@ -377,7 +387,7 @@ export async function createPaymentAccount(
   });
 }
 
-const BALANCE_FIELDS: Array<keyof PaymentAccount> = ['balance', 'currentBalance', 'initialBalance', 'totalIn', 'totalOut', 'id', 'createdAt', 'orgId'];
+const BALANCE_FIELDS: Array<keyof PaymentAccount> = ['balance', 'currentBalance', 'initialBalance', 'totalIn', 'totalOut', 'lastLedgerId', 'id', 'createdAt', 'orgId'];
 
 export async function updatePaymentAccount(
   store: DataStore,
@@ -397,6 +407,14 @@ export async function updatePaymentAccount(
     const account = await tx.get<PaymentAccount>(COL.paymentAccounts, accountId);
     if (!account) throw new DomainError('account_not_found', 'الحساب غير موجود أو تم حذفه.');
 
+    // The currency of an account with a balance or history is fixed (firestore.rules → paymentAccounts).
+    // An unchanged one (also: a legacy account without the field, read as EGP) is not rewritten.
+    if (clean.currency !== undefined) {
+      if (currencyOf(clean.currency) === currencyOf(account.currency)) delete clean.currency;
+      else if (paymentAccountHasHistory(account)) {
+        throw new DomainError('currency_locked', `لا يمكن تغيير عملة الحساب "${account.name}" بعد وجود رصيد أو حركات عليه؛ افتح حساباً جديداً بالعملة المطلوبة.`);
+      }
+    }
     const newIdentifier = typeof clean.accountIdentifier === 'string' ? clean.accountIdentifier.trim() : undefined;
     const identifierChanged = newIdentifier !== undefined && newIdentifier.toLowerCase() !== (account.accountIdentifier || '').trim().toLowerCase();
     let oldKey = null as Awaited<ReturnType<typeof readUniqueKey>> | null;
@@ -406,6 +424,11 @@ export async function updatePaymentAccount(
       newKey = await readUniqueKey(tx, 'account_identifier', account.orgId, newIdentifier!);
       if (isKeyTakenByOther(newKey, accountId)) {
         throw new DomainError('duplicate', `يوجد حساب آخر بنفس الرقم / المعرف (${newIdentifier}) في هذه الشركة.`);
+      }
+      // Same normalized value (only spacing / dashes / case changed): the key stays as it is.
+      if (oldKey.docId === newKey.docId) {
+        oldKey = null;
+        newKey = null;
       }
     }
 
@@ -417,6 +440,10 @@ export async function updatePaymentAccount(
     const resultingType = clean.type ?? account.type;
     if (linkedParentIdOf(account) && resultingType !== 'instapay' && resultingType !== 'wallet') {
       throw new DomainError('linked_account', 'هذا الحساب مرتبط بحساب بنكي؛ افصله عن البنك أولاً ثم غيّر نوعه.');
+    }
+    // A legacy linked wallet keeps its type until detachLegacyWallet (org admin, with the bank correction).
+    if (isLegacyLinkedWallet(account) && resultingType !== 'wallet') {
+      throw new DomainError('linked_account', 'هذه المحفظة ما زالت مرتبطة بالبنك؛ افصلها عن البنك أولاً (فصل المحفظة) ثم غيّر نوعها.');
     }
     if (resultingType !== 'instapay') {
       delete clean.parentAccountId;
@@ -683,13 +710,14 @@ export async function issueCustody(
     const counter = await readCounter(tx, `custodies-${year}`);
     const custodyNumber = `CUS-${year}-${pad(counter.next, 5)}`;
 
+    const issueLedgerId = `tx-${operationKey}`;
     const movement = applyMovement({
       account,
       parent,
       type: 'out',
       amount,
       allowOverdraft: false,
-      ledgerId: `tx-${operationKey}`,
+      ledgerId: issueLedgerId,
       referenceType: 'custody',
       referenceId: custodyId,
       referenceNumber: custodyNumber,
@@ -718,6 +746,8 @@ export async function issueCustody(
       notes: input.notes || '',
       createdAt: nowIso,
       updatedAt: nowIso,
+      // its issue ledger line (firestore.rules → custodies create)
+      lastLedgerId: issueLedgerId,
     };
 
     writeCounter(tx, counter, nowIso);
@@ -771,10 +801,11 @@ export async function settleCustodyItem(
     if (existing) return { value: existing, changed: false, reason: 'duplicate_operation' };
     const custody = await tx.get<PettyCashCustody>(COL.custodies, input.custodyId);
     if (!custody) throw new DomainError('not_found', 'العهدة غير موجودة أو تم حذفها.');
+    // The holder by UID or email (firestore.rules also require a VERIFIED email and an active
+    // membership). Never by name: members can rename themselves.
     const isOwner =
       custody.employeeId === actor.id ||
-      Boolean(custody.employeeEmail && actor.email && custody.employeeEmail.trim().toLowerCase() === actor.email.trim().toLowerCase()) ||
-      Boolean(actor.orgId && custody.orgId === actor.orgId && custody.employeeName && actor.name && custody.employeeName.trim().toLowerCase() === actor.name.trim().toLowerCase());
+      Boolean(custody.employeeEmail && actor.email && custody.employeeEmail.trim().toLowerCase() === actor.email.trim().toLowerCase());
     if (!isOwner && !['super_admin', 'org_admin', 'finance'].includes(actor.role)) {
       throw new DomainError('forbidden', 'ليس لديك صلاحية تسوية هذه العهدة.');
     }
@@ -815,6 +846,8 @@ export async function settleCustodyItem(
       status: fullySettled ? 'settled' : custody.status,
       settledAt: fullySettled ? nowIso : custody.settledAt ?? null,
       updatedAt: nowIso,
+      // the invoice this debit is (firestore.rules → custodies settle / custodySettlements create)
+      lastSettlementId: settlementId,
     });
     tx.set(COL.custodySettlements, settlementId, settlement);
     writeAudit(
@@ -880,6 +913,7 @@ export async function replenishCustody(
       status: 'active' as const,
       notes: input.notes ? (custody.notes ? `${custody.notes} | [استعاضة: ${input.notes}]` : input.notes) : custody.notes || '',
       updatedAt: nowIso,
+      lastLedgerId: ledgerId,
     };
     tx.update(COL.custodies, custody.id, patch);
     movement.write(tx);
@@ -906,8 +940,6 @@ export async function replenishCustody(
 // Custody return: the cash left with employees goes back into a treasury
 // ---------------------------------------------------------------------------
 export const MAX_CUSTODY_RETURN_BATCH = 100;
-// Firestore commits at most 500 writes; a bulk return refuses (never half-applies) above that.
-const MAX_TX_WRITES = 500;
 
 export interface ReturnCustodyInput {
   custodyIds: string[];
@@ -938,10 +970,12 @@ export interface CustodyReturnResult {
 export const custodyReturnLedgerId = (operationKey: string, custodyId: string) => `${idFromKey('tx', operationKey)}-ret-${custodyId}`;
 
 /**
- * Deposits the remaining cash of one or more custodies into a treasury account, in
- * ONE transaction: an 'in' ledger entry per custody (balances chained, so several
- * custodies into the same account never start from the same stale balance), the
- * custody closed (remaining 0, status settled) and an audit entry per custody.
+ * Deposits the remaining cash of one or more custodies into a treasury account: the whole
+ * selection is validated first (read-only, nothing written on a refusal), then each custody
+ * is returned in ITS OWN transaction (an 'in' ledger entry, the custody closed: remaining 0,
+ * status settled, and an audit entry). firestore.rules bind an account's balance change to
+ * one ledger line per transaction, so N custodies into one account are N transactions; the
+ * balances still chain (each transaction starts from the committed balance).
  *
  * Idempotent: a retry with the same key finds each custody's ledger entry and skips
  * it ('already_done'). A second operation (another key) on an already-returned
@@ -966,96 +1000,109 @@ export async function returnCustodyRemainders(
   const ledgerIds = new Map(custodyIds.map(id => [id, custodyReturnLedgerId(operationKey, id)]));
   const nowIso = now.toISOString();
 
-  return store.runTransaction(async tx => {
-    // ---------- reads (all before any write) ----------
+  type Due = { custody: PettyCashCustody & { id: string }; amount: number; accountId: string };
+  type Plan = { skipped: CustodyReturnResult['skipped']; due: Due[] };
+
+  /** Reads one custody's state and decides: skip (and why), or return `amount` into `accountId`. */
+  const classify = (custodyId: string, custody: (PettyCashCustody & { id: string }) | null, done: unknown): Due | CustodyReturnResult['skipped'][number] => {
+    if (done) return { custodyId, reason: 'already_done' };
+    if (!custody) return { custodyId, reason: 'not_found' };
+    const amount = toMoney(custody.remainingAmount);
+    if (amount <= 0) return { custodyId, reason: 'nothing_remaining' };
+    return { custody, amount, accountId: targetAccountId || custody.sourceAccountId || '' };
+  };
+  const isDue = (x: Due | CustodyReturnResult['skipped'][number]): x is Due => 'custody' in x;
+
+  /** The checks every return must pass (also re-run inside each custody's own transaction). */
+  const validate = (d: Due, read: { account: AccountDoc; parent: AccountDoc | null } | null) => {
+    const { custody } = d;
+    if (!read) {
+      throw new DomainError(
+        'account_not_found',
+        targetAccountId
+          ? 'حساب الخزينة المحدد للإيداع غير موجود أو تم حذفه؛ يرجى اختيار حساب آخر.'
+          : `الحساب المسحوب منه العهدة ${custody.custodyNumber} (${custody.sourceAccountName || 'غير محدد'}) غير موجود أو تم حذفه؛ يرجى اختيار حساب آخر لإيداع المتبقي فيه.`,
+      );
+    }
+    const { account } = read;
+    if (account.orgId && custody.orgId && account.orgId !== custody.orgId) {
+      throw new DomainError('cross_org', `لا يمكن رد متبقي العهدة ${custody.custodyNumber} إلى حساب تابع لشركة أخرى.`);
+    }
+    if (currencyOf(custody.currency) !== currencyOf(account.currency)) {
+      throw new DomainError(
+        'currency_mismatch',
+        `تعارض في العملات: عملة العهدة ${custody.custodyNumber} (${currencyOf(custody.currency)}) لا تطابق عملة الحساب "${account.name}" (${currencyOf(account.currency)}).`,
+      );
+    }
+    return read;
+  };
+
+  // ---------- 1. read-only pass: validate the WHOLE selection first ----------
+  // One bad custody (another company's account, another currency, a deleted account) refuses
+  // the operation before anything is written, exactly as when it was one transaction.
+  const plan: Plan = await store.runTransaction(async tx => {
     const [custodies, done] = await Promise.all([
       Promise.all(custodyIds.map(id => tx.get<PettyCashCustody>(COL.custodies, id))),
       Promise.all(custodyIds.map(id => tx.get<AccountTransaction>(COL.accountTransactions, ledgerIds.get(id)!))),
     ]);
-
-    const skipped: CustodyReturnResult['skipped'] = [];
-    const due: Array<{ custody: PettyCashCustody & { id: string }; amount: number; accountId: string }> = [];
+    const skipped: Plan['skipped'] = [];
+    const due: Due[] = [];
     custodyIds.forEach((custodyId, i) => {
-      const custody = custodies[i];
-      if (done[i]) skipped.push({ custodyId, reason: 'already_done' });
-      else if (!custody) skipped.push({ custodyId, reason: 'not_found' });
-      else {
-        const amount = toMoney(custody.remainingAmount);
-        if (amount <= 0) skipped.push({ custodyId, reason: 'nothing_remaining' });
-        else due.push({ custody, amount, accountId: targetAccountId || custody.sourceAccountId || '' });
-      }
+      const c = classify(custodyId, custodies[i], done[i]);
+      if (isDue(c)) due.push(c);
+      else skipped.push(c);
     });
-
-    if (due.length === 0) {
-      if (skipped.some(s => s.reason === 'already_done')) {
-        // Retry / double submit of an operation that already went through.
-        return { value: { returned: [], skipped, totalReturned: 0 }, changed: false, reason: 'duplicate_operation' };
-      }
-      throw new DomainError('nothing_to_return', 'لا يوجد متبقٍ في العهد المحددة لرده.');
-    }
-
     const readAccount = createAccountReader(tx);
-    const accounts = await Promise.all(due.map(d => (d.accountId ? readAccount(d.accountId) : Promise.resolve(null))));
+    const reads = await Promise.all(due.map(d => (d.accountId ? readAccount(d.accountId) : Promise.resolve(null))));
+    due.forEach((d, i) => validate(d, reads[i]));
+    return { skipped, due };
+  });
 
-    // ---------- validate + compute ----------
-    const batch = createMovementBatch();
-    const returned: CustodyReturnLine[] = [];
-    const moves = due.map((d, i) => {
-      const { custody, amount } = d;
-      const read = accounts[i];
-      if (!read) {
-        throw new DomainError(
-          'account_not_found',
-          targetAccountId
-            ? 'حساب الخزينة المحدد للإيداع غير موجود أو تم حذفه؛ يرجى اختيار حساب آخر.'
-            : `الحساب المسحوب منه العهدة ${custody.custodyNumber} (${custody.sourceAccountName || 'غير محدد'}) غير موجود أو تم حذفه؛ يرجى اختيار حساب آخر لإيداع المتبقي فيه.`,
-        );
-      }
+  // ---------- 2. one transaction per custody ----------
+  // firestore.rules bind every balance change to ONE ledger line of the account (its
+  // lastLedgerId), so two custodies returned into the same account are two transactions.
+  // Each one is idempotent on its own ledger id (a retry with the same key skips it).
+  const skipped: CustodyReturnResult['skipped'] = [...plan.skipped];
+  const returned: CustodyReturnLine[] = [];
+  for (const planned of plan.due) {
+    const custodyId = planned.custody.id;
+    const outcome = await store.runTransaction(async tx => {
+      const [custody, done] = await Promise.all([
+        tx.get<PettyCashCustody>(COL.custodies, custodyId),
+        tx.get<AccountTransaction>(COL.accountTransactions, ledgerIds.get(custodyId)!),
+      ]);
+      const c = classify(custodyId, custody, done);
+      if (!isDue(c)) return c; // returned meanwhile (another tab / a retry): nothing to do
+      const read = validate(c, c.accountId ? await createAccountReader(tx)(c.accountId) : null);
       const { account, parent } = read;
-      if (account.orgId && custody.orgId && account.orgId !== custody.orgId) {
-        throw new DomainError('cross_org', `لا يمكن رد متبقي العهدة ${custody.custodyNumber} إلى حساب تابع لشركة أخرى.`);
-      }
-      if (currencyOf(custody.currency) !== currencyOf(account.currency)) {
-        throw new DomainError(
-          'currency_mismatch',
-          `تعارض في العملات: عملة العهدة ${custody.custodyNumber} (${currencyOf(custody.currency)}) لا تطابق عملة الحساب "${account.name}" (${currencyOf(account.currency)}).`,
-        );
-      }
+      const batch = createMovementBatch();
       const movement = batch.add({
         account,
         parent,
         type: 'in',
-        amount,
+        amount: c.amount,
         allowOverdraft: true,
-        ledgerId: ledgerIds.get(custody.id)!,
+        ledgerId: ledgerIds.get(custodyId)!,
         referenceType: 'custody_return',
-        referenceId: custody.id,
-        referenceNumber: custody.custodyNumber,
-        description: `رد المتبقي من عهدة الموظف ${custody.employeeName} (${custody.custodyNumber}) وإيداعه بالخزينة${notes ? `: ${notes}` : ''}`,
-        parentDescription: `إيداع تلقائي بالحساب البنكي مرتبط عبر (${account.name}) مقابل رد متبقي عهدة الموظف ${custody.employeeName} (${custody.custodyNumber})`,
+        referenceId: custodyId,
+        referenceNumber: c.custody.custodyNumber,
+        description: `رد المتبقي من عهدة الموظف ${c.custody.employeeName} (${c.custody.custodyNumber}) وإيداعه بالخزينة${notes ? `: ${notes}` : ''}`,
+        parentDescription: `إيداع تلقائي بالحساب البنكي مرتبط عبر (${account.name}) مقابل رد متبقي عهدة الموظف ${c.custody.employeeName} (${c.custody.custodyNumber})`,
         actor,
         nowIso,
       });
-      returned.push({ custodyId: custody.id, custodyNumber: custody.custodyNumber, employeeName: custody.employeeName, amount, accountId: account.id, accountName: account.name });
-      return { custody, amount, account, movement };
-    });
-
-    if (batch.writeCount + moves.length * 2 >= MAX_TX_WRITES) {
-      throw new DomainError('too_many', 'عدد الحسابات والعهد المحددة كبير لتنفيذه في عملية واحدة؛ يرجى تقسيم العهد على أكثر من عملية.');
-    }
-
-    // ---------- writes ----------
-    batch.write(tx);
-    moves.forEach(({ custody, amount, account, movement }) => {
-      tx.update(COL.custodies, custody.id, {
+      batch.write(tx);
+      tx.update(COL.custodies, custodyId, {
         remainingAmount: 0,
-        returnedAmount: toMoney(Number(custody.returnedAmount || 0) + amount),
+        returnedAmount: toMoney(Number(c.custody.returnedAmount || 0) + c.amount),
         status: 'settled',
         settledAt: nowIso,
         returnedAt: nowIso,
         returnedToAccountId: account.id,
         returnedToAccountName: account.name,
         updatedAt: nowIso,
+        // the 'custody_return' line this return is (firestore.rules → custodies return)
+        lastLedgerId: ledgerIds.get(custodyId)!,
       });
       writeAudit(
         tx,
@@ -1063,20 +1110,35 @@ export async function returnCustodyRemainders(
         {
           actionType: 'update',
           entityType: 'custody',
-          entityId: custody.id,
-          entityName: `${custody.custodyNumber} - ${custody.employeeName}`,
-          orgId: custody.orgId,
+          entityId: custodyId,
+          entityName: `${c.custody.custodyNumber} - ${c.custody.employeeName}`,
+          orgId: c.custody.orgId,
           orgName: input.orgName,
-          details: `رد المتبقي من عهدة الموظف ${custody.employeeName} بقيمة ${formatAmount(amount)} ${currencyOf(custody.currency)} وإيداعه في خزينة/حساب "${account.name}". رصيد الحساب: ${formatAmount(movement.balanceBefore)} -> ${formatAmount(movement.balanceAfter)}${notes ? `. ملاحظات: ${notes}` : ''}`,
+          details: `رد المتبقي من عهدة الموظف ${c.custody.employeeName} بقيمة ${formatAmount(c.amount)} ${currencyOf(c.custody.currency)} وإيداعه في خزينة/حساب "${account.name}". رصيد الحساب: ${formatAmount(movement.balanceBefore)} -> ${formatAmount(movement.balanceAfter)}${notes ? `. ملاحظات: ${notes}` : ''}`,
         },
-        auditIdFor(operationKey, custody.id),
+        auditIdFor(operationKey, custodyId),
         nowIso,
       );
+      const line: CustodyReturnLine = { custodyId, custodyNumber: c.custody.custodyNumber, employeeName: c.custody.employeeName, amount: c.amount, accountId: account.id, accountName: account.name };
+      return line;
     });
+    if ('reason' in outcome) skipped.push(outcome);
+    else returned.push(outcome);
+  }
 
-    const totalReturned = toMoney(returned.reduce((sum, r) => sum + r.amount, 0));
-    return { value: { returned, skipped, totalReturned }, changed: true };
-  });
+  if (returned.length === 0) {
+    if (skipped.some(s => s.reason === 'already_done')) {
+      // Retry / double submit of an operation that already went through.
+      return { value: { returned: [], skipped, totalReturned: 0 }, changed: false, reason: 'duplicate_operation' };
+    }
+    throw new DomainError('nothing_to_return', 'لا يوجد متبقٍ في العهد المحددة لرده.');
+  }
+  // Report in the order the custodies were selected.
+  const order = new Map(custodyIds.map((id, i) => [id, i]));
+  returned.sort((a, b) => order.get(a.custodyId)! - order.get(b.custodyId)!);
+  skipped.sort((a, b) => order.get(a.custodyId)! - order.get(b.custodyId)!);
+  const totalReturned = toMoney(returned.reduce((sum, r) => sum + r.amount, 0));
+  return { value: { returned, skipped, totalReturned }, changed: true };
 }
 
 // ---------------------------------------------------------------------------

@@ -212,6 +212,15 @@ export async function updateExpenseRequest(
     const moneyChanged =
       (clean.amount !== undefined && clean.amount !== req.amount) ||
       (clean.currency !== undefined && clean.currency !== req.currency);
+
+    // firestore.rules → requests: finance attaches / replaces the invoice of a request it did
+    // not file (or of any approved request) and nothing else; re-opening an approved request
+    // by changing its money is the org admin's call.
+    const changed = Object.keys(clean).filter(k => JSON.stringify(clean[k]) !== JSON.stringify((req as Record<string, any>)[k]));
+    const invoiceOnly = changed.every(k => k === 'invoiceAttachment' || k === 'attachments');
+    if (actor.role === 'finance' && (!isRequester || req.status === 'approved') && !invoiceOnly) {
+      throw new DomainError('forbidden', 'يمكن لمسؤول المالية إرفاق الفاتورة أو استبدالها فقط في هذا الطلب؛ تعديل بياناته متاح لمقدمه أو لمدير الشركة.');
+    }
     const nextStatus: RequestStatus = req.status === 'approved' && moneyChanged ? 'pending' : req.status;
 
     const tl: TimelineEvent = {
@@ -544,10 +553,11 @@ export async function disburseExpenseRequest(
     tx.update(COL.requests, requestId, patch);
     movement.write(tx);
     if (service && !isIncome) {
-      tx.update(COL.services, service.id, { spentAmount: toMoney(Number(service.spentAmount || 0) + amount), updatedAt: nowIso });
+      // lastDisbursedRequestId: the payment that justifies the increment (firestore.rules → services)
+      tx.update(COL.services, service.id, { spentAmount: toMoney(Number(service.spentAmount || 0) + amount), updatedAt: nowIso, lastDisbursedRequestId: requestId });
     }
     if (provider && !isIncome) {
-      tx.update(COL.providers, provider.id, { totalPaid: toMoney(Number(provider.totalPaid || 0) + amount), updatedAt: nowIso });
+      tx.update(COL.providers, provider.id, { totalPaid: toMoney(Number(provider.totalPaid || 0) + amount), updatedAt: nowIso, lastDisbursedRequestId: requestId });
     }
     writeAudit(
       tx,

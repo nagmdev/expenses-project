@@ -81,6 +81,8 @@ export interface ServiceCategory {
   costCenter?: string; // مركز التكلفة / الفرع
   /** false = deactivated (in use, so never hard-deleted): not offered for new requests or settlements. Missing = active. */
   active?: boolean;
+  /** The request whose disbursement last raised spentAmount (written by the domain only; firestore.rules → services). */
+  lastDisbursedRequestId?: string;
 }
 
 export const isServiceMatchingOrg = (service: ServiceCategory, targetOrgId?: string): boolean => {
@@ -109,6 +111,8 @@ export interface ServiceProvider {
   notes?: string;
   totalPaid: number;
   active: boolean;
+  /** The request whose disbursement last raised totalPaid (written by the domain only; firestore.rules → providers). */
+  lastDisbursedRequestId?: string;
 }
 
 export type RequestStatus = 
@@ -390,6 +394,8 @@ export interface PaymentAccount {
   description?: string;
   createdAt: string;
   updatedAt?: string;
+  /** The ledger line of the account's last balance change (written by createMovementBatch only; firestore.rules → paymentAccounts). */
+  lastLedgerId?: string;
 }
 
 export type TransactionType = 'in' | 'out';
@@ -447,6 +453,10 @@ export interface PettyCashCustody {
   notes?: string;
   createdAt: string;
   updatedAt?: string;
+  /** The ledger line of the last issue / replenishment / return (firestore.rules → custodies). */
+  lastLedgerId?: string;
+  /** The settlement (invoice) of the last debit (firestore.rules → custodies / custodySettlements). */
+  lastSettlementId?: string;
 }
 
 export interface CustodySettlementItem {

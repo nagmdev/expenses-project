@@ -558,21 +558,27 @@ describe('Concurrency & Multi-Tenant Mathematical Integrity Test Matrix', () => 
       expect(store.read('organizations', ORG)!.currency).toBe('EGP');
     });
 
-    it('super admin cannot change currency once accounts have financial history', async () => {
+    it('super admin cannot change currency once ANY of the company\'s accounts has a balance or history (ORG-1)', async () => {
       const store = freshStore();
-      seedAccount(store, `${ORG}_cash`, 500, { totalIn: 500 });
+      // an account users created (id from the operation key), not one of the 4 defaults
+      seedAccount(store, 'vault-custom-1', 500, { totalIn: 500 });
 
       await expect(
-        updateOrganization(store, owner, ORG, { currency: 'EUR' }, key(), now)
-      ).rejects.toThrow(DomainError);
-
-      try {
-        await updateOrganization(store, owner, ORG, { currency: 'EUR' }, key(), now);
-      } catch (err: any) {
-        expect(err.code).toBe('currency_immutable');
-      }
-
+        updateOrganization(store, owner, ORG, { currency: 'EUR' }, key(), now, ['vault-custom-1'])
+      ).rejects.toMatchObject({ code: 'currency_immutable' });
       expect(store.read('organizations', ORG)!.currency).toBe('EGP');
+
+      // only currentBalance / initialBalance set (no `balance` field): still history
+      const s2 = freshStore();
+      s2.seed('paymentAccounts', `vault-cash-${ORG}`, { id: `vault-cash-${ORG}`, orgId: ORG, name: 'c', currency: 'EGP', currentBalance: 500, initialBalance: 500 });
+      await expect(updateOrganization(s2, owner, ORG, { currency: 'EUR' }, key(), now)).rejects.toMatchObject({ code: 'currency_immutable' });
+
+      // a company whose accounts are all empty may still change it
+      const s3 = freshStore();
+      seedAccount(s3, 'vault-custom-2', 0);
+      const res = await updateOrganization(s3, owner, ORG, { currency: 'EUR' }, key(), now, ['vault-custom-2']);
+      expect(res.changed).toBe(true);
+      expect(s3.read('organizations', ORG)!.currency).toBe('EUR');
     });
   });
 });

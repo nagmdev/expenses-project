@@ -1224,14 +1224,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!effectiveOrgId) return [];
     if (resolvedRole === 'employee') {
       const uEmail = (currentUser.email || firebaseUser.email || '').trim().toLowerCase();
-      const uName = (currentUser.name || '').trim().toLowerCase();
       const uId = currentUser.id;
       const fUid = firebaseUser.uid;
       return rawCustodies.filter(c => {
         if (c.orgId !== effectiveOrgId) return false;
         if (c.employeeId === uId || c.employeeId === fUid) return true;
         if (c.employeeEmail && uEmail && c.employeeEmail.trim().toLowerCase() === uEmail) return true;
-        if (c.employeeName && uName && c.employeeName.trim().toLowerCase() === uName) return true;
         return false;
       });
     }
@@ -1246,14 +1244,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!effectiveOrgId) return [];
     if (resolvedRole === 'employee') {
       const uEmail = (currentUser.email || firebaseUser.email || '').trim().toLowerCase();
-      const uName = (currentUser.name || '').trim().toLowerCase();
       const uId = currentUser.id;
       const fUid = firebaseUser.uid;
       return rawCustodySettlements.filter(s => {
         if (s.orgId !== effectiveOrgId) return false;
         if (s.employeeId === uId || s.employeeId === fUid) return true;
         if (s.employeeEmail && uEmail && s.employeeEmail.trim().toLowerCase() === uEmail) return true;
-        if (s.employeeName && uName && s.employeeName.trim().toLowerCase() === uName) return true;
         return false;
       });
     }
@@ -1464,16 +1460,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     listen<PaymentAccount>('Payment Accounts', financeScoped('paymentAccounts'), setRawPaymentAccounts, notDummy);
     listen<AccountTransaction>('Account Transactions', financeScoped('accountTransactions'), list => setRawTransactions([...list].sort(byCreatedDesc)), notDummy);
 
-    // 6. Custodies & settlements (employees: their own only, scoped by org + filtered in UI)
-    const employeeScoped = (col: string) =>
-      isSuperAdmin || isOrgStaff
-        ? financeScoped(col)
-        : effectiveOrgId
-        ? query(collection(db, col), where('orgId', '==', effectiveOrgId))
-        : query(collection(db, col), where('employeeId', '==', firebaseUser.uid));
-    listen<PettyCashCustody>('Custodies', employeeScoped('custodies'), list =>
-      setRawCustodies([...list].sort((a, b) => new Date(b.createdAt || b.issuedAt).getTime() - new Date(a.createdAt || a.issuedAt).getTime())), notDummy);
-    listen<CustodySettlementItem>('Custody Settlements', employeeScoped('custodySettlements'), list => setRawCustodySettlements([...list].sort(byCreatedDesc)), notDummy);
+    // 6. Custodies & settlements. Staff: their company. Everyone else: their OWN custodies /
+    // settlements — by UID, or by their VERIFIED email (issued while invited by email).
+    // firestore.rules can prove exactly these two shapes for a list query; an orgId-only query
+    // is always refused for an employee. Same disjunctive query + fallback as the requests.
+    const sortCustodies = (list: PettyCashCustody[]) =>
+      [...list].sort((a, b) => new Date(b.createdAt || b.issuedAt).getTime() - new Date(a.createdAt || a.issuedAt).getTime());
+    const listenOwn = <T extends { id: string },>(name: string, col: string, apply: (items: T[]) => void) => {
+      const ref = collection(db, col);
+      const byUid = query(ref, where('employeeId', '==', firebaseUser.uid));
+      const email = emailVerified ? normalizeEmail(firebaseUser.email) : '';
+      if (!email) return listen<T>(name, byUid, apply, notDummy);
+      const byEmail = query(ref, where('employeeEmail', '==', email));
+      let fallbackUnsubs: Array<() => void> = [];
+      const unsubCombined = onSnapshot(query(ref, or(where('employeeId', '==', firebaseUser.uid), where('employeeEmail', '==', email))), snap => {
+        setIsFirebaseConnected(true);
+        apply(snap.docs.map(d => ({ ...d.data(), id: d.id } as unknown as T)).filter(notDummy));
+      }, err => {
+        console.warn(`[Firebase] Combined ${name} query rejected, using fallback:`, err?.message || err);
+        const slots = new Map<number, T[]>();
+        fallbackUnsubs = [byUid, byEmail].map((q, i) => onSnapshot(q, snap => {
+          slots.set(i, snap.docs.map(d => ({ ...d.data(), id: d.id } as unknown as T)).filter(notDummy));
+          apply(uniqueById(Array.from(slots.values()).flat()));
+        }, handleListenerError(`${name} (fallback)`)));
+      });
+      unsubs.push(() => {
+        unsubCombined();
+        fallbackUnsubs.forEach(u => u());
+      });
+    };
+    if (isSuperAdmin || isOrgStaff) {
+      listen<PettyCashCustody>('Custodies', financeScoped('custodies'), list => setRawCustodies(sortCustodies(list)), notDummy);
+      listen<CustodySettlementItem>('Custody Settlements', financeScoped('custodySettlements'), list => setRawCustodySettlements([...list].sort(byCreatedDesc)), notDummy);
+    } else {
+      listenOwn<PettyCashCustody>('Custodies', 'custodies', list => setRawCustodies(sortCustodies(list)));
+      listenOwn<CustodySettlementItem>('Custody Settlements', 'custodySettlements', list => setRawCustodySettlements([...list].sort(byCreatedDesc)));
+    }
 
     // 7. Audit logs
     listen<AuditLogEntry>(
@@ -1497,7 +1519,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => unsubs.forEach(u => {
       try { u(); } catch {}
     });
-  }, [firebaseUser, isSuperAdmin, resolvedRole, effectiveOrgId, firebaseSyncCounter]);
+  }, [firebaseUser, isSuperAdmin, resolvedRole, effectiveOrgId, firebaseSyncCounter, emailVerified]);
 
   // Clear everything on sign-out so the next user of this browser never sees stale data.
   useEffect(() => {
@@ -1987,7 +2009,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateOrganization = async (orgId: string, updates: Partial<Organization>) => {
     await mutate('updateOrganization', fingerprint(orgId, updates), store =>
-      updateOrganizationOp(store, actor, orgId, updates, newOperationKey())
+      updateOrganizationOp(store, actor, orgId, updates, newOperationKey(), new Date(), rawPaymentAccounts.filter(a => a.orgId === orgId).map(a => a.id))
     );
   };
 

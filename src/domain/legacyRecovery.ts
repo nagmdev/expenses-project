@@ -25,6 +25,7 @@ import {
   claimUniqueKey,
   isKeyTakenByOther,
   readUniqueKey,
+  toMoney,
   writeAudit,
   type Actor,
   type UniqueScope,
@@ -192,6 +193,12 @@ export function restoreBlock(ctx: RestoreContext, rec: LegacyRecord): BlockReaso
     if (rec.data.status !== 'pending') return 'needs_owner';
     if (actor.role !== 'org_admin' && rec.data.requesterId !== actor.id) return 'no_permission';
     return null;
+  }
+  // A service budget already used / a provider already paid: only the platform owner may
+  // restore those counters (firestore.rules → services / providers create).
+  if ((rec.store.collection === COL.services && toMoney(rec.data.spentAmount) !== 0) ||
+      (rec.store.collection === COL.providers && toMoney(rec.data.totalPaid) !== 0)) {
+    return 'needs_owner';
   }
   return actor.role === 'org_admin' ? null : 'no_permission';
 }

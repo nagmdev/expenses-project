@@ -5,6 +5,11 @@ service cloud.firestore {
     // =========================================================================
     // HELPER FUNCTIONS & RBAC ENFORCEMENT
     // =========================================================================
+    // Budgets (firestore limits): 1000 expressions per evaluated write, 10 document
+    // reads (get/exists/getAfter/existsAfter) per write and 20 per transaction. The
+    // financial rules below therefore (1) dispatch on the transition / changed keys
+    // first, (2) read each document once (get() == null instead of exists() + get()),
+    // and (3) test the caller's role LAST, with the super-admin check after it.
     function isAuthenticated() {
       return request.auth != null;
     }
@@ -48,51 +53,59 @@ service cloud.firestore {
       return /databases/$(database)/documents/members/$(request.auth.uid + '_' + orgId);
     }
 
+    // d: a users/{uid} or members/{uid}_{org} document as returned by get() (null when
+    // missing). It grants orgId when it names that org and is not suspended.
+    function grantsOrg(d, orgId) {
+      return d != null && d.data.get('orgId', null) == orgId && d.data.get('active', true) != false;
+    }
+
     // users/{uid} holds the caller's primary org and their role in THAT org only.
     // A suspended profile (active: false) grants nothing.
     function inOrgViaProfile(orgId) {
-      return exists(profilePath()) &&
-        get(profilePath()).data.get('orgId', null) == orgId &&
-        get(profilePath()).data.get('active', true) != false;
+      return grantsOrg(get(profilePath()), orgId);
     }
 
     // members/{uid}_{orgId} holds the caller's role in orgId. The orgId field is
     // checked as well as the document id, so an id that names another org grants nothing.
     // A suspended membership (active: false) grants nothing.
     function inOrgViaMember(orgId) {
-      return exists(ownMemberPath(orgId)) &&
-        get(ownMemberPath(orgId)).data.get('orgId', null) == orgId &&
-        get(ownMemberPath(orgId)).data.get('active', true) != false;
+      return grantsOrg(get(ownMemberPath(orgId)), orgId);
     }
 
-    // A role held in one org never applies to another org.
+    // A role held in one org never applies to another org. One read per document.
     function hasOrgRole(orgId, roles) {
-      return (inOrgViaProfile(orgId) && get(profilePath()).data.get('role', null) in roles) ||
-        (inOrgViaMember(orgId) && get(ownMemberPath(orgId)).data.get('role', null) in roles);
+      return isAuthenticated() && (
+        roleVia(get(profilePath()), orgId, roles) || roleVia(get(ownMemberPath(orgId)), orgId, roles)
+      );
     }
 
+    function roleVia(d, orgId, roles) {
+      return grantsOrg(d, orgId) && d.data.get('role', null) in roles;
+    }
+
+    // Membership / role first, the super-admin lookups only when that fails.
     function isOrgMember(orgId) {
-      return isSuperAdmin() || (isAuthenticated() && (inOrgViaProfile(orgId) || inOrgViaMember(orgId)));
+      return (isAuthenticated() && (inOrgViaProfile(orgId) || inOrgViaMember(orgId))) || isSuperAdmin();
     }
 
     function isOrgAdmin(orgId) {
-      return isSuperAdmin() || (isAuthenticated() && hasOrgRole(orgId, ['org_admin']));
+      return hasOrgRole(orgId, ['org_admin']) || isSuperAdmin();
     }
 
     // Data-entry staff maintain their company's directory (providers, departments).
     function isDataEntry(orgId) {
-      return isAuthenticated() && hasOrgRole(orgId, ['data_entry']);
+      return hasOrgRole(orgId, ['data_entry']);
     }
 
     function isFinance(orgId) {
-      return isSuperAdmin() || (isAuthenticated() && hasOrgRole(orgId, ['finance', 'org_admin']));
+      return hasOrgRole(orgId, ['finance', 'org_admin']) || isSuperAdmin();
     }
 
     // A record another company shares with the caller's company (a service's orgIds, set by
     // the platform owner only). The caller's company is the one of their active profile, so a
     // query where('orgIds', 'array-contains', <that company>) can be proven against this.
     function inSharedOrgViaProfile(orgIds) {
-      return isAuthenticated() && exists(profilePath()) &&
+      return isAuthenticated() && get(profilePath()) != null &&
         get(profilePath()).data.get('active', true) != false &&
         get(profilePath()).data.get('orgId', '') is string &&
         get(profilePath()).data.get('orgId', '') != '' &&
@@ -192,6 +205,83 @@ service cloud.firestore {
       return request.resource.data.get('orgId', null) == resource.data.get('orgId', null);
     }
 
+    // -------------------------------------------------------------------------
+    // Money helpers. Amounts are decimal doubles rounded to cents by the domain
+    // (toMoney = Math.round(n * 100) / 100), so sums are compared with a tolerance,
+    // and as DELTAS of one operation (never as an equation over historical totals,
+    // which older app versions left inconsistent). 0.0051 also absorbs a legacy value
+    // that was never rounded (at most half a cent away from its rounded form).
+    // -------------------------------------------------------------------------
+    function near(a, b) {
+      return math.abs(a - b) < 0.0051;
+    }
+
+    // A numeric field, 0 when missing, null or not a number (legacy documents).
+    function num(m, f) {
+      return m.get(f, 0) is number ? m.get(f, 0) : 0;
+    }
+
+    // An account's balance as the domain reads it (currentBalance ?? balance ?? 0).
+    function balanceOf(m) {
+      return m.get('currentBalance', null) is number ? m.currentBalance : num(m, 'balance');
+    }
+
+    function listOf(m, f) {
+      return m.get(f, null) is list ? m.get(f, null) : [];
+    }
+
+    // History arrays (timeline, comments) only ever grow at the end.
+    function appended(b, a, f) {
+      let o = listOf(b, f);
+      let n = listOf(a, f);
+      return n.size() >= o.size() && (o.size() == 0 || n[0:o.size()] == o);
+    }
+
+    function ledgerPath(id) {
+      return /databases/$(database)/documents/accountTransactions/$(id);
+    }
+
+    function accountPath(id) {
+      return /databases/$(database)/documents/paymentAccounts/$(id);
+    }
+
+    // services.spentAmount / providers.totalPaid: raised only by the request disbursed in
+    // the SAME transaction (named in lastDisbursedRequestId), by exactly its amount, once
+    // ('disbursed' is terminal), and only for a record of the request's company (or a
+    // service shared with it). No role check: the request's own update rule requires the
+    // finance / org admin role of its company in the same commit.
+    function paidByRequest(docId, linkField, counter, sharedOrgIds) {
+      let rid = request.resource.data.get('lastDisbursedRequestId', '');
+      return rid is string && rid != '' &&
+        paidByRequestDoc(get(/databases/$(database)/documents/requests/$(rid)),
+          getAfter(/databases/$(database)/documents/requests/$(rid)), docId, linkField, counter, sharedOrgIds);
+    }
+
+    function paidByRequestDoc(before, after, docId, linkField, counter, sharedOrgIds) {
+      return before != null && after != null &&
+        before.data.get('status', '') != 'disbursed' && after.data.get('status', '') == 'disbursed' &&
+        before.data.get('requestType', 'expense') != 'income' &&
+        before.data.get(linkField, '') == docId &&
+        (before.data.get('orgId', '') == resource.data.get('orgId', '') || before.data.get('orgId', '') in sharedOrgIds) &&
+        before.data.get('amount', null) is number &&
+        near(num(request.resource.data, counter) - num(resource.data, counter), before.data.amount);
+    }
+
+    // A record with money already through it (a used budget, a paid provider) is never
+    // deleted, only deactivated (src/domain/directory.ts → hasFinancialHistory).
+    function counterIsZero(m, f) {
+      return !(m.get(f, 0) is number) || math.abs(m.get(f, 0)) < 0.005;
+    }
+
+    // The holder of a custody may file invoices against it: by UID, or by VERIFIED email
+    // (custodies issued to a member invited by email), and only while still an active
+    // member of its company. Never by name (members can rename themselves).
+    function isCustodyHolder(c) {
+      return (c.get('employeeId', '') == request.auth.uid ||
+          (hasVerifiedEmail() && c.get('employeeEmail', '') == verifiedEmail())) &&
+        (inOrgViaProfile(c.orgId) || inOrgViaMember(c.orgId));
+    }
+
     // Default deny for unhandled collections
     match /{document=**} {
       allow read, write: if false;
@@ -243,12 +333,14 @@ service cloud.firestore {
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(orgId));
       allow create: if isSuperAdmin();
-      allow update: if isSuperAdmin() || (
-        isOrgAdmin(orgId) &&
-        request.resource.data.currency == resource.data.currency &&
-        request.resource.data.id == resource.data.id &&
-        request.resource.data.code == resource.data.code
-      );
+      // An org admin keeps the recipient list (membership changes) and the descriptive
+      // fields; the identity (id, code), the base currency and the archive state are the
+      // platform owner's. A missing field is never an error: diff() compares presence too.
+      allow update: if (
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['notificationRecipients', 'updatedAt', 'name', 'budget', 'description', 'logo']) &&
+        hasOrgRole(orgId, ['org_admin'])
+      ) || isSuperAdmin();
       allow delete: if isSuperAdmin();
     }
 
@@ -306,44 +398,47 @@ service cloud.firestore {
       function sharingUnchangedOrOwn() {
         return request.resource.data.get('orgIds', null) == resource.data.get('orgIds', null) || sharingOwnOnly();
       }
+      function serviceUpdateOk() {
+        let keys = request.resource.data.diff(resource.data).affectedKeys();
+        return keys.hasAny(['spentAmount', 'lastDisbursedRequestId'])
+          // Paying a request adds its amount (requests → disburse, same transaction).
+          ? (keys.hasOnly(['spentAmount', 'updatedAt', 'lastDisbursedRequestId']) &&
+             paidByRequest(serviceId, 'serviceCategoryId', 'spentAmount', resource.data.get('orgIds', [])))
+          // Profile edit / deactivation by the owning company: spending untouched.
+          : (!keys.hasAny(['orgId']) && sharingUnchangedOrOwn() &&
+             hasOrgRole(resource.data.orgId, ['finance', 'org_admin']));
+      }
 
       // Readable in its own company and in every company it is shared with.
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(resource.data.orgId) ||
         inSharedOrgViaProfile(resource.data.get('orgIds', [])));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId) ||
         inSharedOrgViaProfile(resource.data.get('orgIds', [])));
-      allow create: if isSuperAdmin() || (isOrgAdmin(request.resource.data.orgId) && sharingOwnOnly());
-      allow update: if isSuperAdmin() ||
-        // Normal profile update: OrgAdmin / Finance in own org, spentAmount unchanged
-        ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) &&
-          orgUnchanged() && sharingUnchangedOrOwn() &&
-          request.resource.data.spentAmount == resource.data.get('spentAmount', 0)) ||
-        // Disbursement update: paying a request adds to its spending - nothing else, and never downwards.
-        ((isFinance(resource.data.orgId) || hasSharedOrgRole(resource.data.get('orgIds', []), ['finance', 'org_admin'])) &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['spentAmount', 'updatedAt']) &&
-          request.resource.data.spentAmount >= resource.data.get('spentAmount', 0));
-      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+      allow create: if (sharingOwnOnly() && counterIsZero(request.resource.data, 'spentAmount') &&
+        hasOrgRole(request.resource.data.orgId, ['org_admin'])) || isSuperAdmin();
+      allow update: if serviceUpdateOk() || isSuperAdmin();
+      allow delete: if (counterIsZero(resource.data, 'spentAmount') && hasOrgRole(resource.data.orgId, ['org_admin'])) || isSuperAdmin();
     }
 
     // =========================================================================
     // 6. PROVIDERS & VENDORS
     // =========================================================================
     match /providers/{providerId} {
+      function providerUpdateOk() {
+        let keys = request.resource.data.diff(resource.data).affectedKeys();
+        return keys.hasAny(['totalPaid', 'lastDisbursedRequestId'])
+          ? (keys.hasOnly(['totalPaid', 'updatedAt', 'lastDisbursedRequestId']) &&
+             paidByRequest(providerId, 'providerId', 'totalPaid', []))
+          : (!keys.hasAny(['orgId']) && hasOrgRole(resource.data.orgId, ['finance', 'org_admin']));
+      }
+
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
-      // Data entry may add a provider to its own company, always starting with no payments.
-      allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId) ||
-        (isDataEntry(request.resource.data.orgId) && request.resource.data.get('totalPaid', 0) == 0);
-      allow update: if isSuperAdmin() || (
-        (isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && orgUnchanged() && (
-          // Normal profile update: totalPaid is strictly unchanged
-          request.resource.data.totalPaid == resource.data.get('totalPaid', 0) ||
-          // Disbursement update: paying a request adds to totalPaid - nothing else, and never downwards
-          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['totalPaid', 'updatedAt']) &&
-           request.resource.data.totalPaid >= resource.data.get('totalPaid', 0))
-        )
-      );
-      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+      // Org admins and data entry add providers to their own company, always with nothing paid yet.
+      allow create: if (counterIsZero(request.resource.data, 'totalPaid') &&
+        hasOrgRole(request.resource.data.orgId, ['org_admin', 'data_entry'])) || isSuperAdmin();
+      allow update: if providerUpdateOk() || isSuperAdmin();
+      allow delete: if (counterIsZero(resource.data, 'totalPaid') && hasOrgRole(resource.data.orgId, ['org_admin'])) || isSuperAdmin();
     }
 
     // =========================================================================
@@ -363,14 +458,103 @@ service cloud.firestore {
     // =========================================================================
     match /requests/{requestId} {
       function canReadRequest() {
-        return isSuperAdmin() ||
-          isOrgAdmin(resource.data.orgId) ||
-          isFinance(resource.data.orgId) ||
-          resource.data.requesterId == request.auth.uid ||
-          resource.data.requesterEmail == request.auth.token.email;
+        return resource.data.requesterId == request.auth.uid ||
+          resource.data.requesterEmail == request.auth.token.email ||
+          hasOrgRole(resource.data.orgId, ['finance', 'org_admin']) ||
+          isSuperAdmin();
       }
       function isRequester() {
         return resource.data.requesterId == request.auth.uid || resource.data.requesterEmail == request.auth.token.email;
+      }
+
+      // Fields no edit may touch (domain: PROTECTED_FIELDS); status / decision records
+      // change only through their own transition below.
+      function frozenOnEdit() {
+        return ['id', 'requestNumber', 'status', 'orgId', 'requesterId', 'requesterName', 'requesterEmail',
+          'comments', 'disbursement', 'rejectionReason', 'approvedBy', 'approvedAt', 'createdAt', 'operationKey'];
+      }
+      function invoiceOnly(keys) {
+        return keys.hasOnly(['invoiceAttachment', 'attachments', 'timeline', 'updatedAt']);
+      }
+
+      // Same status: the requester's / org admin's edit of a request under review; finance
+      // attaches the invoice; the org admin asks again (clarification_requested); an
+      // approved request takes its invoice (finance / org admin) or an org-admin edit.
+      function editOk(b, a, keys, from, oid) {
+        return appended(b, a, 'timeline') && (
+          (from in ['pending', 'clarification_requested'] && !keys.hasAny(frozenOnEdit()) &&
+            (isRequester() || (invoiceOnly(keys) ? hasOrgRole(oid, ['org_admin', 'finance']) : hasOrgRole(oid, ['org_admin'])))) ||
+          (from == 'clarification_requested' && keys.hasOnly(['comments', 'timeline', 'updatedAt']) &&
+            appended(b, a, 'comments') && hasOrgRole(oid, ['org_admin'])) ||
+          (from == 'approved' && !keys.hasAny(frozenOnEdit()) &&
+            (invoiceOnly(keys) ? hasOrgRole(oid, ['org_admin', 'finance']) : hasOrgRole(oid, ['org_admin'])))
+        );
+      }
+
+      function decisionOk(b, a, keys, from, to, oid) {
+        return appended(b, a, 'timeline') && appended(b, a, 'comments') && (
+          to == 'approved'
+            ? (from in ['pending', 'clarification_requested'] &&
+               keys.hasOnly(['status', 'approvedBy', 'approvedAt', 'comments', 'timeline', 'updatedAt']) &&
+               a.get('approvedBy', '') == request.auth.uid &&
+               hasOrgRole(oid, ['org_admin', 'finance']))
+          : to == 'rejected'
+            ? (from in ['pending', 'clarification_requested', 'approved'] &&
+               keys.hasOnly(['status', 'rejectionReason', 'comments', 'timeline', 'updatedAt']) &&
+               a.get('rejectionReason', '') is string && a.get('rejectionReason', '').size() > 0 &&
+               hasOrgRole(oid, ['org_admin', 'finance']))
+          : to == 'clarification_requested'
+            ? (from == 'pending' &&
+               keys.hasOnly(['status', 'comments', 'timeline', 'updatedAt']) &&
+               hasOrgRole(oid, ['org_admin']))
+          : to == 'pending'
+            ? ((from == 'clarification_requested' &&
+                keys.hasOnly(['status', 'comments', 'timeline', 'attachments', 'updatedAt']) && isRequester()) ||
+               // org admin changed the money of an approved request: back to review
+               (from == 'approved' && keys.hasAny(['amount', 'currency']) &&
+                !keys.hasAny(['id', 'requestNumber', 'orgId', 'requesterId', 'requesterName', 'requesterEmail', 'comments',
+                  'disbursement', 'rejectionReason', 'approvedBy', 'approvedAt', 'createdAt', 'operationKey']) &&
+                hasOrgRole(oid, ['org_admin'])))
+          : false
+        );
+      }
+
+      // approved (or a pending income) -> disbursed, only together with its ledger line
+      // tx-req-<id>, created in this transaction on the account named in the disbursement,
+      // for the request's amount, in the request's direction (see accountTransactions /
+      // paymentAccounts: that line is the account's only movement in this transaction).
+      function disburseOk(b, a, keys, from, oid) {
+        return (from == 'approved' || (from == 'pending' && b.get('requestType', 'expense') == 'income')) &&
+          keys.hasOnly(['status', 'disbursement', 'timeline', 'updatedAt']) &&
+          a.disbursement is map &&
+          appended(b, a, 'timeline') &&
+          disbursementLineOk(getAfter(ledgerPath('tx-req-' + requestId)), a, b, oid) &&
+          hasOrgRole(oid, ['org_admin', 'finance']);
+      }
+      function disbursementLineOk(line, a, b, oid) {
+        return line != null &&
+          line.data.get('referenceId', '') == requestId &&
+          line.data.accountId == a.disbursement.get('accountId', '') &&
+          line.data.type == (b.get('requestType', 'expense') == 'income' ? 'in' : 'out') &&
+          b.get('amount', null) is number && near(line.data.amount, b.amount) &&
+          disbursementAccountOk(getAfter(accountPath(line.data.accountId)), oid);
+      }
+      function disbursementAccountOk(acc, oid) {
+        return acc != null && acc.data.get('orgId', '') == oid &&
+          acc.data.get('lastLedgerId', '') == 'tx-req-' + requestId;
+      }
+
+      function requestUpdateOk() {
+        let b = resource.data;
+        let a = request.resource.data;
+        let keys = a.diff(b).affectedKeys();
+        let from = b.get('status', '');
+        let to = a.get('status', '');
+        return !keys.hasAny(['orgId']) && (
+          to == from ? editOk(b, a, keys, from, b.orgId)
+          : to == 'disbursed' ? disburseOk(b, a, keys, from, b.orgId)
+          : decisionOk(b, a, keys, from, to, b.orgId)
+        );
       }
 
       allow get: if isAuthenticated() && (isMissing() || canReadRequest());
@@ -384,86 +568,8 @@ service cloud.firestore {
         request.resource.data.status == 'pending' &&
         (request.resource.data.requesterId == request.auth.uid || isOrgAdmin(request.resource.data.orgId)));
 
-      function isDraftEdit() {
-        return (isRequester() || isOrgAdmin(resource.data.orgId)) &&
-          resource.data.status in ['pending', 'clarification_requested'] &&
-          request.resource.data.status == resource.data.status &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'id', 'requestNumber', 'status', 'orgId', 'requesterId', 'requesterEmail',
-            'disbursement', 'rejectionReason', 'approvedBy', 'approvedAt', 'createdAt'
-          ]);
-      }
-
-      function isRequesterReply() {
-        return isRequester() &&
-          resource.data.status == 'clarification_requested' &&
-          request.resource.data.status == 'pending' &&
-          request.resource.data.amount == resource.data.amount &&
-          request.resource.data.currency == resource.data.currency &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'id', 'requestNumber', 'orgId', 'requesterId', 'requesterEmail',
-            'amount', 'currency', 'disbursement', 'rejectionReason', 'approvedBy', 'approvedAt', 'createdAt'
-          ]);
-      }
-
-      function isAdminOrFinanceApprove() {
-        return (isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) &&
-          resource.data.status in ['pending', 'clarification_requested'] &&
-          request.resource.data.status == 'approved' &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'id', 'requestNumber', 'orgId', 'requesterId', 'requesterEmail',
-            'amount', 'currency', 'requestType', 'serviceCategoryId', 'providerId',
-            'disbursement', 'rejectionReason', 'createdAt'
-          ]);
-      }
-
-      function isAdminOrFinanceReject() {
-        return (isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) &&
-          resource.data.status in ['pending', 'clarification_requested', 'approved'] &&
-          request.resource.data.status == 'rejected' &&
-          request.resource.data.rejectionReason is string &&
-          request.resource.data.rejectionReason.size() > 0 &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'id', 'requestNumber', 'orgId', 'requesterId', 'requesterEmail',
-            'amount', 'currency', 'requestType', 'disbursement', 'createdAt'
-          ]);
-      }
-
-      function isAdminClarify() {
-        return isOrgAdmin(resource.data.orgId) &&
-          resource.data.status in ['pending', 'clarification_requested'] &&
-          request.resource.data.status == 'clarification_requested' &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'id', 'requestNumber', 'orgId', 'requesterId', 'requesterEmail',
-            'amount', 'currency', 'requestType', 'disbursement', 'createdAt'
-          ]);
-      }
-
-      function isFinanceDisburse() {
-        return isFinance(resource.data.orgId) &&
-          request.resource.data.status == 'disbursed' &&
-          (resource.data.status == 'approved' || (resource.data.requestType == 'income' && resource.data.status == 'pending')) &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'id', 'requestNumber', 'orgId', 'requesterId', 'requesterEmail',
-            'amount', 'currency', 'requestType', 'createdAt'
-          ]) &&
-          request.resource.data.disbursement is map &&
-          existsAfter(/databases/$(database)/documents/accountTransactions/$('tx-req-' + requestId));
-      }
-
       // Update: strictly guarded transitions. 'disbursed' is terminal (money has moved).
-      allow update: if isAuthenticated() && (
-        isSuperAdmin() || (
-          orgUnchanged() && (
-            isDraftEdit() ||
-            isRequesterReply() ||
-            isAdminOrFinanceApprove() ||
-            isAdminOrFinanceReject() ||
-            isAdminClarify() ||
-            isFinanceDisburse()
-          )
-        )
-      );
+      allow update: if isAuthenticated() && (requestUpdateOk() || isSuperAdmin());
 
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
@@ -488,6 +594,11 @@ service cloud.firestore {
     // =========================================================================
     // 9. PAYMENT ACCOUNTS & TREASURY VAULTS
     // =========================================================================
+    // A balance changes ONLY together with the ledger line that explains it: the domain
+    // writes lastLedgerId = the id of the account's one ledger line of the transaction
+    // (createMovementBatch: one line per account per transaction). That line must be NEW
+    // (created in this transaction), name this account, and move it by exactly its amount
+    // (delta of currentBalance and of totalIn / totalOut), from the stored balance.
     match /paymentAccounts/{accountId} {
       // An account with a balance or any history (opening balance, money in or out) is part
       // of the books: it can be deactivated, never deleted (domain: assertPaymentAccountDeletable).
@@ -498,211 +609,277 @@ service cloud.firestore {
           resource.data.get('totalIn', 0) in [0, null] &&
           resource.data.get('totalOut', 0) in [0, null];
       }
-      function isValidAccountCreate() {
-        return isOrgAdmin(request.resource.data.orgId) &&
-          request.resource.data.initialBalance >= 0 &&
-          request.resource.data.currentBalance == request.resource.data.initialBalance &&
-          request.resource.data.balance == request.resource.data.initialBalance &&
-          request.resource.data.totalIn == 0 &&
-          request.resource.data.totalOut == 0;
+
+      // Org admin opens an account: an opening balance only with its opening line tx-open-<id>.
+      function accountCreateOk() {
+        let n = request.resource.data;
+        let ob = n.get('initialBalance', 0);
+        return ob is number && ob >= 0 &&
+          n.get('currentBalance', 0) == ob && n.get('balance', 0) == ob &&
+          n.get('totalIn', 0) == 0 && n.get('totalOut', 0) == 0 &&
+          (ob == 0
+            ? n.get('lastLedgerId', '') == ''
+            : (n.get('lastLedgerId', '') == 'tx-open-' + accountId &&
+               openingLineOk(getAfter(ledgerPath('tx-open-' + accountId)), ob))) &&
+          (n.get('parentAccountId', '') == '' ||
+            (n.get('type', '') == 'instapay' && n.parentAccountId != accountId &&
+             getAfter(accountPath(n.parentAccountId)).data.get('orgId', '') == n.orgId)) &&
+          hasOrgRole(n.orgId, ['org_admin']);
+      }
+      function openingLineOk(line, ob) {
+        return line != null && line.data.accountId == accountId && line.data.type == 'in' &&
+          line.data.get('referenceType', '') == 'initial' && near(line.data.amount, ob);
       }
 
-      function isPaymentAccountProfileUpdate() {
-        return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'name', 'accountIdentifier', 'type', 'description', 'color', 'icon',
-          'active', 'updatedAt', 'parentAccountId', 'parentAccountName', 'operationKey'
-        ]) &&
-        request.resource.data.currentBalance == resource.data.currentBalance &&
-        request.resource.data.balance == resource.data.balance &&
-        request.resource.data.initialBalance == resource.data.initialBalance &&
-        request.resource.data.totalIn == resource.data.totalIn &&
-        request.resource.data.totalOut == resource.data.totalOut &&
-        request.resource.data.currency == resource.data.currency;
+      function accountUpdateOk() {
+        let b = resource.data;
+        let a = request.resource.data;
+        let keys = a.diff(b).affectedKeys();
+        return keys.hasAny(['currentBalance', 'balance', 'totalIn', 'totalOut', 'lastLedgerId'])
+          ? balanceMoveOk(b, a, keys)
+          : profileUpdateOk(b, a, keys);
       }
 
-      function isPaymentAccountBalanceUpdate() {
-        return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'currentBalance', 'balance', 'totalIn', 'totalOut', 'updatedAt'
-        ]) &&
-        request.resource.data.currency == resource.data.currency &&
-        request.resource.data.initialBalance == resource.data.initialBalance &&
-        request.resource.data.accountIdentifier == resource.data.accountIdentifier &&
-        request.resource.data.type == resource.data.type &&
-        request.resource.data.currentBalance == request.resource.data.balance &&
-        request.resource.data.currentBalance >= 0 &&
-        request.resource.data.totalIn >= resource.data.get('totalIn', 0) &&
-        request.resource.data.totalOut >= resource.data.get('totalOut', 0) &&
-        request.resource.data.currentBalance == resource.data.get('initialBalance', 0) + request.resource.data.totalIn - request.resource.data.totalOut;
+      function balanceMoveOk(b, a, keys) {
+        let lid = a.get('lastLedgerId', '');
+        return keys.hasOnly(['currentBalance', 'balance', 'totalIn', 'totalOut', 'updatedAt', 'lastLedgerId']) &&
+          lid is string && lid != '' && lid != b.get('lastLedgerId', '') &&
+          a.get('currentBalance', null) is number && a.get('balance', null) == a.currentBalance &&
+          !exists(ledgerPath(lid)) &&
+          lineMovesAccount(getAfter(ledgerPath(lid)).data, b, a) &&
+          hasOrgRole(b.orgId, ['finance', 'org_admin']);
+      }
+
+      // l: the line (a missing line makes .data an error, i.e. a refusal).
+      function lineMovesAccount(l, b, a) {
+        let before = balanceOf(b);
+        let signed = l.type == 'in' ? l.amount : -l.amount;   // +amount for 'in', -amount for 'out'
+        return l.accountId == accountId && l.type in ['in', 'out'] &&
+          l.amount is number && l.amount > 0 &&
+          near(l.get('balanceBefore', null), before) &&
+          near(l.get('balanceAfter', null), a.currentBalance) &&
+          near(a.currentBalance - before, signed) &&
+          near(num(a, 'totalIn') - num(b, 'totalIn'), signed > 0 ? signed : 0) &&
+          near(num(a, 'totalOut') - num(b, 'totalOut'), signed < 0 ? -signed : 0) &&
+          // No movement creates or deepens an overdraft (an 'in' always reduces one);
+          // the only exception is the bank correction of detachLegacyWallet.
+          (signed > 0 || a.currentBalance >= 0 || detachCorrection(l));
+      }
+
+      // detachLegacyWallet: the owner-confirmed correction booked on the bank, in the same
+      // transaction that unlinks the wallet (which only an org admin may do, see linkOk).
+      function detachCorrection(l) {
+        return l.get('referenceType', '') == 'manual_adjustment' &&
+          l.get('referenceId', '') is string && l.get('referenceId', '') != '' && l.referenceId != accountId &&
+          get(accountPath(l.referenceId)).data.get('parentAccountId', '') == accountId &&
+          getAfter(accountPath(l.referenceId)).data.get('parentAccountId', '') == '';
+      }
+
+      function profileUpdateOk(b, a, keys) {
+        return keys.hasOnly(['name', 'accountIdentifier', 'type', 'bankName', 'currency', 'description', 'color', 'icon',
+            'active', 'updatedAt', 'parentAccountId', 'parentAccountName']) &&
+          // The currency of an account with history is fixed (a missing one reads as EGP).
+          (!keys.hasAny(['currency']) || a.get('currency', 'EGP') == b.get('currency', 'EGP') || hasNoHistory()) &&
+          linkOk(b, a, keys) &&
+          hasOrgRole(b.orgId, ['finance', 'org_admin']);
+      }
+
+      // Bank links (domain: updatePaymentAccount / detachLegacyWallet). Only an InstaPay is
+      // (re)linked, to an account of its own company; an InstaPay may be unlinked; a
+      // still-linked account keeps a mirroring type; a legacy linked wallet is only ever
+      // detached (link removed, type kept), by the org admin.
+      function linkOk(b, a, keys) {
+        let p = a.get('parentAccountId', '');
+        let bp = b.get('parentAccountId', '');
+        let t = a.get('type', '');
+        return !keys.hasAny(['parentAccountId', 'parentAccountName', 'type']) || (
+          (b.get('type', '') == 'wallet' && bp != '' && bp != accountId)
+            ? (p == '' && t == 'wallet' && hasOrgRole(b.orgId, ['org_admin']))
+            : keys.hasAny(['parentAccountId'])
+              ? (p == '' || p == accountId ||
+                 (t == 'instapay' && getAfter(accountPath(p)).data.get('orgId', '') == b.orgId))
+              : (p == '' || p == accountId || t in ['instapay', 'wallet'])
+        );
       }
 
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isFinance(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId));
-      allow create: if isSuperAdmin() || isValidAccountCreate();
-      allow update: if isSuperAdmin() || (
-        isFinance(resource.data.orgId) && orgUnchanged() && (
-          isPaymentAccountProfileUpdate() ||
-          isPaymentAccountBalanceUpdate()
-        )
-      );
-      allow delete: if hasNoHistory() && (isSuperAdmin() || isOrgAdmin(resource.data.orgId));
+      allow create: if accountCreateOk() || isSuperAdmin();
+      allow update: if accountUpdateOk() || isSuperAdmin();
+      allow delete: if hasNoHistory() && (hasOrgRole(resource.data.orgId, ['org_admin']) || isSuperAdmin());
     }
 
     // =========================================================================
     // 10. ACCOUNT TRANSACTIONS (Financial Ledger - Immutable)
     // =========================================================================
+    // A line is created only as the movement of its account in the same transaction: the
+    // account's lastLedgerId becomes this line (the account's rule then checks the amounts),
+    // so a line can neither be invented nor applied twice, and an account takes one line
+    // per transaction. No role check here: the account's own update / create rule has it.
     match /accountTransactions/{txId} {
+      function ledgerCreateOk() {
+        let n = request.resource.data;
+        return n.get('id', txId) == txId &&
+          n.get('actorId', '') == request.auth.uid &&                // attributed to the caller (domain: actor.id)
+          n.get('accountId', '') is string && n.get('accountId', '') != '' &&
+          lineIsAccountMove(get(accountPath(n.accountId)), getAfter(accountPath(n.accountId)), n);
+      }
+      function lineIsAccountMove(before, after, n) {
+        return after != null &&
+          after.data.get('lastLedgerId', '') == txId &&
+          after.data.get('orgId', '') == n.get('orgId', '') &&
+          (before == null
+            ? txId == 'tx-open-' + n.accountId                       // opening line of a new account
+            : before.data.get('lastLedgerId', '') != txId);
+      }
+
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isFinance(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId));
-      allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
+      allow create: if ledgerCreateOk() || isSuperAdmin();
       allow update, delete: if isSuperAdmin(); // Financial ledgers cannot be modified by standard users
     }
 
     // =========================================================================
     // 11. PETTY CASH & CUSTODIES
     // =========================================================================
+    // Every change of a custody's totals is one of the domain's operations, bound in the
+    // same transaction to what explains it:
+    //   issue      (create)   lastLedgerId -> 'custody' 'out' line of totalAmount
+    //   settle               lastSettlementId -> the NEW settlement of exactly the debit
+    //   replenish            lastLedgerId -> NEW 'custody' 'out' line of the top-up
+    //   return               lastLedgerId -> NEW 'custody_return' 'in' line of the remainder
+    // Nothing else about a custody is ever edited (holder, currency, source, number).
     match /custodies/{custodyId} {
       function canReadCustody() {
-        return isSuperAdmin() ||
-          isFinance(resource.data.orgId) ||
-          resource.data.employeeId == request.auth.uid ||
-          (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
-          (isOrgMember(resource.data.orgId) &&
-           exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
-           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName);
+        return resource.data.employeeId == request.auth.uid ||
+          (hasVerifiedEmail() && resource.data.employeeEmail == verifiedEmail()) ||
+          hasOrgRole(resource.data.orgId, ['finance', 'org_admin']) ||
+          isSuperAdmin();
       }
-      function custodyInvariantsHold() {
-        return orgUnchanged() &&
-          request.resource.data.employeeId == resource.data.employeeId &&
-          request.resource.data.get('currency', null) == resource.data.get('currency', null) &&
-          request.resource.data.get('sourceAccountId', null) == resource.data.get('sourceAccountId', null) &&
-          request.resource.data.get('custodyNumber', null) == resource.data.get('custodyNumber', null) &&
-          request.resource.data.remainingAmount >= 0 &&
-          request.resource.data.settledAmount >= resource.data.settledAmount &&
-          request.resource.data.totalAmount >= resource.data.totalAmount &&
-          request.resource.data.get('returnedAmount', 0) >= resource.data.get('returnedAmount', 0) &&
-          request.resource.data.totalAmount == request.resource.data.remainingAmount + request.resource.data.settledAmount + request.resource.data.get('returnedAmount', 0) &&
-          ((request.resource.data.remainingAmount == 0 && request.resource.data.status in ['settled', 'returned']) ||
-           (request.resource.data.remainingAmount != 0 && request.resource.data.status == resource.data.status));
+
+      function issueOk() {
+        let n = request.resource.data;
+        let lid = n.get('lastLedgerId', '');
+        return lid is string && lid != '' &&
+          n.get('totalAmount', null) is number && n.totalAmount > 0 &&
+          n.get('remainingAmount', null) == n.totalAmount &&
+          n.get('settledAmount', 0) == 0 && n.get('returnedAmount', 0) == 0 &&
+          n.get('status', '') == 'active' && n.get('lastSettlementId', '') == '' &&
+          issueLineOk(getAfter(ledgerPath(lid)), n) &&
+          hasOrgRole(n.orgId, ['finance', 'org_admin']);
       }
-      function isEmployeeSettler() {
-        return (
-          resource.data.employeeId == request.auth.uid ||
-          (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
-          (isOrgMember(resource.data.orgId) &&
-           exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
-           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName)
-        );
+      function issueLineOk(line, n) {
+        return line != null &&
+          line.data.get('referenceType', '') == 'custody' && line.data.get('referenceId', '') == custodyId &&
+          line.data.type == 'out' && near(line.data.amount, n.totalAmount) &&
+          line.data.accountId == n.get('sourceAccountId', '') && line.data.get('orgId', '') == n.orgId;
       }
+
+      function custodyUpdateOk() {
+        let b = resource.data;
+        let a = request.resource.data;
+        let keys = a.diff(b).affectedKeys();
+        return keys.hasAny(['lastSettlementId'])
+          ? settleOk(b, a, keys)
+          : keys.hasAny(['returnedAmount'])
+            ? returnOk(b, a, keys)
+            : replenishOk(b, a, keys);
+      }
+
+      function settleOk(b, a, keys) {
+        let sid = a.get('lastSettlementId', '');
+        let d = num(a, 'settledAmount') - num(b, 'settledAmount');
+        return keys.hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt', 'lastSettlementId']) &&
+          sid is string && sid != '' && d > 0 &&
+          a.get('remainingAmount', null) is number && a.remainingAmount >= 0 &&
+          near(num(b, 'remainingAmount') - a.remainingAmount, d) &&
+          a.get('status', null) == (a.remainingAmount == 0 ? 'settled' : b.get('status', null)) &&
+          !exists(/databases/$(database)/documents/custodySettlements/$(sid)) &&
+          settlementOk(getAfter(/databases/$(database)/documents/custodySettlements/$(sid)), d) &&
+          (isCustodyHolder(b) || hasOrgRole(b.orgId, ['finance', 'org_admin']));
+      }
+      function settlementOk(s, d) {
+        return s != null && s.data.get('custodyId', '') == custodyId &&
+          s.data.get('amount', null) is number && near(s.data.amount, d);
+      }
+
+      function replenishOk(b, a, keys) {
+        let lid = a.get('lastLedgerId', '');
+        let d = num(a, 'totalAmount') - num(b, 'totalAmount');
+        return keys.hasOnly(['totalAmount', 'remainingAmount', 'status', 'notes', 'updatedAt', 'lastLedgerId']) &&
+          lid is string && lid != '' && d > 0 &&
+          near(num(a, 'remainingAmount') - num(b, 'remainingAmount'), d) &&
+          a.get('status', '') == 'active' &&
+          !exists(ledgerPath(lid)) &&
+          custodyLineOk(getAfter(ledgerPath(lid)), 'custody', 'out', d) &&
+          hasOrgRole(b.orgId, ['finance', 'org_admin']);
+      }
+
+      function returnOk(b, a, keys) {
+        let lid = a.get('lastLedgerId', '');
+        let r = num(b, 'remainingAmount');
+        return keys.hasOnly(['remainingAmount', 'returnedAmount', 'status', 'settledAt', 'returnedAt',
+            'returnedToAccountId', 'returnedToAccountName', 'updatedAt', 'lastLedgerId']) &&
+          lid is string && lid != '' && r > 0 &&
+          a.get('remainingAmount', null) == 0 && a.get('status', '') == 'settled' &&
+          near(num(a, 'returnedAmount') - num(b, 'returnedAmount'), r) &&
+          !exists(ledgerPath(lid)) &&
+          custodyLineOk(getAfter(ledgerPath(lid)), 'custody_return', 'in', r) &&
+          getAfter(ledgerPath(lid)).data.accountId == a.get('returnedToAccountId', '') &&
+          hasOrgRole(b.orgId, ['finance', 'org_admin']);
+      }
+
+      function custodyLineOk(line, refType, type, amount) {
+        return line != null &&
+          line.data.get('referenceType', '') == refType && line.data.get('referenceId', '') == custodyId &&
+          line.data.type == type && near(line.data.amount, amount);
+      }
+
       allow get: if isAuthenticated() && (isMissing() || canReadCustody());
       allow list: if isAuthenticated() && canReadCustody();
-      allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || (
-        custodyInvariantsHold() && (
-          isFinance(resource.data.orgId) || (
-            isEmployeeSettler() &&
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt']) &&
-            request.resource.data.totalAmount == resource.data.totalAmount &&
-            request.resource.data.remainingAmount <= resource.data.remainingAmount
-          )
-        )
-      );
+      allow create: if issueOk() || isSuperAdmin();
+      allow update: if custodyUpdateOk() || isSuperAdmin();
       allow delete: if isSuperAdmin();
     }
 
+    // No code has written this collection since 33560bb (custodies replaced it): read-only.
     match /pettyCashCustodies/{custodyId} {
-      function canReadPettyCashCustody() {
-        return isSuperAdmin() ||
-          isFinance(resource.data.orgId) ||
-          resource.data.employeeId == request.auth.uid ||
-          (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
-          (isOrgMember(resource.data.orgId) &&
-           exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
-           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName);
-      }
-      function custodyInvariantsHold() {
-        return orgUnchanged() &&
-          request.resource.data.employeeId == resource.data.employeeId &&
-          request.resource.data.get('currency', null) == resource.data.get('currency', null) &&
-          request.resource.data.get('sourceAccountId', null) == resource.data.get('sourceAccountId', null) &&
-          request.resource.data.get('custodyNumber', null) == resource.data.get('custodyNumber', null) &&
-          request.resource.data.remainingAmount >= 0 &&
-          request.resource.data.settledAmount >= resource.data.settledAmount &&
-          request.resource.data.totalAmount >= resource.data.totalAmount &&
-          request.resource.data.get('returnedAmount', 0) >= resource.data.get('returnedAmount', 0) &&
-          request.resource.data.totalAmount == request.resource.data.remainingAmount + request.resource.data.settledAmount + request.resource.data.get('returnedAmount', 0) &&
-          ((request.resource.data.remainingAmount == 0 && request.resource.data.status in ['settled', 'returned']) ||
-           (request.resource.data.remainingAmount != 0 && request.resource.data.status == resource.data.status));
-      }
-      function isEmployeeSettler() {
-        return (
-          resource.data.employeeId == request.auth.uid ||
-          (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
-          (isOrgMember(resource.data.orgId) &&
-           exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
-           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName)
-        );
-      }
-      allow read: if isAuthenticated() && canReadPettyCashCustody();
-      allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || (
-        custodyInvariantsHold() && (
-          isFinance(resource.data.orgId) || (
-            isEmployeeSettler() &&
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt']) &&
-            request.resource.data.totalAmount == resource.data.totalAmount &&
-            request.resource.data.remainingAmount <= resource.data.remainingAmount
-          )
-        )
+      allow read: if isAuthenticated() && (
+        resource.data.employeeId == request.auth.uid ||
+        (hasVerifiedEmail() && resource.data.employeeEmail == verifiedEmail()) ||
+        hasOrgRole(resource.data.orgId, ['finance', 'org_admin']) ||
+        isSuperAdmin()
       );
-      allow delete: if isSuperAdmin();
+      allow write: if isSuperAdmin();
     }
 
     match /custodySettlements/{settlementId} {
       function canReadSettlement() {
-        return isSuperAdmin() ||
-          isFinance(resource.data.orgId) ||
-          resource.data.employeeId == request.auth.uid ||
-          (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
-          (isOrgMember(resource.data.orgId) &&
-           exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
-           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName);
+        return resource.data.employeeId == request.auth.uid ||
+          (hasVerifiedEmail() && resource.data.employeeEmail == verifiedEmail()) ||
+          hasOrgRole(resource.data.orgId, ['finance', 'org_admin']) ||
+          isSuperAdmin();
       }
-      function targetCustody(id) {
-        return get(/databases/$(database)/documents/custodies/$(id)).data;
+      // An invoice is filed only together with the custody debit it represents: the
+      // custody's lastSettlementId becomes this settlement in the same transaction (the
+      // custody's rule checks the amounts), by the custody's holder or its company's finance.
+      function settlementCreateOk() {
+        let n = request.resource.data;
+        return n.get('custodyId', '') is string && n.get('custodyId', '') != '' &&
+          n.get('amount', null) is number && n.amount > 0 &&
+          debitedCustodyOk(getAfter(/databases/$(database)/documents/custodies/$(n.custodyId)), n);
       }
-      function isValidCustodyTarget(custodyId) {
-        return custodyId is string &&
-          exists(/databases/$(database)/documents/custodies/$(custodyId)) &&
-          targetCustody(custodyId).orgId == request.resource.data.orgId &&
-          request.resource.data.amount > 0 &&
-          request.resource.data.amount <= targetCustody(custodyId).remainingAmount;
-      }
-      function isEmployeeSettlement(custodyId) {
-        let custody = targetCustody(custodyId);
-        return isOrgMember(request.resource.data.orgId) && (
-          request.resource.data.employeeId == request.auth.uid ||
-          (request.resource.data.get('employeeEmail', '') != '' && request.resource.data.employeeEmail == request.auth.token.email) ||
-          request.resource.data.employeeId == custody.employeeId
-        ) && (
-          custody.employeeId == request.auth.uid ||
-          (custody.get('employeeEmail', '') != '' && custody.employeeEmail == request.auth.token.email) ||
-          (exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + request.resource.data.orgId)) &&
-           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + request.resource.data.orgId)).data.userName == custody.employeeName)
-        );
+      function debitedCustodyOk(c, n) {
+        return c != null &&
+          c.data.get('lastSettlementId', '') == settlementId &&
+          c.data.get('orgId', '') == n.get('orgId', '') &&
+          n.get('employeeId', '') == c.data.get('employeeId', '') &&
+          (isCustodyHolder(c.data) || hasOrgRole(n.orgId, ['finance', 'org_admin']));
       }
 
       allow get: if isAuthenticated() && (isMissing() || canReadSettlement());
       allow list: if isAuthenticated() && canReadSettlement();
-      // An employee may only file an invoice against THEIR OWN custody, in its company.
-      // Finance creating requires the target custody to exist, match org, and amount <= remaining.
-      allow create: if isAuthenticated() && (
-        isSuperAdmin() || (
-          isValidCustodyTarget(request.resource.data.custodyId) && (
-            isFinance(request.resource.data.orgId) ||
-            isEmployeeSettlement(request.resource.data.custodyId)
-          )
-        )
-      );
+      allow create: if isAuthenticated() && (settlementCreateOk() || isSuperAdmin());
       allow update, delete: if isSuperAdmin();
     }
 
@@ -727,31 +904,18 @@ service cloud.firestore {
     //     Can only ever move forward by exactly one → numbers are never reissued.
     // =========================================================================
     match /counters/{counterId} {
+      function mayAdvance() {
+        return (counterId.matches('^(custodies|transfers)-[0-9]{4}$') && get(profilePath()) != null && (
+            get(profilePath()).data.get('role', '') in ['finance', 'org_admin'] ||
+            hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])
+          )) ||
+          (counterId.matches('^(requests|visa)-[0-9]{4}$') && get(profilePath()) != null &&
+            get(profilePath()).data.get('active', true) != false && get(profilePath()).data.get('orgId', '') != '') ||
+          isSuperAdmin();
+      }
       allow get: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.value == 1 && (
-        isSuperAdmin() ||
-        (counterId.matches('^(custodies|transfers)-[0-9]{4}$') && (
-          exists(profilePath()) && (
-            get(profilePath()).data.get('role', '') in ['finance', 'org_admin'] ||
-            hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])
-          )
-        )) ||
-        (counterId.matches('^(requests|visa)-[0-9]{4}$') && (
-          exists(profilePath()) && get(profilePath()).data.get('active', true) != false && get(profilePath()).data.get('orgId', '') != ''
-        ))
-      );
-      allow update: if isAuthenticated() && request.resource.data.value == resource.data.value + 1 && (
-        isSuperAdmin() ||
-        (counterId.matches('^(custodies|transfers)-[0-9]{4}$') && (
-          exists(profilePath()) && (
-            get(profilePath()).data.get('role', '') in ['finance', 'org_admin'] ||
-            hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])
-          )
-        )) ||
-        (counterId.matches('^(requests|visa)-[0-9]{4}$') && (
-          exists(profilePath()) && get(profilePath()).data.get('active', true) != false && get(profilePath()).data.get('orgId', '') != ''
-        ))
-      );
+      allow create: if isAuthenticated() && request.resource.data.value == 1 && mayAdvance();
+      allow update: if isAuthenticated() && request.resource.data.value == resource.data.value + 1 && mayAdvance();
       allow delete: if false;
     }
 
@@ -767,6 +931,45 @@ service cloud.firestore {
       function inKeyCompany() {
         return keyId.split('__').size() >= 2 && keyOrgId() != '-' && isOrgMember(keyOrgId());
       }
+      // The record field a scope's key is claimed for (src/domain: normalizeKeyValue of it).
+      function keyField(scope) {
+        return scope == 'account_identifier' ? 'accountIdentifier'
+          : scope == 'service_code' ? 'code'
+          : scope == 'member_email' ? 'userEmail'
+          : 'name';
+      }
+      function keyCollection(scope) {
+        return scope == 'account_identifier' ? 'paymentAccounts'
+          : scope == 'service_code' ? 'services'
+          : scope == 'provider_name' ? 'providers'
+          : scope == 'department_name' ? 'departments'
+          : 'members';
+      }
+      // normalizeKeyValue (src/domain/common.ts) for the values the app stores.
+      function keyNorm(v) {
+        return v is string ? v.lower().replace('[\\s\\-_.]+', '') : '';
+      }
+      // A record changes the value its key holds (account number, provider name, service
+      // code, department name, member email): the old key is released in the same
+      // transaction. Allowed when the record named by the key changes that field in this
+      // very write and no longer holds the value (or moved to another company); the
+      // record's own rule decides who may make that change.
+      function releasedByChange() {
+        let k = resource.data;
+        let scope = k.get('scope', '');
+        return scope in ['account_identifier', 'service_code', 'provider_name', 'department_name', 'member_email'] &&
+          k.get('orgId', '-') != '-' &&
+          k.get('entityCollection', '') == keyCollection(scope) &&
+          k.get('entityId', '') is string && k.get('entityId', '') != '' &&
+          valueLeftRecord(get(/databases/$(database)/documents/$(keyCollection(scope))/$(k.entityId)),
+            getAfter(/databases/$(database)/documents/$(keyCollection(scope))/$(k.entityId)), keyField(scope), k);
+      }
+      function valueLeftRecord(before, after, f, k) {
+        return before != null && after != null &&
+          before.data.get(f, null) != after.data.get(f, null) &&
+          (keyNorm(after.data.get(f, '')) != k.get('value', '') || after.data.get('orgId', '') != k.orgId);
+      }
+
       // A key names a record of its company (e.g. a member's email and id). Readable by that
       // company's members only, whether it exists or not: an answer that differed between a
       // missing and an existing key would tell anyone which emails, providers or account
@@ -778,14 +981,16 @@ service cloud.firestore {
       );
       allow update: if false;
       allow delete: if isAuthenticated() && (
-        isSuperAdmin() || (
+        releasedByChange() ||
+        (
           resource.data.orgId != '-' &&
-          isOrgAdmin(resource.data.orgId) &&
           resource.data.entityCollection is string &&
           resource.data.entityId is string &&
           // existsAfter: the record and its key are removed in the same batch / transaction.
-          !existsAfter(/databases/$(database)/documents/$(resource.data.entityCollection)/$(resource.data.entityId))
-        )
+          !existsAfter(/databases/$(database)/documents/$(resource.data.entityCollection)/$(resource.data.entityId)) &&
+          isOrgAdmin(resource.data.orgId)
+        ) ||
+        isSuperAdmin()
       );
     }
 
