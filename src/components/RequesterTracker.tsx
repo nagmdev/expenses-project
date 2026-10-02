@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { 
   Clock, 
@@ -31,6 +31,7 @@ import {
   paymentMethodLabel,
   resolveRequestPaymentMethod,
 } from '../utils/requestUi';
+import { aggregateMetricsByCurrency } from '../domain/analytics';
 
 interface RequesterTrackerProps {
   onOpenNewRequest: () => void;
@@ -117,16 +118,23 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
     });
   };
 
-  // Financial Metrics for Employee
-  const totalDisbursed = myRequests
-    .filter(r => r.status === 'disbursed')
-    .reduce((sum, r) => sum + r.amount, 0);
+  // Financial Metrics for Employee (Strict multi-currency isolation)
+  const baseCurrency = activeOrg?.currency || myRequests[0]?.currency || 'EGP';
+  const metricsByCurrency = useMemo(() => {
+    return aggregateMetricsByCurrency({
+      requests: myRequests,
+      settlements: [],
+      custodies: [],
+      baseCurrency,
+    });
+  }, [myRequests, baseCurrency]);
 
-  const totalPending = myRequests
-    .filter(r => r.status === 'pending' || r.status === 'approved' || r.status === 'clarification_requested')
-    .reduce((sum, r) => sum + r.amount, 0);
+  const primaryMetrics = metricsByCurrency[0];
+  const secondaryMetrics = metricsByCurrency.slice(1);
+  const currency = primaryMetrics?.currency || 'EGP';
 
-  const currency = activeOrg?.currency || myRequests[0]?.currency || 'EGP';
+  const totalDisbursed = primaryMetrics.disbursedRequests;
+  const totalPending = primaryMetrics.pendingRequests + primaryMetrics.approvedRequests;
 
   const getStatusBadge = (status: ExpenseRequest['status']) => {
     switch (status) {
@@ -245,6 +253,11 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
               <span>{fmtMoney(totalDisbursed)}</span>
               <span className="text-xs text-slate-400 font-semibold">{currency}</span>
             </div>
+            {secondaryMetrics.map(sm => sm.disbursedRequests > 0 && (
+              <div key={sm.currency} className="text-xs font-bold text-emerald-300 mt-0.5">
+                + {fmtMoney(sm.disbursedRequests)} {sm.currency}
+              </div>
+            ))}
           </div>
 
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
@@ -253,6 +266,11 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
               <span>{fmtMoney(totalPending)}</span>
               <span className="text-xs text-slate-400 font-semibold">{currency}</span>
             </div>
+            {secondaryMetrics.map(sm => (sm.pendingRequests + sm.approvedRequests) > 0 && (
+              <div key={sm.currency} className="text-xs font-bold text-amber-300 mt-0.5">
+                + {fmtMoney(sm.pendingRequests + sm.approvedRequests)} {sm.currency}
+              </div>
+            ))}
           </div>
 
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
@@ -261,6 +279,11 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
               <span>{myRequests.length}</span>
               <span className="text-xs text-slate-400 font-semibold">مطالبة</span>
             </div>
+            {secondaryMetrics.map(sm => sm.totalRequestsAmount > 0 && (
+              <div key={sm.currency} className="text-xs font-bold text-slate-300 mt-0.5">
+                + {fmtMoney(sm.totalRequestsAmount)} {sm.currency}
+              </div>
+            ))}
           </div>
         </div>
       </div>

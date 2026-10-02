@@ -120,12 +120,46 @@ describe('Multi-Currency Financial Isolation Matrix', () => {
       approvedCount: 0,
       pendingRequests: 0,
       pendingCount: 0,
+      totalRequestsAmount: 0,
+      totalRequestsCount: 0,
       custodiesIssued: 0,
       custodiesInHand: 0,
       custodiesSettled: 0,
       custodiesReturned: 0,
       activeCustodiesCount: 0,
     });
+  });
+
+  it('accurately aggregates totalRequestsAmount, totalRequestsCount, and clarification_requested requests', () => {
+    const requests = [
+      { status: 'disbursed', amount: 1500, currency: 'EGP' },
+      { status: 'approved', amount: 2500, currency: 'EGP' },
+      { status: 'pending', amount: 500, currency: 'EGP' },
+      { status: 'clarification_requested', amount: 750, currency: 'EGP' },
+      { status: 'rejected', amount: 300, currency: 'EGP' },
+      { status: 'pending', amount: 100, currency: 'USD' },
+    ];
+
+    const metrics = aggregateMetricsByCurrency({
+      requests,
+      settlements: [],
+      custodies: [],
+      baseCurrency: 'EGP',
+    });
+
+    const egp = metrics.find(m => m.currency === 'EGP')!;
+    // Total amount across all 5 EGP requests
+    expect(egp.totalRequestsAmount).toBe(1500 + 2500 + 500 + 750 + 300);
+    expect(egp.totalRequestsCount).toBe(5);
+    // Pending requests includes both pending (500) and clarification_requested (750)
+    expect(egp.pendingRequests).toBe(1250);
+    expect(egp.pendingCount).toBe(2);
+
+    const usd = metrics.find(m => m.currency === 'USD')!;
+    expect(usd.totalRequestsAmount).toBe(100);
+    expect(usd.totalRequestsCount).toBe(1);
+    expect(usd.pendingRequests).toBe(100);
+    expect(usd.pendingCount).toBe(1);
   });
 
   it('accurately groups custodies by currency with closed/settled status', () => {

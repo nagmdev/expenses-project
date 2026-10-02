@@ -55,6 +55,7 @@ import {
   pickDisbursementAccount,
   resolveRequestPaymentMethod,
 } from '../utils/requestUi';
+import { aggregateMetricsByCurrency } from '../domain/analytics';
 
 const errorText = (err: unknown, fallback: string) =>
   err instanceof Error && err.message ? err.message : fallback;
@@ -420,17 +421,28 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
   // cover every expense in it (no account ever goes below zero).
   const batchOrgIds = new Set(selectedBatchRequests.map(r => r.orgId));
   const batchCurrencies = new Set(selectedBatchRequests.map(r => currencyCode(r.currency)));
+  const singleBatchCurrency = batchCurrencies.size === 1 ? Array.from(batchCurrencies)[0] : null;
   const batchAccounts = paymentAccounts.filter(
     a =>
       a.active !== false &&
       (batchOrgIds.size !== 1 || !a.orgId || batchOrgIds.has(a.orgId)) &&
-      (batchCurrencies.size !== 1 || batchCurrencies.has(currencyCode(a.currency))),
+      (singleBatchCurrency !== null && currencyCode(a.currency) === singleBatchCurrency),
   );
   const batchAccount = batchAccounts.find(a => a.id === batchAccountId) || batchAccounts[0] || null;
   const batchOutSum = selectedBatchRequests.filter(r => r.requestType !== 'income').reduce((sum, r) => sum + r.amount, 0);
-  const batchShortfall = batchAccount
-    ? insufficientBalanceMessage(batchAccount, resolveParentBankAccount(batchAccount), batchOutSum)
-    : null;
+  const batchShortfall = useMemo(() => {
+    if (selectedBatchRequests.length === 0) return null;
+    if (batchCurrencies.size > 1) {
+      return `لا يمكن صرف دفعة مجمعة بعملات متعددة معاً (${Array.from(batchCurrencies).join('، ')}). يرجى تصفية واختيار طلبات بعملة موحدة.`;
+    }
+    if (batchOrgIds.size > 1) {
+      return 'لا يمكن صرف دفعة مجمعة لشركات متعددة من حساب واحد. يرجى تصفية الطلبات لشركة واحدة.';
+    }
+    if (!batchAccount) {
+      return `لا يوجد حساب خزينة نشط متاح لعملة الطلبات (${singleBatchCurrency || ''}).`;
+    }
+    return insufficientBalanceMessage(batchAccount, resolveParentBankAccount(batchAccount), batchOutSum);
+  }, [selectedBatchRequests, batchCurrencies, batchOrgIds, batchAccount, batchOutSum, singleBatchCurrency]);
 
   const toggleSelectApproved = (id: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -775,20 +787,27 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
     if (!batchGuard.pending) setIsBatchModalOpen(false);
   });
 
-  // Financial KPIs Calculations
-  const totalAmount = targetRequests.reduce((sum, r) => sum + r.amount, 0);
-  const totalDisbursed = targetRequests
-    .filter(r => r.status === 'disbursed')
-    .reduce((sum, r) => sum + r.amount, 0);
-  const totalApproved = targetRequests
-    .filter(r => r.status === 'approved')
-    .reduce((sum, r) => sum + r.amount, 0);
-  const totalPending = targetRequests
-    .filter(r => r.status === 'pending' || r.status === 'clarification_requested')
-    .reduce((sum, r) => sum + r.amount, 0);
+  // Financial KPIs Calculations (Strict multi-currency isolation)
+  const baseCurrency = activeOrg?.currency || targetRequests[0]?.currency || 'EGP';
+  const metricsByCurrency = useMemo(() => {
+    return aggregateMetricsByCurrency({
+      requests: targetRequests,
+      settlements: [],
+      custodies: [],
+      baseCurrency,
+    });
+  }, [targetRequests, baseCurrency]);
+
+  const primaryMetrics = metricsByCurrency[0];
+  const secondaryMetrics = metricsByCurrency.slice(1);
+  const currency = primaryMetrics?.currency || 'EGP';
+
+  const totalAmount = primaryMetrics.totalRequestsAmount;
+  const totalDisbursed = primaryMetrics.disbursedRequests;
+  const totalApproved = primaryMetrics.approvedRequests;
+  const totalPending = primaryMetrics.pendingRequests;
 
   const approvedToDisburseCount = targetRequests.filter(r => r.status === 'approved').length;
-  const currency = activeOrg?.currency || targetRequests[0]?.currency || 'EGP';
 
   const getStatusBadge = (status: ExpenseRequest['status']) => {
     switch (status) {
@@ -951,6 +970,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
               <span>{fmtMoney(totalDisbursed)}</span>
               <span className="text-xs text-slate-400 font-semibold">{currency}</span>
             </div>
+            {secondaryMetrics.map(sm => sm.disbursedRequests > 0 && (
+              <div key={sm.currency} className="text-xs font-bold text-emerald-300 mt-0.5">
+                + {fmtMoney(sm.disbursedRequests)} {sm.currency}
+              </div>
+            ))}
           </div>
 
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
@@ -959,6 +983,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
               <span>{fmtMoney(totalApproved)}</span>
               <span className="text-xs text-slate-400 font-semibold">{currency}</span>
             </div>
+            {secondaryMetrics.map(sm => sm.approvedRequests > 0 && (
+              <div key={sm.currency} className="text-xs font-bold text-blue-300 mt-0.5">
+                + {fmtMoney(sm.approvedRequests)} {sm.currency}
+              </div>
+            ))}
           </div>
 
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
@@ -967,6 +996,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
               <span>{fmtMoney(totalPending)}</span>
               <span className="text-xs text-slate-400 font-semibold">{currency}</span>
             </div>
+            {secondaryMetrics.map(sm => sm.pendingRequests > 0 && (
+              <div key={sm.currency} className="text-xs font-bold text-amber-300 mt-0.5">
+                + {fmtMoney(sm.pendingRequests)} {sm.currency}
+              </div>
+            ))}
           </div>
 
           <div className="bg-slate-950/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
@@ -975,6 +1009,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
               <span>{targetRequests.length}</span>
               <span className="text-xs text-slate-400 font-semibold">طلب ({fmtMoney(totalAmount)} {currency})</span>
             </div>
+            {secondaryMetrics.map(sm => sm.totalRequestsAmount > 0 && (
+              <div key={sm.currency} className="text-xs font-bold text-slate-300 mt-0.5">
+                + {fmtMoney(sm.totalRequestsAmount)} {sm.currency}
+              </div>
+            ))}
           </div>
         </div>
       </div>
@@ -2472,7 +2511,11 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 <div>
                   <span className="text-[11px] font-bold text-slate-600 block">إجمالي مبالغ الصرف المطلوب:</span>
                   <div className="text-2xl font-black text-indigo-950 mt-0.5">
-                    {fmtMoney(selectedBatchSum)} <span className="text-sm font-bold text-indigo-700">{currency}</span>
+                    {batchCurrencies.size === 1 ? (
+                      <>{fmtMoney(selectedBatchSum)} <span className="text-sm font-bold text-indigo-700">{singleBatchCurrency}</span></>
+                    ) : (
+                      <span className="text-base font-bold text-amber-800">عملات متعددة ({Array.from(batchCurrencies).join(' + ')})</span>
+                    )}
                   </div>
                 </div>
                 <div className="text-left bg-white/80 backdrop-blur-xs px-3.5 py-2 rounded-xl border border-indigo-100 text-xs">
@@ -2488,7 +2531,9 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                 </label>
                 {batchAccounts.length === 0 ? (
                   <div role="alert" className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-[11px] font-bold">
-                    لا يوجد حساب خزينة نشط بعملة الطلبات المحددة. يرجى إضافة حساب أو تفعيله من شاشة الخزينة أولاً.
+                    {batchCurrencies.size > 1
+                      ? `تم تحديد طلبات بعملات مختلفة (${Array.from(batchCurrencies).join('، ')}). يرجى تحديد طلبات بعملة موحدة.`
+                      : 'لا يوجد حساب خزينة نشط بعملة الطلبات المحددة. يرجى إضافة حساب أو تفعيله من شاشة الخزينة أولاً.'}
                   </div>
                 ) : (
                   <select
@@ -2505,9 +2550,9 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                   </select>
                 )}
                 {batchCurrencies.size > 1 && (
-                  <div className="mt-1.5 p-2 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-[11px] font-bold flex items-center gap-1.5">
-                    <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
-                    <span>الطلبات المحددة بعملات مختلفة ({Array.from(batchCurrencies).join('، ')}): يُصرف من الحساب فقط ما يطابق عملته، ويُرفض الباقي. يُفضل تحديد طلبات بعملة واحدة.</span>
+                  <div role="alert" className="mt-1.5 p-2 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 text-[11px] font-bold flex items-center gap-1.5">
+                    <AlertCircle className="h-3.5 w-3.5 text-rose-600 shrink-0" />
+                    <span>الطلبات المحددة بعملات متعددة ({Array.from(batchCurrencies).join('، ')}). الصرف المجمع من حساب واحد يتطلب طلبات بعملة موحدة لضمان الدقة المحاسبية.</span>
                   </div>
                 )}
                 {batchShortfall && (

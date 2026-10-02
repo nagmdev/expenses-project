@@ -55,7 +55,12 @@ service firebase.storage {
     }
 
     function canDeleteAttachment(orgId) {
-      return isSuperAdmin() || (isAuthenticated() && hasOrgRole(orgId, ['org_admin', 'finance']));
+      return isSuperAdmin() || (
+        isAuthenticated() && (
+          hasOrgRole(orgId, ['org_admin', 'finance']) ||
+          (isOrgMember(orgId) && resource.metadata != null && resource.metadata.get('uploaderUid', '') == request.auth.uid)
+        )
+      );
     }
 
     match /invoices/{orgId}/{fileName} {

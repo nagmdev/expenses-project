@@ -589,7 +589,10 @@ service cloud.firestore {
       allow create: if isAuthenticated() && request.resource.data.value == 1 && (
         isSuperAdmin() ||
         (counterId.matches('^(custodies|transfers)-[0-9]{4}$') && (
-          exists(profilePath()) && hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])
+          exists(profilePath()) && (
+            get(profilePath()).data.get('role', '') in ['finance', 'org_admin'] ||
+            hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])
+          )
         )) ||
         (counterId.matches('^(requests|visa)-[0-9]{4}$') && (
           exists(profilePath()) && get(profilePath()).data.get('active', true) != false && get(profilePath()).data.get('orgId', '') != ''
@@ -598,7 +601,10 @@ service cloud.firestore {
       allow update: if isAuthenticated() && request.resource.data.value == resource.data.value + 1 && (
         isSuperAdmin() ||
         (counterId.matches('^(custodies|transfers)-[0-9]{4}$') && (
-          exists(profilePath()) && hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])
+          exists(profilePath()) && (
+            get(profilePath()).data.get('role', '') in ['finance', 'org_admin'] ||
+            hasOrgRole(get(profilePath()).data.get('orgId', ''), ['finance', 'org_admin'])
+          )
         )) ||
         (counterId.matches('^(requests|visa)-[0-9]{4}$') && (
           exists(profilePath()) && get(profilePath()).data.get('active', true) != false && get(profilePath()).data.get('orgId', '') != ''
@@ -796,8 +802,8 @@ service cloud.firestore {
     // =========================================================================
     match /system_settings/{settingId} {
       allow read: if isSuperAdmin() || (isAuthenticated() && (
-        settingId == 'email_notifications' && exists(profilePath()) &&
-        hasOrgRole(get(profilePath()).data.get('orgId', ''), ['org_admin', 'finance'])
+        settingId in ['email_notifications', 'notification_recipients'] && exists(profilePath()) &&
+        get(profilePath()).data.get('active', true) != false && get(profilePath()).data.get('orgId', '') != ''
       ));
       allow write: if isSuperAdmin();
     }

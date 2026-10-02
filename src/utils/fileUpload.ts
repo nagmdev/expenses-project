@@ -1,4 +1,4 @@
-import { getStorageInstance, ref, uploadBytes, getDownloadURL, deleteObject } from '../lib/firebase';
+import { getStorageInstance, ref, uploadBytes, getDownloadURL, deleteObject, auth } from '../lib/firebase';
 import { RequestAttachment } from '../types';
 import { newId, uuid } from './ids';
 import { localToday } from './requestUi';
@@ -218,6 +218,7 @@ export async function processAndUploadInvoice(
         originalName: file.name,
         orgId: cleanOrgId,
         uploadedAt: now.toISOString(),
+        uploaderUid: auth?.currentUser?.uid || '',
       }
     });
 
