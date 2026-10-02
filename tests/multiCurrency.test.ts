@@ -120,12 +120,46 @@ describe('Multi-Currency Financial Isolation Matrix', () => {
       approvedCount: 0,
       pendingRequests: 0,
       pendingCount: 0,
+      totalRequestsAmount: 0,
+      totalRequestsCount: 0,
       custodiesIssued: 0,
       custodiesInHand: 0,
       custodiesSettled: 0,
       custodiesReturned: 0,
       activeCustodiesCount: 0,
     });
+  });
+
+  it('accurately aggregates totalRequestsAmount, totalRequestsCount, and clarification_requested requests', () => {
+    const requests = [
+      { status: 'disbursed', amount: 1500, currency: 'EGP' },
+      { status: 'approved', amount: 2500, currency: 'EGP' },
+      { status: 'pending', amount: 500, currency: 'EGP' },
+      { status: 'clarification_requested', amount: 750, currency: 'EGP' },
+      { status: 'rejected', amount: 300, currency: 'EGP' },
+      { status: 'pending', amount: 100, currency: 'USD' },
+    ];
+
+    const metrics = aggregateMetricsByCurrency({
+      requests,
+      settlements: [],
+      custodies: [],
+      baseCurrency: 'EGP',
+    });
+
+    const egp = metrics.find(m => m.currency === 'EGP')!;
+    // Total amount across all 5 EGP requests
+    expect(egp.totalRequestsAmount).toBe(1500 + 2500 + 500 + 750 + 300);
+    expect(egp.totalRequestsCount).toBe(5);
+    // Pending requests includes both pending (500) and clarification_requested (750)
+    expect(egp.pendingRequests).toBe(1250);
+    expect(egp.pendingCount).toBe(2);
+
+    const usd = metrics.find(m => m.currency === 'USD')!;
+    expect(usd.totalRequestsAmount).toBe(100);
+    expect(usd.totalRequestsCount).toBe(1);
+    expect(usd.pendingRequests).toBe(100);
+    expect(usd.pendingCount).toBe(1);
   });
 
   it('accurately groups custodies by currency with closed/settled status', () => {
@@ -154,5 +188,52 @@ describe('Multi-Currency Financial Isolation Matrix', () => {
     expect(usd.custodiesReturned).toBe(100);
     expect(usd.custodiesInHand).toBe(400);
     expect(usd.activeCustodiesCount).toBe(1);
+  });
+
+  it('guarantees that custody issuance is not counted in totalActual until settled, avoiding double-counting', () => {
+    // 1. Issue a custody of 1000 EGP (advance in employee hand, NOT actual expense yet)
+    const custodies = [
+      { status: 'active', totalAmount: 1000, settledAmount: 0, returnedAmount: 0, remainingAmount: 1000, currency: 'EGP' },
+    ];
+    let metrics = aggregateMetricsByCurrency({
+      requests: [],
+      settlements: [],
+      custodies,
+      baseCurrency: 'EGP',
+    });
+    // totalActual must be 0, custodiesInHand must be 1000
+    expect(metrics[0].totalActual).toBe(0);
+    expect(metrics[0].custodiesInHand).toBe(1000);
+
+    // 2. Settle 700 EGP of that custody with invoices: actual expense is 700 (NOT 1700)
+    custodies[0].settledAmount = 700;
+    custodies[0].remainingAmount = 300;
+    const settlements = [
+      { amount: 700, currency: 'EGP' },
+    ];
+    metrics = aggregateMetricsByCurrency({
+      requests: [],
+      settlements,
+      custodies,
+      baseCurrency: 'EGP',
+    });
+    expect(metrics[0].totalActual).toBe(700);
+    expect(metrics[0].custodiesInHand).toBe(300);
+    expect(metrics[0].custodiesSettled).toBe(700);
+
+    // 3. Direct expense request of 500 EGP disbursed
+    const requests = [
+      { status: 'disbursed', amount: 500, currency: 'EGP' },
+    ];
+    metrics = aggregateMetricsByCurrency({
+      requests,
+      settlements,
+      custodies,
+      baseCurrency: 'EGP',
+    });
+    // totalActual = 700 (custody settlement) + 500 (direct request) = 1200
+    expect(metrics[0].totalActual).toBe(1200);
+    expect(metrics[0].disbursedRequests).toBe(500);
+    expect(metrics[0].settledCustodies).toBe(700);
   });
 });

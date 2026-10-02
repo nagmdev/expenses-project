@@ -660,7 +660,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           url: request.invoiceAttachment!.url,
                           name: request.invoiceAttachment!.name,
                           size: request.invoiceAttachment!.size,
-                          type: request.invoiceAttachment!.type
+                          type: request.invoiceAttachment!.type,
+                          storagePath: request.invoiceAttachment!.storagePath,
                         })}
                         className="block shrink-0 cursor-pointer group"
                         title="معاينة الفاتورة بملء الشاشة"
@@ -678,7 +679,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           url: request.invoiceAttachment.url,
                           name: request.invoiceAttachment.name,
                           size: request.invoiceAttachment.size,
-                          type: request.invoiceAttachment.type
+                          type: request.invoiceAttachment.type,
+                          storagePath: request.invoiceAttachment.storagePath,
                         })}
                         className="w-10 h-10 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-800 flex items-center justify-center font-bold text-xs shrink-0 border border-amber-200 cursor-pointer transition"
                         title="معاينة ملف PDF"
@@ -700,7 +702,8 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           url: request.invoiceAttachment!.url,
                           name: request.invoiceAttachment!.name,
                           size: request.invoiceAttachment!.size,
-                          type: request.invoiceAttachment!.type
+                          type: request.invoiceAttachment!.type,
+                          storagePath: request.invoiceAttachment!.storagePath,
                         })}
                         className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer"
                       >
@@ -772,6 +775,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                             name: request.visaDocumentAttachment!.name,
                             size: request.visaDocumentAttachment!.size,
                             type: request.visaDocumentAttachment!.type,
+                            storagePath: request.visaDocumentAttachment!.storagePath,
                           })}
                           className="cursor-pointer shrink-0"
                           title="معاينة المستند"
@@ -797,6 +801,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           name: request.visaDocumentAttachment!.name,
                           size: request.visaDocumentAttachment!.size,
                           type: request.visaDocumentAttachment!.type,
+                          storagePath: request.visaDocumentAttachment!.storagePath,
                         })}
                         className="px-2.5 py-1 bg-teal-700 hover:bg-teal-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
                       >
@@ -830,6 +835,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                             name: request.installmentTransferAttachment!.name,
                             size: request.installmentTransferAttachment!.size,
                             type: request.installmentTransferAttachment!.type,
+                            storagePath: request.installmentTransferAttachment!.storagePath,
                           })}
                           className="cursor-pointer shrink-0"
                           title="معاينة السكرين"
@@ -855,6 +861,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           name: request.installmentTransferAttachment!.name,
                           size: request.installmentTransferAttachment!.size,
                           type: request.installmentTransferAttachment!.type,
+                          storagePath: request.installmentTransferAttachment!.storagePath,
                         })}
                         className="px-2.5 py-1 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
                       >
@@ -888,6 +895,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                             name: request.walletTransferAttachment!.name,
                             size: request.walletTransferAttachment!.size,
                             type: request.walletTransferAttachment!.type,
+                            storagePath: request.walletTransferAttachment!.storagePath,
                           })}
                           className="cursor-pointer shrink-0"
                           title="معاينة السكرين"
@@ -913,6 +921,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                           name: request.walletTransferAttachment!.name,
                           size: request.walletTransferAttachment!.size,
                           type: request.walletTransferAttachment!.type,
+                          storagePath: request.walletTransferAttachment!.storagePath,
                         })}
                         className="px-2.5 py-1 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
                       >
@@ -931,7 +940,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
             const realAttachments = (request.attachments || []).filter(att => 
               att && att.name && 
               !String(att.name).includes('فاتورة_عرض_سعر') && 
-              String(att.name).trim() !== 'fdvbgfbgfb' &&
+              String(att.name).trim() !== 'fdvbgfbgfb' && 
               String(att.name).trim().length > 0
             );
             if (realAttachments.length === 0) return null;
@@ -952,6 +961,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({ request,
                             name: att.name,
                             size: att.size,
                             type: att.type,
+                            storagePath: att.storagePath,
                           });
                         }
                       }}

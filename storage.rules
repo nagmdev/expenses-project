@@ -54,17 +54,33 @@ service firebase.storage {
       return isSuperAdmin() || (isAuthenticated() && (inOrgViaProfile(orgId) || inOrgViaMember(orgId)));
     }
 
+    function canReadAttachment(orgId) {
+      return isSuperAdmin() || (
+        isAuthenticated() && (
+          hasOrgRole(orgId, ['org_admin', 'finance']) ||
+          (isOrgMember(orgId) && resource.metadata != null && resource.metadata.get('uploaderUid', '') == request.auth.uid) ||
+          (isOrgMember(orgId) && (resource.metadata == null || !('uploaderUid' in resource.metadata)))
+        )
+      );
+    }
+
     function canDeleteAttachment(orgId) {
-      return isSuperAdmin() || (isAuthenticated() && hasOrgRole(orgId, ['org_admin', 'finance']));
+      return isSuperAdmin() || (
+        isAuthenticated() && (
+          hasOrgRole(orgId, ['org_admin', 'finance']) ||
+          (isOrgMember(orgId) && resource.metadata != null && resource.metadata.get('uploaderUid', '') == request.auth.uid)
+        )
+      );
     }
 
     match /invoices/{orgId}/{fileName} {
-      allow read: if isOrgMember(orgId);
+      allow read: if canReadAttachment(orgId);
       allow create, update: if isOrgMember(orgId) &&
         orgId != '' &&
         orgId != 'org-main' &&
         request.resource.size < 15 * 1024 * 1024 &&
-        (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf');
+        (request.resource.contentType.matches('image/.*') || request.resource.contentType == 'application/pdf') &&
+        (request.resource.metadata == null || request.resource.metadata.get('uploaderUid', '') == request.auth.uid);
       allow delete: if canDeleteAttachment(orgId);
     }
 

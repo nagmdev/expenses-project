@@ -291,6 +291,18 @@ export async function deleteStorageObject(storagePath: string): Promise<boolean>
   return true;
 }
 
+/**
+ * Reads a file an older version uploaded to Firebase Storage through the authenticated SDK,
+ * so storage.rules decide who may read it. Null when Storage is not enabled.
+ */
+export async function getStorageObjectBlob(storagePath: string): Promise<Blob | null> {
+  if (!storagePath) return null;
+  const storage = await getStorageInstance();
+  if (!storage) return null;
+  const { ref, getBlob } = await import('firebase/storage');
+  return getBlob(ref(storage, storagePath));
+}
+
 // Firebase Authentication
 export const auth = app ? getAuth(app) : getAuth();
 if (USE_FIREBASE_EMULATORS) connectEmulatedAuth(auth);

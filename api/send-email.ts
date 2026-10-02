@@ -109,7 +109,7 @@ export default async function handler(req: any, res: any) {
     'http://localhost:3000',
     'http://localhost:4173',
   ];
-  const isOriginAllowed = !origin || allowedOrigins.includes(origin) || origin.endsWith('.vercel.app');
+  const isOriginAllowed = !origin || allowedOrigins.includes(origin) || /^https:\/\/expenses-project(?:-[a-z0-9-]+)?\.vercel\.app$/.test(origin);
 
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', isOriginAllowed ? (origin || '*') : 'https://expenses-project-xi.vercel.app');
@@ -152,8 +152,8 @@ export default async function handler(req: any, res: any) {
     }
     const eventId = typeof parsedBody.eventId === 'string' ? parsedBody.eventId : '';
     const target = typeof parsedBody.to === 'string' ? parsedBody.to.trim().toLowerCase() : '';
-    if (!/^[A-Za-z0-9_-]{1,700}$/.test(eventId) || !target.includes('@')) {
-      return res.status(400).json({ success: false, error: 'eventId and a single recipient (to) are required' });
+    if (!/^[A-Za-z0-9_-]{1,700}$/.test(eventId) || !/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(target)) {
+      return res.status(400).json({ success: false, error: 'eventId and a single valid recipient email (to) are required' });
     }
 
     const lookup = await loadOutboxEventAsCaller(eventId, idToken);
@@ -178,12 +178,13 @@ export default async function handler(req: any, res: any) {
 
     const message = event.message || {};
     const meta = event.meta || {};
-    const subject: string = message.subject;
+    const rawSubject: string = message.subject || '';
+    const subject: string = rawSubject.replace(/[\r\n]+/g, ' ').trim();
     const html: string = message.html;
     const text: string = message.text || '';
-    const senderName: string = meta.senderName || 'مصروفي';
-    const senderEmail: string = meta.senderEmail || 'awadhsaudi2030@gmail.com';
-    const replyTo: string = meta.replyTo || senderEmail;
+    const senderName: string = (meta.senderName || 'مصروفي').replace(/[\r\n]+/g, ' ').trim();
+    const senderEmail: string = (meta.senderEmail || 'awadhsaudi2030@gmail.com').replace(/[\r\n]+/g, '').trim();
+    const replyTo: string = (meta.replyTo || senderEmail).replace(/[\r\n]+/g, '').trim();
     const provider: string = meta.provider || 'auto';
     if (!subject || !html) {
       return res.status(422).json({ success: false, error: 'event_has_no_content' });

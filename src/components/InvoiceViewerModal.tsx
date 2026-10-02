@@ -13,7 +13,7 @@ import {
   AlertTriangle,
   RefreshCw
 } from 'lucide-react';
-import { openFileSafely, downloadFileSafely, dataUrlToBlob } from '../utils/fileUpload';
+import { openFileSafely, downloadFileSafely, dataUrlToBlob, getAttachmentBlob } from '../utils/fileUpload';
 import { isFirestoreAttachmentUrl, loadAttachmentBlob, resolveAttachmentUrl } from '../lib/attachments';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
@@ -22,6 +22,7 @@ export interface InvoiceViewerAttachment {
   name?: string;
   size?: string | number;
   type?: string;
+  storagePath?: string;
 }
 
 interface InvoiceViewerModalProps {
@@ -30,6 +31,13 @@ interface InvoiceViewerModalProps {
 }
 
 const DOCUMENT_LOAD_ERROR = 'تعذر تحميل المستند. تحقق من اتصالك بالإنترنت ومن صلاحيتك على هذا الطلب ثم أعد المحاولة.';
+const STORAGE_UNAUTHORIZED_ERROR = 'عذراً، لا تملك الصلاحية للاطلاع على هذا المستند المالي (محمي بقواعد أمان المؤسسة).';
+
+const isStorageUnauthorized = (err: unknown): boolean => {
+  const e = err as { code?: string; message?: string } | null;
+  return e?.code === 'storage/unauthorized' ||
+    Boolean(e?.message && (e.message.includes('unauthorized') || e.message.includes('permission')));
+};
 
 /** The loader's own message when it is written in Arabic (e.g. "attachment incomplete"), else ''. */
 const arabicReason = (err: unknown): string => {
@@ -142,25 +150,28 @@ interface LoadedDocument {
 export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachment, onClose }) => {
   const [zoom, setZoom] = useState<number>(1);
   const [rotation, setRotation] = useState<number>(0);
-
-  // Reset zoom & rotation when another document is shown (adjusted while rendering,
-  // so the new document never flashes with the previous one's zoom).
-  const [shownUrl, setShownUrl] = useState(attachment?.url);
-  if (shownUrl !== attachment?.url) {
-    setShownUrl(attachment?.url);
+  // Reset zoom & rotation when another document is shown
+  const [shownTarget, setShownTarget] = useState(attachment?.storagePath || attachment?.url);
+  const currentTarget = attachment?.storagePath || attachment?.url;
+  if (shownTarget !== currentTarget) {
+    setShownTarget(currentTarget);
     setZoom(1);
     setRotation(0);
   }
 
   const isOpen = Boolean(attachment?.url);
   const docUrl = attachment?.url || '';
+  const storagePath = attachment?.storagePath || '';
   const docIsPdf = isPdfDocument(docUrl, attachment?.type, attachment?.name);
 
-  // Documents kept in Firestore (fsattach://) are read first; a PDF stored inline as a
-  // data: URL is turned into a blob: URL (browsers refuse data: documents in frames).
+  // Documents kept in Firestore (fsattach://) are read first; files an older version put in
+  // Firebase Storage (storagePath) are read through the authenticated SDK when Storage is
+  // enabled, so storage.rules apply (else their url is shown as before); a PDF stored inline
+  // as a data: URL is turned into a blob: URL (browsers refuse data: documents in frames).
   // Everything else (images in data: URLs, https links of older records) is shown as is.
   const fromFirestore = isFirestoreAttachmentUrl(docUrl);
-  const needsLoading = fromFirestore || (docIsPdf && docUrl.startsWith('data:'));
+  const fromStorage = !fromFirestore && Boolean(storagePath);
+  const needsLoading = fromFirestore || fromStorage || (docIsPdf && docUrl.startsWith('data:'));
   const [loaded, setLoaded] = useState<LoadedDocument | null>(null);
   const [reloadCount, setReloadCount] = useState(0);
 
@@ -170,7 +181,18 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
     let ownUrl = '';
     const load = async () => {
       try {
-        if (docIsPdf) {
+        if (fromStorage) {
+          const raw = await getAttachmentBlob(storagePath);
+          if (cancelled) return;
+          if (!raw) {
+            // Firebase Storage is not enabled (free plan): the record's own url, as before.
+            setLoaded({ forUrl: docUrl, src: docUrl, blob: null, error: '' });
+            return;
+          }
+          const blob = docIsPdf && raw.type !== 'application/pdf' ? new Blob([raw], { type: 'application/pdf' }) : raw;
+          ownUrl = URL.createObjectURL(blob);
+          setLoaded({ forUrl: docUrl, src: ownUrl, blob, error: '' });
+        } else if (docIsPdf) {
           const raw = docUrl.startsWith('data:') ? dataUrlToBlob(docUrl) : await loadAttachmentBlob(docUrl);
           if (cancelled) return;
           // The browser's PDF viewer needs the right type to show the file in the frame.
@@ -187,7 +209,12 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
       } catch (err) {
         if (cancelled) return;
         console.error('[InvoiceViewer] Failed to load the document:', err);
-        if (!fromFirestore) {
+        if (fromStorage) {
+          // Refused by storage.rules: say so; any other failure falls back to the record's url.
+          setLoaded(isStorageUnauthorized(err)
+            ? { forUrl: docUrl, src: '', blob: null, error: STORAGE_UNAUTHORIZED_ERROR }
+            : { forUrl: docUrl, src: docUrl, blob: null, error: '' });
+        } else if (!fromFirestore) {
           // An inline data: PDF that cannot be converted is still given to the frame as is.
           setLoaded({ forUrl: docUrl, src: docUrl, blob: null, error: '' });
         } else {
@@ -205,7 +232,7 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
         setLoaded(prev => (prev && prev.src === revoked ? null : prev));
       }
     };
-  }, [docUrl, docIsPdf, needsLoading, fromFirestore, reloadCount]);
+  }, [docUrl, storagePath, docIsPdf, needsLoading, fromFirestore, fromStorage, reloadCount]);
 
   const current = needsLoading ? (loaded && loaded.forUrl === docUrl ? loaded : null) : null;
   const isLoadingDoc = needsLoading && !current;
@@ -300,8 +327,8 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
   const safeUrl = attachment.url;
   const fileName = attachment.name || 'مستند_الفاتورة';
   const isPdf = docIsPdf;
-  // A Firestore document can be opened / saved only once its bytes are here.
-  const actionsDisabled = fromFirestore && (isLoadingDoc || Boolean(loadError));
+  // A Firestore / Storage document can be opened / saved only once its bytes are here.
+  const actionsDisabled = (fromFirestore || fromStorage) && (isLoadingDoc || Boolean(loadError));
 
   const handleZoomIn = () => setZoom(prev => Math.min(Number((prev + 0.25).toFixed(2)), 3.5));
   const handleZoomOut = () => setZoom(prev => Math.max(Number((prev - 0.25).toFixed(2)), 0.5));
@@ -366,8 +393,8 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
           </div>
         </div>
 
-        {/* Center: Image Controls (only relevant for images) */}
-        {!isPdf && (
+        {/* Center: Image Controls (only relevant for images when loaded) */}
+        {!isPdf && !loadError && !isLoadingDoc && (
           <div className="flex items-center gap-1 bg-slate-800/80 p-1 rounded-xl border border-slate-700 shadow-inner">
             <button
               type="button"
@@ -507,7 +534,7 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
                 <button
                   type="button"
                   onClick={handleOpenExternal}
-                  className="text-amber-400 hover:underline flex items-center gap-1 font-bold"
+                  className="text-amber-400 hover:underline flex items-center gap-1 font-bold cursor-pointer"
                 >
                   <ExternalLink className="h-3.5 w-3.5" />
                   <span>فتح في نافذة كاملة</span>

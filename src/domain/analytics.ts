@@ -18,6 +18,8 @@ export interface CurrencyMetricRow {
   approvedCount: number;
   pendingRequests: number;
   pendingCount: number;
+  totalRequestsAmount: number;
+  totalRequestsCount: number;
   custodiesIssued: number;
   custodiesInHand: number;
   custodiesSettled: number;
@@ -44,6 +46,15 @@ export interface AggregateMetricsOptions {
     currency?: string | null;
   }>;
   baseCurrency?: string;
+}
+
+export const SUPPORTED_CURRENCY_CODES = new Set([
+  'EGP', 'SAR', 'USD', 'EUR', 'AED', 'GBP', 'KWD', 'QAR', 'BHD', 'OMR', 'JOD'
+]);
+
+export function isSupportedCurrency(cur?: string | null): boolean {
+  if (!cur) return false;
+  return SUPPORTED_CURRENCY_CODES.has(cur.trim().toUpperCase());
 }
 
 export function normalizeCurrency(cur?: string | null, fallback = 'EGP'): string {
@@ -74,6 +85,8 @@ export function aggregateMetricsByCurrency({
         approvedCount: 0,
         pendingRequests: 0,
         pendingCount: 0,
+        totalRequestsAmount: 0,
+        totalRequestsCount: 0,
         custodiesIssued: 0,
         custodiesInHand: 0,
         custodiesSettled: 0,
@@ -90,6 +103,9 @@ export function aggregateMetricsByCurrency({
     const row = getRow(cur);
     const amt = Number(r.amount || 0);
 
+    row.totalRequestsAmount += amt;
+    row.totalRequestsCount += 1;
+
     if (r.status === 'disbursed') {
       row.disbursedRequests += amt;
       row.disbursedCount += 1;
@@ -97,7 +113,7 @@ export function aggregateMetricsByCurrency({
     } else if (r.status === 'approved') {
       row.approvedRequests += amt;
       row.approvedCount += 1;
-    } else if (r.status === 'pending') {
+    } else if (r.status === 'pending' || r.status === 'clarification_requested') {
       row.pendingRequests += amt;
       row.pendingCount += 1;
     }
