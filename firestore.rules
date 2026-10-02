@@ -476,9 +476,10 @@ service cloud.firestore {
         request.resource.data.employeeId == resource.data.employeeId &&
         request.resource.data.totalAmount == resource.data.totalAmount &&
         request.resource.data.orgId == resource.data.orgId &&
-        request.resource.data.currency == resource.data.currency &&
-        request.resource.data.sourceAccountId == resource.data.sourceAccountId &&
-        request.resource.data.custodyNumber == resource.data.custodyNumber &&
+        // (older custodies may lack these fields: compared null-safe, never added or changed)
+        request.resource.data.get('currency', null) == resource.data.get('currency', null) &&
+        request.resource.data.get('sourceAccountId', null) == resource.data.get('sourceAccountId', null) &&
+        request.resource.data.get('custodyNumber', null) == resource.data.get('custodyNumber', null) &&
         request.resource.data.remainingAmount >= 0 &&
         request.resource.data.remainingAmount <= resource.data.remainingAmount &&
         request.resource.data.settledAmount >= resource.data.settledAmount &&
@@ -511,9 +512,10 @@ service cloud.firestore {
         request.resource.data.employeeId == resource.data.employeeId &&
         request.resource.data.totalAmount == resource.data.totalAmount &&
         request.resource.data.orgId == resource.data.orgId &&
-        request.resource.data.currency == resource.data.currency &&
-        request.resource.data.sourceAccountId == resource.data.sourceAccountId &&
-        request.resource.data.custodyNumber == resource.data.custodyNumber &&
+        // (older custodies may lack these fields: compared null-safe, never added or changed)
+        request.resource.data.get('currency', null) == resource.data.get('currency', null) &&
+        request.resource.data.get('sourceAccountId', null) == resource.data.get('sourceAccountId', null) &&
+        request.resource.data.get('custodyNumber', null) == resource.data.get('custodyNumber', null) &&
         request.resource.data.remainingAmount >= 0 &&
         request.resource.data.remainingAmount <= resource.data.remainingAmount &&
         request.resource.data.settledAmount >= resource.data.settledAmount &&
@@ -641,7 +643,8 @@ service cloud.firestore {
           isOrgAdmin(resource.data.orgId) &&
           resource.data.entityCollection is string &&
           resource.data.entityId is string &&
-          !exists(/databases/$(database)/documents/$(resource.data.entityCollection)/$(resource.data.entityId))
+          // existsAfter: the record and its key are removed in the same batch / transaction.
+          !existsAfter(/databases/$(database)/documents/$(resource.data.entityCollection)/$(resource.data.entityId))
         )
       );
     }
