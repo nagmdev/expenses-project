@@ -953,4 +953,130 @@ describe('attachments in Firestore: only the company reads them, the upload is a
     await expect(readAttachmentBlob(db(EMP), 'att-partial')).rejects.toMatchObject({ code: 'incomplete' });
     await expect(readAttachmentBlob(db(ADMIN), 'att-partial')).rejects.toThrow(/لم يكتمل رفع/);
   });
+
+  describe('adversarial financial write protection (Audit Step 2)', () => {
+    beforeEach(async () => {
+      await seed(async f => {
+        // Seed a payment account
+        await setDoc(doc(f, 'paymentAccounts', 'acc-test'), {
+          id: 'acc-test',
+          orgId: ORG,
+          name: 'Safe Vault',
+          type: 'cash',
+          accountIdentifier: 'SV-01',
+          currency: 'EGP',
+          active: true,
+          balance: 1000,
+          currentBalance: 1000,
+          initialBalance: 1000,
+          totalIn: 0,
+          totalOut: 0,
+        });
+
+        // Seed an approved request
+        await setDoc(doc(f, 'requests', 'req-approved'), {
+          id: 'req-approved',
+          orgId: ORG,
+          requestNumber: 'REQ-2026-000001',
+          requesterId: EMP.uid,
+          requesterName: EMP.email,
+          requesterEmail: EMP.email,
+          amount: 300,
+          currency: 'EGP',
+          status: 'approved',
+          requestType: 'expense',
+          createdAt: '2026-10-01T00:00:00.000Z',
+        });
+
+        // Seed a custody
+        await setDoc(doc(f, 'custodies', 'cus-locked'), {
+          id: 'cus-locked',
+          orgId: ORG,
+          employeeId: EMP.uid,
+          employeeName: 'EMP',
+          custodyNumber: 'CUS-2026-000001',
+          totalAmount: 1000,
+          remainingAmount: 1000,
+          settledAmount: 0,
+          returnedAmount: 0,
+          status: 'active',
+          currency: 'EGP',
+        });
+
+        // Seed a settlement
+        await setDoc(doc(f, 'custodySettlements', 'stl-immutable'), {
+          id: 'stl-immutable',
+          orgId: ORG,
+          custodyId: 'cus-locked',
+          employeeId: EMP.uid,
+          amount: 200,
+          description: 'Original receipt',
+          createdAt: '2026-10-01T00:00:00.000Z',
+        });
+
+        // Seed a provider
+        await setDoc(doc(f, 'providers', 'prov-test'), {
+          id: 'prov-test',
+          orgId: ORG,
+          name: 'Vodafone',
+          totalPaid: 500,
+          active: true,
+        });
+      });
+    });
+
+    it('Finance cannot directly edit currentBalance without accounting invariants', async () => {
+      await assertFails(updateDoc(doc(db(FIN), 'paymentAccounts', 'acc-test'), { currentBalance: 999999 }));
+    });
+
+    it('Finance cannot directly edit totalIn or totalOut without adhering to currentBalance equation', async () => {
+      await assertFails(updateDoc(doc(db(FIN), 'paymentAccounts', 'acc-test'), { totalIn: 5000 }));
+      await assertFails(updateDoc(doc(db(FIN), 'paymentAccounts', 'acc-test'), { totalOut: 500 }));
+    });
+
+    it('Finance cannot change request amount after approval', async () => {
+      await assertFails(updateDoc(doc(db(FIN), 'requests', 'req-approved'), { amount: 800 }));
+    });
+
+    it('Finance cannot directly mark request disbursed without writing the ledger transaction', async () => {
+      await assertFails(updateDoc(doc(db(FIN), 'requests', 'req-approved'), {
+        status: 'disbursed',
+        disbursement: { accountId: 'acc-test', paymentMethod: 'cash' },
+      }));
+    });
+
+    it('Finance cannot create a fake settlement exceeding custody remaining balance', async () => {
+      await assertFails(setDoc(doc(db(FIN), 'custodySettlements', 'stl-fake-over'), {
+        orgId: ORG,
+        custodyId: 'cus-locked',
+        employeeId: EMP.uid,
+        amount: 5000,
+      }));
+    });
+
+    it('Finance cannot update or delete an existing custody settlement (immutable history)', async () => {
+      await assertFails(updateDoc(doc(db(FIN), 'custodySettlements', 'stl-immutable'), { amount: 50 }));
+      await assertFails(deleteDoc(doc(db(FIN), 'custodySettlements', 'stl-immutable')));
+    });
+
+    it('Finance cannot change custody totals or break mathematical invariants directly', async () => {
+      // Total amount cannot shrink
+      await assertFails(updateDoc(doc(db(FIN), 'custodies', 'cus-locked'), { totalAmount: 500 }));
+      // Sum must equal total: remaining(800) + settled(100) + returned(0) != 1000
+      await assertFails(updateDoc(doc(db(FIN), 'custodies', 'cus-locked'), { remainingAmount: 800, settledAmount: 100 }));
+    });
+
+    it('Finance cannot directly inflate service spentAmount via standard update', async () => {
+      await assertFails(updateDoc(doc(db(FIN), 'services', 'srv-1'), { spentAmount: 500000, name: 'Cloud' }));
+    });
+
+    it('Finance cannot directly inflate provider totalPaid via standard update', async () => {
+      await assertFails(updateDoc(doc(db(FIN), 'providers', 'prov-test'), { totalPaid: 999999 }));
+    });
+
+    it('Org admin cannot change organization base currency after creation', async () => {
+      await assertFails(updateDoc(doc(db(ADMIN), 'organizations', ORG), { currency: 'USD' }));
+    });
+  });
 });
+

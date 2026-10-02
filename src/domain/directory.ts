@@ -115,6 +115,16 @@ export async function updateOrganization(store: DataStore, actor: Actor, orgId: 
   return store.runTransaction(async tx => {
     const org = await tx.get<Organization>(COL.organizations, orgId);
     if (!org) throw new DomainError('not_found', 'الشركة غير موجودة.');
+    if (clean.currency !== undefined && clean.currency !== org.currency) {
+      if (actor.role !== 'super_admin') {
+        throw new DomainError('currency_immutable', 'لا يمكن لمدير الشركة تغيير العملة الأساسية للمؤسسة بعد إنشائها؛ يرجى فتح خزائن أو حسابات بالعملة الجديدة.');
+      }
+      const candidateIds = Array.from(new Set([`${org.id}_cash`, ...defaultAccountsFor(org).map(a => a.id!).filter(Boolean)]));
+      const accounts = await Promise.all(candidateIds.map(id => tx.get<PaymentAccount>(COL.paymentAccounts, id)));
+      if (accounts.some(a => Boolean(a && a.orgId === orgId && (toMoney(a.balance) !== 0 || toMoney(a.totalIn) !== 0 || toMoney(a.totalOut) !== 0)))) {
+        throw new DomainError('currency_immutable', 'لا يمكن تغيير العملة الأساسية للمؤسسة بعد وجود حركات أو أرصدة مالية؛ يرجى فتح خزائن وحسابات بالعملة الجديدة.');
+      }
+    }
     const patch = { ...clean, updatedAt: nowIso };
     tx.update(COL.organizations, orgId, patch);
     const updated = { ...org, ...patch } as Organization;

@@ -10,6 +10,7 @@ import {
   transitionExpenseRequest,
   updateExpenseRequest,
 } from '../src/domain/requests';
+import { updateOrganization } from '../src/domain/directory';
 import { toMoney, DomainError, type Actor } from '../src/domain/common';
 import {
   freshStore,
@@ -534,4 +535,45 @@ describe('Concurrency & Multi-Tenant Mathematical Integrity Test Matrix', () => 
       expect(source.balance).toBe(0);
     });
   });
+
+  describe('5. Organization Base Currency Immutability & Financial Freeze', () => {
+    const owner: Actor = { id: 'uidOwner0001', name: 'Super Admin', email: 'owner@acme.test', role: 'super_admin' };
+
+    it('org admin cannot change organization base currency after creation', async () => {
+      const store = freshStore();
+      await expect(
+        updateOrganization(store, admin, ORG, { currency: 'USD' }, key(), now)
+      ).rejects.toThrow(DomainError);
+
+      try {
+        await updateOrganization(store, admin, ORG, { currency: 'USD' }, key(), now);
+      } catch (err: any) {
+        expect(err.code).toBe('currency_immutable');
+      }
+
+      // Name and description changes keeping the same currency succeed
+      const res = await updateOrganization(store, admin, ORG, { name: 'Acme Corp', currency: 'EGP' }, key(), now);
+      expect(res.changed).toBe(true);
+      expect(store.read('organizations', ORG)!.name).toBe('Acme Corp');
+      expect(store.read('organizations', ORG)!.currency).toBe('EGP');
+    });
+
+    it('super admin cannot change currency once accounts have financial history', async () => {
+      const store = freshStore();
+      seedAccount(store, `${ORG}_cash`, 500, { totalIn: 500 });
+
+      await expect(
+        updateOrganization(store, owner, ORG, { currency: 'EUR' }, key(), now)
+      ).rejects.toThrow(DomainError);
+
+      try {
+        await updateOrganization(store, owner, ORG, { currency: 'EUR' }, key(), now);
+      } catch (err: any) {
+        expect(err.code).toBe('currency_immutable');
+      }
+
+      expect(store.read('organizations', ORG)!.currency).toBe('EGP');
+    });
+  });
 });
+

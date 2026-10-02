@@ -243,7 +243,12 @@ service cloud.firestore {
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(orgId));
       allow create: if isSuperAdmin();
-      allow update: if isSuperAdmin() || isOrgAdmin(orgId);
+      allow update: if isSuperAdmin() || (
+        isOrgAdmin(orgId) &&
+        request.resource.data.currency == resource.data.currency &&
+        request.resource.data.id == resource.data.id &&
+        request.resource.data.code == resource.data.code
+      );
       allow delete: if isSuperAdmin();
     }
 
@@ -309,12 +314,14 @@ service cloud.firestore {
         inSharedOrgViaProfile(resource.data.get('orgIds', [])));
       allow create: if isSuperAdmin() || (isOrgAdmin(request.resource.data.orgId) && sharingOwnOnly());
       allow update: if isSuperAdmin() ||
-        ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && orgUnchanged() && sharingUnchangedOrOwn()) ||
-        // Finance of a company the service is shared with: paying a request adds to its
-        // spending (disburseExpenseRequest) - nothing else, and never downwards.
-        (hasSharedOrgRole(resource.data.get('orgIds', []), ['finance', 'org_admin']) &&
+        // Normal profile update: OrgAdmin / Finance in own org, spentAmount unchanged
+        ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) &&
+          orgUnchanged() && sharingUnchangedOrOwn() &&
+          request.resource.data.spentAmount == resource.data.get('spentAmount', 0)) ||
+        // Disbursement update: paying a request adds to its spending - nothing else, and never downwards.
+        ((isFinance(resource.data.orgId) || hasSharedOrgRole(resource.data.get('orgIds', []), ['finance', 'org_admin'])) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['spentAmount', 'updatedAt']) &&
-          request.resource.data.get('spentAmount', 0) >= resource.data.get('spentAmount', 0));
+          request.resource.data.spentAmount >= resource.data.get('spentAmount', 0));
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
 
@@ -327,7 +334,15 @@ service cloud.firestore {
       // Data entry may add a provider to its own company, always starting with no payments.
       allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId) ||
         (isDataEntry(request.resource.data.orgId) && request.resource.data.get('totalPaid', 0) == 0);
-      allow update: if isSuperAdmin() || ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && orgUnchanged());
+      allow update: if isSuperAdmin() || (
+        (isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) && orgUnchanged() && (
+          // Normal profile update: totalPaid is strictly unchanged
+          request.resource.data.totalPaid == resource.data.get('totalPaid', 0) ||
+          // Disbursement update: paying a request adds to totalPaid - nothing else, and never downwards
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['totalPaid', 'updatedAt']) &&
+           request.resource.data.totalPaid >= resource.data.get('totalPaid', 0))
+        )
+      );
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
 
@@ -369,34 +384,86 @@ service cloud.firestore {
         request.resource.data.status == 'pending' &&
         (request.resource.data.requesterId == request.auth.uid || isOrgAdmin(request.resource.data.orgId)));
 
-      // Update: strictly guarded transitions. 'disbursed' is terminal (money has moved).
-      allow update: if isAuthenticated() && (
-        isSuperAdmin() || (orgUnchanged() && (
-        // Org Admin & Finance: approve / reject / clarify / edit — never touch a disbursed request
-        ((isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) &&
-          resource.data.status != 'disbursed' &&
-          request.resource.data.status in ['approved', 'rejected', 'clarification_requested', 'pending']
-        ) ||
-        // Finance: disburse ONLY IF status is currently approved (or pending for income receipt)
-        (isFinance(resource.data.orgId) &&
-          request.resource.data.status == 'disbursed' && (
-            resource.data.status == 'approved' ||
-            (resource.data.requestType == 'income' && resource.data.status == 'pending')
-          )
-        ) ||
-        // Requester: reply to a clarification (amount unchanged)
-        (isRequester() &&
-          resource.data.status == 'clarification_requested' &&
-          request.resource.data.status == 'pending' &&
-          request.resource.data.amount == resource.data.amount
-        ) ||
-        // Requester: edit own request while it is still under review (status unchanged)
-        (isRequester() &&
+      function isDraftEdit() {
+        return (isRequester() || isOrgAdmin(resource.data.orgId)) &&
           resource.data.status in ['pending', 'clarification_requested'] &&
           request.resource.data.status == resource.data.status &&
-          request.resource.data.requesterId == resource.data.requesterId
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'id', 'requestNumber', 'status', 'orgId', 'requesterId', 'requesterEmail',
+            'disbursement', 'rejectionReason', 'approvedBy', 'approvedAt', 'createdAt'
+          ]);
+      }
+
+      function isRequesterReply() {
+        return isRequester() &&
+          resource.data.status == 'clarification_requested' &&
+          request.resource.data.status == 'pending' &&
+          request.resource.data.amount == resource.data.amount &&
+          request.resource.data.currency == resource.data.currency &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'id', 'requestNumber', 'orgId', 'requesterId', 'requesterEmail',
+            'amount', 'currency', 'disbursement', 'rejectionReason', 'approvedBy', 'approvedAt', 'createdAt'
+          ]);
+      }
+
+      function isAdminOrFinanceApprove() {
+        return (isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) &&
+          resource.data.status in ['pending', 'clarification_requested'] &&
+          request.resource.data.status == 'approved' &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'id', 'requestNumber', 'orgId', 'requesterId', 'requesterEmail',
+            'amount', 'currency', 'requestType', 'serviceCategoryId', 'providerId',
+            'disbursement', 'rejectionReason', 'createdAt'
+          ]);
+      }
+
+      function isAdminOrFinanceReject() {
+        return (isOrgAdmin(resource.data.orgId) || isFinance(resource.data.orgId)) &&
+          resource.data.status in ['pending', 'clarification_requested', 'approved'] &&
+          request.resource.data.status == 'rejected' &&
+          request.resource.data.rejectionReason is string &&
+          request.resource.data.rejectionReason.size() > 0 &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'id', 'requestNumber', 'orgId', 'requesterId', 'requesterEmail',
+            'amount', 'currency', 'requestType', 'disbursement', 'createdAt'
+          ]);
+      }
+
+      function isAdminClarify() {
+        return isOrgAdmin(resource.data.orgId) &&
+          resource.data.status in ['pending', 'clarification_requested'] &&
+          request.resource.data.status == 'clarification_requested' &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'id', 'requestNumber', 'orgId', 'requesterId', 'requesterEmail',
+            'amount', 'currency', 'requestType', 'disbursement', 'createdAt'
+          ]);
+      }
+
+      function isFinanceDisburse() {
+        return isFinance(resource.data.orgId) &&
+          request.resource.data.status == 'disbursed' &&
+          (resource.data.status == 'approved' || (resource.data.requestType == 'income' && resource.data.status == 'pending')) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'id', 'requestNumber', 'orgId', 'requesterId', 'requesterEmail',
+            'amount', 'currency', 'requestType', 'createdAt'
+          ]) &&
+          request.resource.data.disbursement is map &&
+          existsAfter(/databases/$(database)/documents/accountTransactions/$('tx-req-' + requestId));
+      }
+
+      // Update: strictly guarded transitions. 'disbursed' is terminal (money has moved).
+      allow update: if isAuthenticated() && (
+        isSuperAdmin() || (
+          orgUnchanged() && (
+            isDraftEdit() ||
+            isRequesterReply() ||
+            isAdminOrFinanceApprove() ||
+            isAdminOrFinanceReject() ||
+            isAdminClarify() ||
+            isFinanceDisburse()
+          )
         )
-      )));
+      );
 
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
@@ -431,10 +498,52 @@ service cloud.firestore {
           resource.data.get('totalIn', 0) in [0, null] &&
           resource.data.get('totalOut', 0) in [0, null];
       }
+      function isValidAccountCreate() {
+        return isOrgAdmin(request.resource.data.orgId) &&
+          request.resource.data.initialBalance >= 0 &&
+          request.resource.data.currentBalance == request.resource.data.initialBalance &&
+          request.resource.data.balance == request.resource.data.initialBalance &&
+          request.resource.data.totalIn == 0 &&
+          request.resource.data.totalOut == 0;
+      }
+
+      function isPaymentAccountProfileUpdate() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name', 'accountIdentifier', 'type', 'description', 'color', 'icon',
+          'active', 'updatedAt', 'parentAccountId', 'parentAccountName', 'operationKey'
+        ]) &&
+        request.resource.data.currentBalance == resource.data.currentBalance &&
+        request.resource.data.balance == resource.data.balance &&
+        request.resource.data.initialBalance == resource.data.initialBalance &&
+        request.resource.data.totalIn == resource.data.totalIn &&
+        request.resource.data.totalOut == resource.data.totalOut &&
+        request.resource.data.currency == resource.data.currency;
+      }
+
+      function isPaymentAccountBalanceUpdate() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'currentBalance', 'balance', 'totalIn', 'totalOut', 'updatedAt'
+        ]) &&
+        request.resource.data.currency == resource.data.currency &&
+        request.resource.data.initialBalance == resource.data.initialBalance &&
+        request.resource.data.accountIdentifier == resource.data.accountIdentifier &&
+        request.resource.data.type == resource.data.type &&
+        request.resource.data.currentBalance == request.resource.data.balance &&
+        request.resource.data.currentBalance >= 0 &&
+        request.resource.data.totalIn >= resource.data.get('totalIn', 0) &&
+        request.resource.data.totalOut >= resource.data.get('totalOut', 0) &&
+        request.resource.data.currentBalance == resource.data.get('initialBalance', 0) + request.resource.data.totalIn - request.resource.data.totalOut;
+      }
+
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isFinance(resource.data.orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId));
-      allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged());
+      allow create: if isSuperAdmin() || isValidAccountCreate();
+      allow update: if isSuperAdmin() || (
+        isFinance(resource.data.orgId) && orgUnchanged() && (
+          isPaymentAccountProfileUpdate() ||
+          isPaymentAccountBalanceUpdate()
+        )
+      );
       allow delete: if hasNoHistory() && (isSuperAdmin() || isOrgAdmin(resource.data.orgId));
     }
 
@@ -461,66 +570,89 @@ service cloud.firestore {
            exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
            get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName);
       }
-      allow get: if isAuthenticated() && (isMissing() || canReadCustody());
-      allow list: if isAuthenticated() && canReadCustody();
-      allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged()) || (
-        (
+      function custodyInvariantsHold() {
+        return orgUnchanged() &&
+          request.resource.data.employeeId == resource.data.employeeId &&
+          request.resource.data.get('currency', null) == resource.data.get('currency', null) &&
+          request.resource.data.get('sourceAccountId', null) == resource.data.get('sourceAccountId', null) &&
+          request.resource.data.get('custodyNumber', null) == resource.data.get('custodyNumber', null) &&
+          request.resource.data.remainingAmount >= 0 &&
+          request.resource.data.settledAmount >= resource.data.settledAmount &&
+          request.resource.data.totalAmount >= resource.data.totalAmount &&
+          request.resource.data.get('returnedAmount', 0) >= resource.data.get('returnedAmount', 0) &&
+          request.resource.data.totalAmount == request.resource.data.remainingAmount + request.resource.data.settledAmount + request.resource.data.get('returnedAmount', 0) &&
+          ((request.resource.data.remainingAmount == 0 && request.resource.data.status in ['settled', 'returned']) ||
+           (request.resource.data.remainingAmount != 0 && request.resource.data.status == resource.data.status));
+      }
+      function isEmployeeSettler() {
+        return (
           resource.data.employeeId == request.auth.uid ||
           (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
           (isOrgMember(resource.data.orgId) &&
            exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
            get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName)
-        ) &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt']) &&
-        request.resource.data.employeeId == resource.data.employeeId &&
-        request.resource.data.totalAmount == resource.data.totalAmount &&
-        request.resource.data.orgId == resource.data.orgId &&
-        // (older custodies may lack these fields: compared null-safe, never added or changed)
-        request.resource.data.get('currency', null) == resource.data.get('currency', null) &&
-        request.resource.data.get('sourceAccountId', null) == resource.data.get('sourceAccountId', null) &&
-        request.resource.data.get('custodyNumber', null) == resource.data.get('custodyNumber', null) &&
-        request.resource.data.remainingAmount >= 0 &&
-        request.resource.data.remainingAmount <= resource.data.remainingAmount &&
-        request.resource.data.settledAmount >= resource.data.settledAmount &&
-        request.resource.data.totalAmount == request.resource.data.remainingAmount + request.resource.data.settledAmount + resource.data.get('returnedAmount', 0) &&
-        (request.resource.data.status == resource.data.status || (request.resource.data.remainingAmount == 0 && request.resource.data.status == 'settled'))
+        );
+      }
+      allow get: if isAuthenticated() && (isMissing() || canReadCustody());
+      allow list: if isAuthenticated() && canReadCustody();
+      allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
+      allow update: if isSuperAdmin() || (
+        custodyInvariantsHold() && (
+          isFinance(resource.data.orgId) || (
+            isEmployeeSettler() &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt']) &&
+            request.resource.data.totalAmount == resource.data.totalAmount &&
+            request.resource.data.remainingAmount <= resource.data.remainingAmount
+          )
+        )
       );
       allow delete: if isSuperAdmin();
     }
 
     match /pettyCashCustodies/{custodyId} {
-      allow read: if isAuthenticated() && (
-        isSuperAdmin() ||
-        isFinance(resource.data.orgId) ||
-        resource.data.employeeId == request.auth.uid ||
-        (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
-        (isOrgMember(resource.data.orgId) &&
-         exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
-         get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName)
-      );
-      allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged()) || (
-        (
+      function canReadPettyCashCustody() {
+        return isSuperAdmin() ||
+          isFinance(resource.data.orgId) ||
+          resource.data.employeeId == request.auth.uid ||
+          (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
+          (isOrgMember(resource.data.orgId) &&
+           exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
+           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName);
+      }
+      function custodyInvariantsHold() {
+        return orgUnchanged() &&
+          request.resource.data.employeeId == resource.data.employeeId &&
+          request.resource.data.get('currency', null) == resource.data.get('currency', null) &&
+          request.resource.data.get('sourceAccountId', null) == resource.data.get('sourceAccountId', null) &&
+          request.resource.data.get('custodyNumber', null) == resource.data.get('custodyNumber', null) &&
+          request.resource.data.remainingAmount >= 0 &&
+          request.resource.data.settledAmount >= resource.data.settledAmount &&
+          request.resource.data.totalAmount >= resource.data.totalAmount &&
+          request.resource.data.get('returnedAmount', 0) >= resource.data.get('returnedAmount', 0) &&
+          request.resource.data.totalAmount == request.resource.data.remainingAmount + request.resource.data.settledAmount + request.resource.data.get('returnedAmount', 0) &&
+          ((request.resource.data.remainingAmount == 0 && request.resource.data.status in ['settled', 'returned']) ||
+           (request.resource.data.remainingAmount != 0 && request.resource.data.status == resource.data.status));
+      }
+      function isEmployeeSettler() {
+        return (
           resource.data.employeeId == request.auth.uid ||
           (resource.data.get('employeeEmail', '') != '' && resource.data.employeeEmail == request.auth.token.email) ||
           (isOrgMember(resource.data.orgId) &&
            exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
            get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName)
-        ) &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt']) &&
-        request.resource.data.employeeId == resource.data.employeeId &&
-        request.resource.data.totalAmount == resource.data.totalAmount &&
-        request.resource.data.orgId == resource.data.orgId &&
-        // (older custodies may lack these fields: compared null-safe, never added or changed)
-        request.resource.data.get('currency', null) == resource.data.get('currency', null) &&
-        request.resource.data.get('sourceAccountId', null) == resource.data.get('sourceAccountId', null) &&
-        request.resource.data.get('custodyNumber', null) == resource.data.get('custodyNumber', null) &&
-        request.resource.data.remainingAmount >= 0 &&
-        request.resource.data.remainingAmount <= resource.data.remainingAmount &&
-        request.resource.data.settledAmount >= resource.data.settledAmount &&
-        request.resource.data.totalAmount == request.resource.data.remainingAmount + request.resource.data.settledAmount + resource.data.get('returnedAmount', 0) &&
-        (request.resource.data.status == resource.data.status || (request.resource.data.remainingAmount == 0 && request.resource.data.status == 'settled'))
+        );
+      }
+      allow read: if isAuthenticated() && canReadPettyCashCustody();
+      allow create: if isSuperAdmin() || isFinance(request.resource.data.orgId);
+      allow update: if isSuperAdmin() || (
+        custodyInvariantsHold() && (
+          isFinance(resource.data.orgId) || (
+            isEmployeeSettler() &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt']) &&
+            request.resource.data.totalAmount == resource.data.totalAmount &&
+            request.resource.data.remainingAmount <= resource.data.remainingAmount
+          )
+        )
       );
       allow delete: if isSuperAdmin();
     }
@@ -535,35 +667,43 @@ service cloud.firestore {
            exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)) &&
            get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + resource.data.orgId)).data.userName == resource.data.employeeName);
       }
+      function targetCustody(id) {
+        return get(/databases/$(database)/documents/custodies/$(id)).data;
+      }
+      function isValidCustodyTarget(custodyId) {
+        return custodyId is string &&
+          exists(/databases/$(database)/documents/custodies/$(custodyId)) &&
+          targetCustody(custodyId).orgId == request.resource.data.orgId &&
+          request.resource.data.amount > 0 &&
+          request.resource.data.amount <= targetCustody(custodyId).remainingAmount;
+      }
+      function isEmployeeSettlement(custodyId) {
+        let custody = targetCustody(custodyId);
+        return isOrgMember(request.resource.data.orgId) && (
+          request.resource.data.employeeId == request.auth.uid ||
+          (request.resource.data.get('employeeEmail', '') != '' && request.resource.data.employeeEmail == request.auth.token.email) ||
+          request.resource.data.employeeId == custody.employeeId
+        ) && (
+          custody.employeeId == request.auth.uid ||
+          (custody.get('employeeEmail', '') != '' && custody.employeeEmail == request.auth.token.email) ||
+          (exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + request.resource.data.orgId)) &&
+           get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + request.resource.data.orgId)).data.userName == custody.employeeName)
+        );
+      }
+
       allow get: if isAuthenticated() && (isMissing() || canReadSettlement());
       allow list: if isAuthenticated() && canReadSettlement();
       // An employee may only file an invoice against THEIR OWN custody, in its company.
+      // Finance creating requires the target custody to exist, match org, and amount <= remaining.
       allow create: if isAuthenticated() && (
-        isSuperAdmin() ||
-        isFinance(request.resource.data.orgId) ||
-        (
-          isOrgMember(request.resource.data.orgId) &&
-          request.resource.data.custodyId is string &&
-          exists(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)) &&
-          get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.orgId == request.resource.data.orgId &&
-          request.resource.data.amount > 0 &&
-          request.resource.data.amount <= get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.remainingAmount &&
-          (
-            request.resource.data.employeeId == request.auth.uid ||
-            (request.resource.data.get('employeeEmail', '') != '' && request.resource.data.employeeEmail == request.auth.token.email) ||
-            request.resource.data.employeeId == get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.employeeId
-          ) &&
-          (
-            get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.employeeId == request.auth.uid ||
-            (get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.get('employeeEmail', '') != '' &&
-             get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.employeeEmail == request.auth.token.email) ||
-            (exists(/databases/$(database)/documents/members/$(request.auth.uid + '_' + request.resource.data.orgId)) &&
-             get(/databases/$(database)/documents/members/$(request.auth.uid + '_' + request.resource.data.orgId)).data.userName == get(/databases/$(database)/documents/custodies/$(request.resource.data.custodyId)).data.employeeName)
+        isSuperAdmin() || (
+          isValidCustodyTarget(request.resource.data.custodyId) && (
+            isFinance(request.resource.data.orgId) ||
+            isEmployeeSettlement(request.resource.data.custodyId)
           )
         )
       );
-      allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged());
-      allow delete: if isSuperAdmin() || isFinance(resource.data.orgId);
+      allow update, delete: if isSuperAdmin();
     }
 
     // =========================================================================
