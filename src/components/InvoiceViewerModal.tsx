@@ -8,9 +8,11 @@ import {
   ExternalLink,
   FileText,
   Receipt,
-  Maximize2
+  Maximize2,
+  ShieldAlert,
+  Loader2
 } from 'lucide-react';
-import { openFileSafely, downloadFileSafely, dataUrlToBlob } from '../utils/fileUpload';
+import { openFileSafely, downloadFileSafely, dataUrlToBlob, getAttachmentBlob } from '../utils/fileUpload';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 export interface InvoiceViewerAttachment {
@@ -18,6 +20,7 @@ export interface InvoiceViewerAttachment {
   name?: string;
   size?: string | number;
   type?: string;
+  storagePath?: string;
 }
 
 interface InvoiceViewerModalProps {
@@ -28,17 +31,72 @@ interface InvoiceViewerModalProps {
 export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachment, onClose }) => {
   const [zoom, setZoom] = useState<number>(1);
   const [rotation, setRotation] = useState<number>(0);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [isLoadingBlob, setIsLoadingBlob] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  // Reset zoom & rotation when another document is shown (adjusted while rendering,
-  // so the new document never flashes with the previous one's zoom).
-  const [shownUrl, setShownUrl] = useState(attachment?.url);
-  if (shownUrl !== attachment?.url) {
-    setShownUrl(attachment?.url);
+  // Authenticated storage blob resolution: ensures tenant isolation and storage.rules authorization
+  useEffect(() => {
+    let active = true;
+    let createdUrl: string | null = null;
+
+    if (!attachment) {
+      setBlobUrl(null);
+      setIsLoadingBlob(false);
+      setAuthError(null);
+      return;
+    }
+
+    if (attachment.storagePath) {
+      setIsLoadingBlob(true);
+      setAuthError(null);
+
+      getAttachmentBlob(attachment.storagePath)
+        .then((blob) => {
+          if (!active) return;
+          createdUrl = URL.createObjectURL(blob);
+          setBlobUrl(createdUrl);
+          setIsLoadingBlob(false);
+        })
+        .catch((err: any) => {
+          if (!active) return;
+          console.warn('[InvoiceViewerModal] Authenticated blob load error:', err);
+          setIsLoadingBlob(false);
+          const isUnauthorized =
+            err?.code === 'storage/unauthorized' ||
+            err?.message?.includes('unauthorized') ||
+            err?.message?.includes('permission');
+          if (isUnauthorized) {
+            setAuthError('عذراً، لا تملك الصلاحية للاطلاع على هذا المستند المالي (محمي بقواعد أمان المؤسسة).');
+          } else {
+            // Fallback to static URL if provided
+            setBlobUrl(attachment.url || null);
+          }
+        });
+    } else {
+      setBlobUrl(attachment.url || null);
+      setIsLoadingBlob(false);
+      setAuthError(null);
+    }
+
+    return () => {
+      active = false;
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl);
+      }
+    };
+  }, [attachment?.storagePath, attachment?.url]);
+
+  // Reset zoom & rotation when another document is shown
+  const [shownTarget, setShownTarget] = useState(attachment?.storagePath || attachment?.url);
+  const currentTarget = attachment?.storagePath || attachment?.url;
+  if (shownTarget !== currentTarget) {
+    setShownTarget(currentTarget);
     setZoom(1);
     setRotation(0);
   }
 
-  const isOpen = Boolean(attachment?.url);
+  const isOpen = Boolean(attachment && (attachment.url || attachment.storagePath));
   const dialogRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const onCloseRef = useRef(onClose);
@@ -121,42 +179,38 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
   };
 
   // Generate safe blob URL for PDFs if using base64 data URL
-  const docUrl = attachment?.url;
+  const safeUrl = blobUrl || attachment?.url || '';
   const docType = attachment?.type;
   const docName = attachment?.name;
-  const pdfBlobUrl = useMemo(() => {
-    if (!docUrl) return '';
-    const isPdf = docType === 'pdf' ||
-      (docName && docName.toLowerCase().endsWith('.pdf')) ||
-      docUrl.startsWith('data:application/pdf');
+  const fileName = attachment?.name || 'مستند_الفاتورة';
+  const isPdf = docType === 'pdf' || 
+    (docName && docName.toLowerCase().endsWith('.pdf')) ||
+    safeUrl.startsWith('data:application/pdf') ||
+    (docType === 'pdf' && safeUrl.startsWith('blob:'));
 
-    if (isPdf && docUrl.startsWith('data:')) {
+  const pdfBlobUrl = useMemo(() => {
+    if (!safeUrl) return '';
+    if (isPdf && safeUrl.startsWith('data:')) {
       try {
-        const blob = dataUrlToBlob(docUrl);
+        const blob = dataUrlToBlob(safeUrl);
         return URL.createObjectURL(blob);
       } catch (e) {
         console.error('Failed to convert PDF data URL to blob:', e);
       }
     }
-    return docUrl;
-  }, [docUrl, docType, docName]);
+    return safeUrl;
+  }, [safeUrl, isPdf]);
 
-  // Clean up blob URL on unmount or URL change
+  // Clean up data-url converted blob URL
   useEffect(() => {
     return () => {
-      if (pdfBlobUrl && pdfBlobUrl.startsWith('blob:')) {
+      if (pdfBlobUrl && pdfBlobUrl.startsWith('blob:') && pdfBlobUrl !== blobUrl) {
         URL.revokeObjectURL(pdfBlobUrl);
       }
     };
-  }, [pdfBlobUrl]);
+  }, [pdfBlobUrl, blobUrl]);
 
-  if (!attachment || !attachment.url) return null;
-
-  const safeUrl = attachment.url;
-  const fileName = attachment.name || 'مستند_الفاتورة';
-  const isPdf = attachment.type === 'pdf' || 
-    (attachment.name && attachment.name.toLowerCase().endsWith('.pdf')) ||
-    safeUrl.startsWith('data:application/pdf');
+  if (!attachment || (!attachment.url && !attachment.storagePath)) return null;
 
   const handleZoomIn = () => setZoom(prev => Math.min(Number((prev + 0.25).toFixed(2)), 3.5));
   const handleZoomOut = () => setZoom(prev => Math.max(Number((prev - 0.25).toFixed(2)), 0.5));
@@ -207,8 +261,8 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
           </div>
         </div>
 
-        {/* Center: Image Controls (only relevant for images) */}
-        {!isPdf && (
+        {/* Center: Image Controls (only relevant for images when loaded) */}
+        {!isPdf && !authError && !isLoadingBlob && (
           <div className="flex items-center gap-1 bg-slate-800/80 p-1 rounded-xl border border-slate-700 shadow-inner">
             <button
               type="button"
@@ -264,8 +318,9 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
           <button
             type="button"
             onClick={handleOpenExternal}
+            disabled={!safeUrl || Boolean(authError) || isLoadingBlob}
             title="فتح المستند في تبويب جديد بدون حجب"
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-xl text-xs font-bold transition border border-slate-700 cursor-pointer shadow-2xs"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-xl text-xs font-bold transition border border-slate-700 cursor-pointer shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ExternalLink className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">تبويب جديد ↗</span>
@@ -274,8 +329,9 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
           <button
             type="button"
             onClick={handleDownload}
+            disabled={!safeUrl || Boolean(authError) || isLoadingBlob}
             title="تحميل نسخة من الفاتورة إلى جهازك"
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition shadow-sm cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition shadow-sm cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Download className="h-3.5 w-3.5" />
             <span>تحميل</span>
@@ -302,7 +358,27 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
           }
         }}
       >
-        {isPdf ? (
+        {authError ? (
+          <div className="flex flex-col items-center justify-center p-8 text-center max-w-md bg-slate-900 border border-red-500/30 rounded-2xl shadow-2xl">
+            <div className="p-3 bg-red-500/20 text-red-400 rounded-2xl mb-3 border border-red-500/30">
+              <ShieldAlert className="h-8 w-8" />
+            </div>
+            <h4 className="text-base font-bold text-white mb-2">تعذر فتح المستند المالي</h4>
+            <p className="text-sm text-slate-300 leading-relaxed mb-5">{authError}</p>
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition cursor-pointer border border-slate-700"
+            >
+              إغلاق المعاينة
+            </button>
+          </div>
+        ) : isLoadingBlob ? (
+          <div className="flex flex-col items-center justify-center p-8 text-center">
+            <Loader2 className="h-9 w-9 text-amber-400 animate-spin mb-3" />
+            <p className="text-sm font-medium text-slate-300">جارٍ تحميل المستند المالي بأمان عبر قواعد الحماية...</p>
+          </div>
+        ) : isPdf ? (
           <div 
             className="w-full max-w-4xl h-[82vh] bg-white rounded-2xl overflow-hidden shadow-2xl flex flex-col border border-slate-700"
             onClick={(e) => e.stopPropagation()}
@@ -320,7 +396,7 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
                 <button
                   type="button"
                   onClick={handleOpenExternal}
-                  className="text-amber-400 hover:underline flex items-center gap-1 font-bold"
+                  className="text-amber-400 hover:underline flex items-center gap-1 font-bold cursor-pointer"
                 >
                   <ExternalLink className="h-3.5 w-3.5" />
                   <span>فتح في نافذة كاملة</span>
@@ -338,7 +414,7 @@ export const InvoiceViewerModal: React.FC<InvoiceViewerModalProps> = ({ attachme
             onClick={(e) => e.stopPropagation()}
           >
             <img
-              src={attachment.url}
+              src={safeUrl}
               alt={fileName}
               className="max-h-[82vh] max-w-[90vw] object-contain rounded-2xl shadow-2xl border border-slate-700/80 bg-white/5 select-none"
               draggable={false}

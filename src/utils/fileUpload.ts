@@ -1,4 +1,4 @@
-import { getStorageInstance, ref, uploadBytes, getDownloadURL, deleteObject, auth } from '../lib/firebase';
+import { getStorageInstance, ref, uploadBytes, getDownloadURL, getBlob, deleteObject, auth } from '../lib/firebase';
 import { RequestAttachment } from '../types';
 import { newId, uuid } from './ids';
 import { localToday } from './requestUi';
@@ -266,3 +266,20 @@ export async function deleteAttachmentFile(storagePath: string): Promise<void> {
   const storageRef = ref(storage, storagePath);
   await deleteObject(storageRef);
 }
+
+/**
+ * Fetch attachment binary content via authenticated Firebase Storage SDK.
+ * Evaluates storage.rules on read to enforce strict tenant and role isolation.
+ */
+export async function getAttachmentBlob(storagePath: string): Promise<Blob> {
+  if (!storagePath) {
+    throw new Error('مسار المستند غير محدد.');
+  }
+  const storage = getStorageInstance();
+  if (!storage) {
+    throw new Error('تعذر تحميل المستند: وحدة التخزين السحابية غير متصلة.');
+  }
+  const storageRef = ref(storage, storagePath);
+  return await getBlob(storageRef);
+}
+

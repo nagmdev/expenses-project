@@ -1743,7 +1743,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                               url: activeRequest.invoiceAttachment!.url,
                               name: activeRequest.invoiceAttachment!.name,
                               size: activeRequest.invoiceAttachment!.size,
-                              type: activeRequest.invoiceAttachment!.type
+                              type: activeRequest.invoiceAttachment!.type,
+                              storagePath: activeRequest.invoiceAttachment!.storagePath,
                             })}
                             className="cursor-pointer group shrink-0"
                             title="معاينة الفاتورة"
@@ -1774,7 +1775,8 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                               url: activeRequest.invoiceAttachment!.url,
                               name: activeRequest.invoiceAttachment!.name,
                               size: activeRequest.invoiceAttachment!.size,
-                              type: activeRequest.invoiceAttachment!.type
+                              type: activeRequest.invoiceAttachment!.type,
+                              storagePath: activeRequest.invoiceAttachment!.storagePath,
                             })}
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-xs shadow-2xs transition cursor-pointer"
                           >
@@ -1813,6 +1815,7 @@ export const ExpenseRequestsList: React.FC<ExpenseRequestsListProps> = ({
                                     name: att.name,
                                     size: att.size,
                                     type: att.type,
+                                    storagePath: att.storagePath,
                                   });
                                 }
                               }}

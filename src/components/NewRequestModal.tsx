@@ -28,7 +28,7 @@ import { showToast } from '../utils/toast';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { isArchivedOrg } from '../domain/common';
-import { InvoiceViewerModal } from './InvoiceViewerModal';
+import { InvoiceViewerModal, InvoiceViewerAttachment } from './InvoiceViewerModal';
 import { 
   PaymentMethod, 
   SUPPORTED_CURRENCIES, 
@@ -495,7 +495,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const [invoiceNumber, setInvoiceNumber] = useState<string>('');
   const [invoiceDate, setInvoiceDate] = useState<string>('');
   const [invoiceAttachment, setInvoiceAttachment] = useState<RequestAttachment | null>(null);
-  const [previewModalUrl, setPreviewModalUrl] = useState<{ url: string; name: string; type: string } | null>(null);
+  const [previewModalUrl, setPreviewModalUrl] = useState<InvoiceViewerAttachment | null>(null);
   const [isUploadingInvoice, setIsUploadingInvoice] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -803,6 +803,13 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   const beneficiaryInputRef = useRef<HTMLInputElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const dialogRootRef = useRef<HTMLDivElement>(null);
+  const isSubmittedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      isSubmittedRef.current = false;
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     if (currentOrg?.currency) {
@@ -878,6 +885,29 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
   };
 
   const handleClose = () => {
+    if (!isSubmittedRef.current && !editingRequest) {
+      if (invoiceAttachment?.storagePath) {
+        deleteAttachmentFile(invoiceAttachment.storagePath).catch(err =>
+          console.warn('[Storage Cleanup] Failed to delete orphaned invoice attachment:', err)
+        );
+      }
+      if (visaDocumentAttachment?.storagePath) {
+        deleteAttachmentFile(visaDocumentAttachment.storagePath).catch(err =>
+          console.warn('[Storage Cleanup] Failed to delete orphaned visa doc attachment:', err)
+        );
+      }
+      if (installmentTransferAttachment?.storagePath) {
+        deleteAttachmentFile(installmentTransferAttachment.storagePath).catch(err =>
+          console.warn('[Storage Cleanup] Failed to delete orphaned installment attachment:', err)
+        );
+      }
+      if (walletTransferAttachment?.storagePath) {
+        deleteAttachmentFile(walletTransferAttachment.storagePath).catch(err =>
+          console.warn('[Storage Cleanup] Failed to delete orphaned wallet attachment:', err)
+        );
+      }
+    }
+
     setRequestType('expense');
     setSelectedIncomeShape('instapay');
     setIsCustomTitle(false);
@@ -1158,6 +1188,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           }, { idempotencyKey });
 
           submitGuard.rotateKey();
+          isSubmittedRef.current = true;
           handleClose();
         } catch (err: any) {
           // Keep the idempotency key so a retry resolves to the same operation
@@ -1215,6 +1246,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
           });
 
           submitGuard.rotateKey();
+          isSubmittedRef.current = true;
           handleClose();
         } catch (err: any) {
           // Keep the idempotency key so a retry resolves to the same record
@@ -1315,6 +1347,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
         });
 
         submitGuard.rotateKey();
+        isSubmittedRef.current = true;
         handleClose();
       } catch (err: any) {
         // Keep the idempotency key so a retry resolves to the same record
@@ -2040,7 +2073,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                               src={invoiceAttachment.url} 
                               alt="معاينة الفاتورة" 
                               className="w-12 h-12 rounded-xl object-cover border border-slate-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
-                              onClick={() => setPreviewModalUrl({ url: invoiceAttachment.url!, name: invoiceAttachment.name, type: invoiceAttachment.type })}
+                              onClick={() => setPreviewModalUrl({ url: invoiceAttachment.url!, name: invoiceAttachment.name, type: invoiceAttachment.type, storagePath: invoiceAttachment.storagePath })}
                               title="انقر للمعاينة بحجم كبير"
                             />
                           ) : (
@@ -2072,7 +2105,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                               type="button"
                               onClick={() => {
                                 if (invoiceAttachment.url) {
-                                  setPreviewModalUrl({ url: invoiceAttachment.url, name: invoiceAttachment.name, type: invoiceAttachment.type });
+                                  setPreviewModalUrl({ url: invoiceAttachment.url, name: invoiceAttachment.name, type: invoiceAttachment.type, storagePath: invoiceAttachment.storagePath });
                                 }
                               }}
                               className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200 flex items-center gap-1.5 transition cursor-pointer"
@@ -2147,7 +2180,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                                 src={visaDocumentAttachment.url} 
                                 alt="مستند التأشيرة" 
                                 className="w-12 h-12 rounded-xl object-cover border border-teal-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
-                                onClick={() => setPreviewModalUrl({ url: visaDocumentAttachment.url!, name: visaDocumentAttachment.name, type: visaDocumentAttachment.type })}
+                                onClick={() => setPreviewModalUrl({ url: visaDocumentAttachment.url!, name: visaDocumentAttachment.name, type: visaDocumentAttachment.type, storagePath: visaDocumentAttachment.storagePath })}
                                 title="انقر للمعاينة"
                               />
                             ) : (
@@ -2178,7 +2211,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                                 type="button"
                                 onClick={() => {
                                   if (visaDocumentAttachment.url) {
-                                    setPreviewModalUrl({ url: visaDocumentAttachment.url, name: visaDocumentAttachment.name, type: visaDocumentAttachment.type });
+                                    setPreviewModalUrl({ url: visaDocumentAttachment.url, name: visaDocumentAttachment.name, type: visaDocumentAttachment.type, storagePath: visaDocumentAttachment.storagePath });
                                   }
                                 }}
                                 className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200 flex items-center gap-1.5 transition cursor-pointer"
@@ -2258,7 +2291,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                                 src={installmentTransferAttachment.url} 
                                 alt="سكرين سداد القسط" 
                                 className="w-12 h-12 rounded-xl object-cover border border-blue-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
-                                onClick={() => setPreviewModalUrl({ url: installmentTransferAttachment.url!, name: installmentTransferAttachment.name, type: installmentTransferAttachment.type })}
+                                onClick={() => setPreviewModalUrl({ url: installmentTransferAttachment.url!, name: installmentTransferAttachment.name, type: installmentTransferAttachment.type, storagePath: installmentTransferAttachment.storagePath })}
                                 title="انقر للمعاينة"
                               />
                             ) : (
@@ -2289,7 +2322,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                                 type="button"
                                 onClick={() => {
                                   if (installmentTransferAttachment.url) {
-                                    setPreviewModalUrl({ url: installmentTransferAttachment.url, name: installmentTransferAttachment.name, type: installmentTransferAttachment.type });
+                                    setPreviewModalUrl({ url: installmentTransferAttachment.url, name: installmentTransferAttachment.name, type: installmentTransferAttachment.type, storagePath: installmentTransferAttachment.storagePath });
                                   }
                                 }}
                                 className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200 flex items-center gap-1.5 transition cursor-pointer"
@@ -2365,7 +2398,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                                 src={walletTransferAttachment.url} 
                                 alt="سكرين شحن المحفظة" 
                                 className="w-12 h-12 rounded-xl object-cover border border-purple-200 shadow-2xs shrink-0 cursor-pointer hover:opacity-90 transition"
-                                onClick={() => setPreviewModalUrl({ url: walletTransferAttachment.url!, name: walletTransferAttachment.name, type: walletTransferAttachment.type })}
+                                onClick={() => setPreviewModalUrl({ url: walletTransferAttachment.url!, name: walletTransferAttachment.name, type: walletTransferAttachment.type, storagePath: walletTransferAttachment.storagePath })}
                                 title="انقر للمعاينة"
                               />
                             ) : (
@@ -2396,7 +2429,7 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                                 type="button"
                                 onClick={() => {
                                   if (walletTransferAttachment.url) {
-                                    setPreviewModalUrl({ url: walletTransferAttachment.url, name: walletTransferAttachment.name, type: walletTransferAttachment.type });
+                                    setPreviewModalUrl({ url: walletTransferAttachment.url, name: walletTransferAttachment.name, type: walletTransferAttachment.type, storagePath: walletTransferAttachment.storagePath });
                                   }
                                 }}
                                 className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200 flex items-center gap-1.5 transition cursor-pointer"

@@ -802,6 +802,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                                 name: activeRequest.visaDocumentAttachment!.name,
                                 size: activeRequest.visaDocumentAttachment!.size,
                                 type: activeRequest.visaDocumentAttachment!.type,
+                                storagePath: activeRequest.visaDocumentAttachment!.storagePath,
                               })}
                               className="cursor-pointer shrink-0"
                               title="معاينة المستند"
@@ -827,6 +828,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                               name: activeRequest.visaDocumentAttachment!.name,
                               size: activeRequest.visaDocumentAttachment!.size,
                               type: activeRequest.visaDocumentAttachment!.type,
+                              storagePath: activeRequest.visaDocumentAttachment!.storagePath,
                             })}
                             className="px-2.5 py-1 bg-teal-700 hover:bg-teal-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
                           >
@@ -860,6 +862,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                                 name: activeRequest.installmentTransferAttachment!.name,
                                 size: activeRequest.installmentTransferAttachment!.size,
                                 type: activeRequest.installmentTransferAttachment!.type,
+                                storagePath: activeRequest.installmentTransferAttachment!.storagePath,
                               })}
                               className="cursor-pointer shrink-0"
                               title="معاينة السكرين"
@@ -885,6 +888,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                               name: activeRequest.installmentTransferAttachment!.name,
                               size: activeRequest.installmentTransferAttachment!.size,
                               type: activeRequest.installmentTransferAttachment!.type,
+                              storagePath: activeRequest.installmentTransferAttachment!.storagePath,
                             })}
                             className="px-2.5 py-1 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
                           >
@@ -918,6 +922,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                                 name: activeRequest.walletTransferAttachment!.name,
                                 size: activeRequest.walletTransferAttachment!.size,
                                 type: activeRequest.walletTransferAttachment!.type,
+                                storagePath: activeRequest.walletTransferAttachment!.storagePath,
                               })}
                               className="cursor-pointer shrink-0"
                               title="معاينة التحويل"
@@ -943,6 +948,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                               name: activeRequest.walletTransferAttachment!.name,
                               size: activeRequest.walletTransferAttachment!.size,
                               type: activeRequest.walletTransferAttachment!.type,
+                              storagePath: activeRequest.walletTransferAttachment!.storagePath,
                             })}
                             className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-2xs cursor-pointer shrink-0"
                           >
@@ -997,7 +1003,8 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                               url: activeRequest.invoiceAttachment!.url,
                               name: activeRequest.invoiceAttachment!.name,
                               size: activeRequest.invoiceAttachment!.size,
-                              type: activeRequest.invoiceAttachment!.type
+                              type: activeRequest.invoiceAttachment!.type,
+                              storagePath: activeRequest.invoiceAttachment!.storagePath,
                             })}
                             className="cursor-pointer group shrink-0"
                             title="معاينة الفاتورة"
@@ -1028,7 +1035,8 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                               url: activeRequest.invoiceAttachment!.url,
                               name: activeRequest.invoiceAttachment!.name,
                               size: activeRequest.invoiceAttachment!.size,
-                              type: activeRequest.invoiceAttachment!.type
+                              type: activeRequest.invoiceAttachment!.type,
+                              storagePath: activeRequest.invoiceAttachment!.storagePath,
                             })}
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-xs shadow-2xs transition cursor-pointer"
                           >
@@ -1076,6 +1084,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                                 name: att.name,
                                 size: att.size,
                                 type: att.type,
+                                storagePath: att.storagePath,
                               });
                             }
                           }}
