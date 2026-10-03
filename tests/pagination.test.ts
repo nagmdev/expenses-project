@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   RENDER_STEP,
+  atOrAfter,
   countLabel,
+  mergedHistoryCutoff,
+  oldestLoadedTime,
   createPager,
   errorCodeOf,
   historyErrorMessage,
@@ -328,9 +331,13 @@ describe('createPager — index not deployed yet (failed-precondition) falls bac
     await pager.loadMore();
     expect(last().fallback).toBe(true);
     expect(last().items).toHaveLength(5); // still the first page, never an empty flash
+    // ...but the list is flagged as still loading: an export (disabled while loading) never
+    // takes these 5 rows for the complete list (hasMore is already false in fallback mode).
+    expect(last()).toMatchObject({ loading: true, hasMore: false });
     await expect(pager.loadAll()).rejects.toThrow();
     release();
     expect(last().items).toHaveLength(12);
+    expect(last().loading).toBe(false);
     expect(await pager.loadAll()).toHaveLength(12);
   });
 
@@ -429,6 +436,43 @@ describe('small helpers', () => {
     expect(nextVisibleCount(90, 100)).toBe(100);
     expect(nextVisibleCount(10, 100, 25)).toBe(35);
     expect(nextVisibleCount(-5, 3, 2)).toBe(2);
+  });
+
+  it('two paged sources merged into one list never show a gap (the email log: outbox + legacy email_logs)', async () => {
+    // Outbox: recent events (51..62); legacy email_logs: old ones (1..12). Page size 5.
+    const outbox = new FakeHistory(range(51, 62));
+    const legacy = new FakeHistory(range(1, 12));
+    const a = startPager(outbox, 5);
+    const b = startPager(legacy, 5);
+    await flush();
+    const shown = () => {
+      const sources = [
+        { hasMore: a.last().hasMore, oldest: oldestLoadedTime(a.last().items, 'createdAt') },
+        { hasMore: b.last().hasMore, oldest: oldestLoadedTime(b.last().items, 'createdAt') },
+      ];
+      const cutoff = mergedHistoryCutoff(sources);
+      return ids([...atOrAfter(a.last().items, 'createdAt', cutoff), ...atOrAfter(b.last().items, 'createdAt', cutoff)].sort(cmp));
+    };
+    // The legacy page (r0012..r0008) is held back: outbox events 51..57 are not loaded yet.
+    expect(shown()).toEqual(['r0062', 'r0061', 'r0060', 'r0059', 'r0058']);
+    await a.pager.loadMore();
+    await a.pager.loadMore();
+    // The outbox is complete: everything loaded so far shows, in order, with no hole.
+    expect(shown()).toEqual([...range(51, 62).reverse(), ...range(8, 12).reverse()].map(r => r.id));
+    await b.pager.loadMore();
+    await b.pager.loadMore();
+    expect(shown()).toEqual([...range(1, 12), ...range(51, 62)].reverse().map(r => r.id));
+  });
+
+  it('merge cutoff helpers', () => {
+    expect(mergedHistoryCutoff([{ hasMore: false, oldest: 5 }, { hasMore: false, oldest: 9 }])).toBe(-Infinity);
+    expect(mergedHistoryCutoff([{ hasMore: true, oldest: 5 }, { hasMore: true, oldest: 9 }])).toBe(9);
+    expect(mergedHistoryCutoff([{ hasMore: true, oldest: NaN }, { hasMore: false, oldest: 9 }])).toBe(-Infinity);
+    expect(oldestLoadedTime<Row>([], 'createdAt')).toBeNaN();
+    expect(oldestLoadedTime<Row>([row(3), { id: 'x', createdAt: '' }, row(1), row(2)], 'createdAt')).toBe(new Date(iso(1)).getTime());
+    const list = [row(1), row(5), { id: 'nodate', createdAt: '' }];
+    expect(atOrAfter(list, 'createdAt', -Infinity)).toHaveLength(3);
+    expect(ids(atOrAfter(list, 'createdAt', new Date(iso(5)).getTime()))).toEqual(['r0005']);
   });
 
   it('countLabel marks a count that is not complete yet', () => {

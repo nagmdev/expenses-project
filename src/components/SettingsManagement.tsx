@@ -28,7 +28,7 @@ import {
 import { EmailEventType, type EmailLogEntry } from '../types';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
 import { usePagedHistory } from '../hooks/usePagedHistory';
-import { countLabel, historyScope } from '../lib/pagination';
+import { atOrAfter, countLabel, historyScope, mergedHistoryCutoff, oldestLoadedTime } from '../lib/pagination';
 import { outboxToEmailLogs, type OutboxEvent } from '../domain/outbox';
 import { HistoryPagerFooter } from './ListPaging';
 import { can, canOpenTab } from '../utils/permissions';
@@ -91,22 +91,34 @@ export const SettingsManagement: React.FC = () => {
     enabled: emailLogOpen && isPlatformAdmin,
     filters: [],
   });
+  // Both sources are paged separately: an entry of one older than what the other has loaded so
+  // far is held back until "تحميل المزيد" reaches it (no gap in the middle of the list).
+  const emailSources = [
+    { hasMore: outboxHistory.hasMore, oldest: oldestLoadedTime(outboxHistory.items, 'createdAt'), loadMore: outboxHistory.loadMore },
+    { hasMore: legacyEmailHistory.hasMore, oldest: oldestLoadedTime(legacyEmailHistory.items, 'timestamp'), loadMore: legacyEmailHistory.loadMore },
+  ];
+  const emailCutoff = mergedHistoryCutoff(emailSources);
   const emailLogs = useMemo(() => {
-    const merged = [...outboxToEmailLogs(outboxHistory.items), ...legacyEmailHistory.items];
+    const merged = [
+      ...outboxToEmailLogs(atOrAfter(outboxHistory.items, 'createdAt', emailCutoff)),
+      ...atOrAfter(legacyEmailHistory.items, 'timestamp', emailCutoff),
+    ];
     merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
     return emailLogsClearedAt ? merged.filter(l => l.timestamp > emailLogsClearedAt) : merged;
-  }, [outboxHistory.items, legacyEmailHistory.items, emailLogsClearedAt]);
+  }, [outboxHistory.items, legacyEmailHistory.items, emailLogsClearedAt, emailCutoff]);
   const emailLogPaging = {
     // After "مسح السجل" every older page would be hidden anyway: nothing more to load.
     hasMore: !emailLogsClearedAt && (outboxHistory.hasMore || legacyEmailHistory.hasMore),
     loadingMore: outboxHistory.loadingMore || legacyEmailHistory.loadingMore,
     loading: outboxHistory.loading,
     error: outboxHistory.error || legacyEmailHistory.error,
+    // The source that limits the merged list (its oldest loaded entry is the cutoff) reads its next page.
     loadMore: async () => {
-      await Promise.all([
-        outboxHistory.hasMore ? outboxHistory.loadMore() : undefined,
-        legacyEmailHistory.hasMore ? legacyEmailHistory.loadMore() : undefined,
-      ]);
+      await Promise.all(
+        emailSources
+          .filter(s => s.hasMore && (!Number.isFinite(s.oldest) || s.oldest >= emailCutoff))
+          .map(s => s.loadMore()),
+      );
     },
   };
 

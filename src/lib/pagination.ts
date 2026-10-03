@@ -176,7 +176,8 @@ export function createPager<T>(source: PagedSource<T>, opts: PagerOptions<T>): P
         emit({ loading: false, loadingMore: false, hasMore: false, fallback: true, error: errorCodeOf(e) });
       },
     );
-    emit({ hasMore: false, loadingMore: false, fallback: true });
+    // Until the whole list arrives the screen is not complete: `loading` (an export waits for it).
+    if (!fallbackReady) emit({ loading: true, hasMore: false, loadingMore: false, fallback: true });
   };
 
   // A failure of the first page / the live window: fall back on a missing index, otherwise report it.
@@ -277,6 +278,41 @@ export function historyScope(opts: {
     if (opts.recordOrgId && opts.recordOrgId !== orgId) return null;
   }
   return [...(orgId ? ([['orgId', orgId]] as EqFilters) : []), ...extra];
+}
+
+/** Time of an ISO-8601 (or any Date-parsable) value; NaN when missing / unparsable. */
+const timeOf = (value: unknown): number => (value == null || value === '' ? NaN : new Date(String(value)).getTime());
+
+/** The time of the oldest loaded entry of a paged history (NaN when nothing is loaded). */
+export function oldestLoadedTime<T>(items: T[], field: keyof T): number {
+  let oldest = NaN;
+  for (const item of items) {
+    const t = timeOf(item[field]);
+    if (Number.isFinite(t) && !(t >= oldest)) oldest = t;
+  }
+  return oldest;
+}
+
+/**
+ * Two paged histories shown as ONE list (the email log: the outbox + the legacy email_logs)
+ * must not show an entry of one source below a stretch the other source has not loaded yet:
+ * the hidden entries would later appear in the middle of the list (a gap that looks like
+ * "nothing happened then"). The returned time is the oldest point both sources have fully
+ * loaded: entries older than it are held back until "تحميل المزيد" reaches them.
+ * -Infinity: nothing to hold back (no source has older pages left).
+ */
+export function mergedHistoryCutoff(sources: Array<{ hasMore: boolean; oldest: number }>): number {
+  let cutoff = -Infinity;
+  for (const s of sources) {
+    if (s.hasMore && Number.isFinite(s.oldest) && s.oldest > cutoff) cutoff = s.oldest;
+  }
+  return cutoff;
+}
+
+/** Keeps the entries at or after `cutoff` (mergedHistoryCutoff); entries without a time are held back too while a cutoff applies. */
+export function atOrAfter<T>(items: T[], field: keyof T, cutoff: number): T[] {
+  if (cutoff === -Infinity) return items;
+  return items.filter(item => timeOf(item[field]) >= cutoff);
 }
 
 /** How many rows a progressively rendered list shows next ("عرض المزيد"). */
