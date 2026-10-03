@@ -1,0 +1,59 @@
+# Runs on every push to main and every pull request: the same checks as before a release
+# (docs/06-security-rules-deploy.md): lint, type-check + build, unit tests, and the
+# Firestore security-rules tests against the emulator (needs Java).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Lint, build and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Lint
+        run: npm run lint
+      - name: Type-check and build
+        run: npm run build
+      - name: Unit tests
+        run: npm test
+
+  rules:
+    name: Firestore security rules (emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Cache the Firestore emulator
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/firebase/emulators
+          key: firebase-emulators-15.32.0
+      - run: npm ci --no-audit --no-fund
+      - name: Rules tests
+        run: npm run test:rules
