@@ -418,7 +418,7 @@ owner does it with the Admin SDK (which bypasses the rules), outside this repo.
    sign in as the owner and check the companies, the treasury balances against the ledger
    (`accountTransactions`), and the next request / custody numbers (`counters`).
 
-### Deploying the history pagination (composite indexes)
+## Deploying the history pagination (composite indexes)
 
 The treasury ledger / account statements, the audit log page and the email delivery log
 are now read page by page, newest first (`src/lib/pagination.ts`): the first page live,
