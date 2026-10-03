@@ -1132,7 +1132,18 @@ export const CustodyManagement: React.FC = () => {
                 return (
                   <div 
                     key={custody.id}
-                    className="bg-white rounded-3xl border border-slate-200 hover:border-slate-300 p-5 shadow-xs hover:shadow-md transition-all flex flex-col justify-between"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`عرض كشف حساب العهدة ${custody.custodyNumber}`}
+                    onClick={() => setInspectingCustody(custody)}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setInspectingCustody(custody);
+                      }
+                    }}
+                    className="bg-white rounded-3xl border border-slate-200 hover:border-slate-300 p-5 shadow-xs hover:shadow-md transition-all flex flex-col justify-between cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
                   >
                     {/* Top Row: Custody Code, Status, Date */}
                     <div>
@@ -1269,8 +1280,8 @@ export const CustodyManagement: React.FC = () => {
                       )}
                     </div>
 
-                    {/* Card Actions */}
-                    <div className="mt-5 pt-4 border-t border-slate-100 space-y-2">
+                    {/* Card Actions (their own clicks never open the statement) */}
+                    <div className="mt-5 pt-4 border-t border-slate-100 space-y-2" onClick={(e) => e.stopPropagation()}>
                       {/* Return the remaining cash to the account the custody was withdrawn from */}
                       {canReturnRemainder && (
                         <button

@@ -1764,6 +1764,62 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                       </button>
                     ))}
                   </div>
+
+                  {/* Title / Subject Selection: right under the templates that fill it */}
+                  <div className="pt-2 border-t border-slate-200/70">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="font-extrabold text-slate-700">موضوع وعنوان الطلب *</label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsCustomTitle(!isCustomTitle);
+                          if (!isCustomTitle && !customTitle) {
+                            setCustomTitle(selectedTitlePreset.startsWith('✏️') ? '' : selectedTitlePreset);
+                          }
+                        }}
+                        className="text-[11px] text-teal-700 hover:text-teal-800 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
+                      >
+                        {isCustomTitle ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة عنوان مخصص'}
+                      </button>
+                    </div>
+
+                    {isCustomTitle ? (
+                      <input
+                        ref={titleInputRef}
+                        type="text"
+                        value={customTitle}
+                        onChange={(e) => {
+                          setCustomTitle(e.target.value);
+                          if (formError) setFormError(null);
+                          if (fieldHighlight === 'title') setFieldHighlight(null);
+                        }}
+                        placeholder="اكتب موضوع وعنوان الطلب بالتفصيل هنا..."
+                        className={`w-full p-3 bg-white border rounded-xl focus:outline-none font-medium text-xs shadow-2xs ${
+                          fieldHighlight === 'title' 
+                            ? 'border-rose-500 ring-2 ring-rose-500/20' 
+                            : 'border-slate-200 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 text-slate-900'
+                        }`}
+                      />
+                    ) : (
+                      <select
+                        value={selectedTitlePreset}
+                        onChange={(e) => {
+                          if (e.target.value.startsWith('✏️')) {
+                            setIsCustomTitle(true);
+                            setCustomTitle('');
+                          } else {
+                            setSelectedTitlePreset(e.target.value);
+                          }
+                          if (formError) setFormError(null);
+                          if (fieldHighlight === 'title') setFieldHighlight(null);
+                        }}
+                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 font-bold text-slate-900 text-xs shadow-2xs"
+                      >
+                        {EXPENSE_TITLE_TEMPLATES.map((tpl) => (
+                          <option key={tpl} value={tpl}>{tpl}</option>
+                        ))}
+                      </select>
+                    )}
                 </div>
 
                 {/* =====================================================================
@@ -1925,61 +1981,6 @@ export const NewRequestModal: React.FC<NewRequestModalProps> = ({ isOpen, onClos
                     </div>
                   </div>
 
-                  {/* Title / Subject Selection */}
-                  <div className="pt-1">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label className="font-extrabold text-slate-700">موضوع وعنوان الطلب *</label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsCustomTitle(!isCustomTitle);
-                          if (!isCustomTitle && !customTitle) {
-                            setCustomTitle(selectedTitlePreset.startsWith('✏️') ? '' : selectedTitlePreset);
-                          }
-                        }}
-                        className="text-[11px] text-teal-700 hover:text-teal-800 font-bold flex items-center gap-1 cursor-pointer transition hover:underline"
-                      >
-                        {isCustomTitle ? '📋 اختيار من القائمة المنسدلة' : '✏️ كتابة عنوان مخصص'}
-                      </button>
-                    </div>
-
-                    {isCustomTitle ? (
-                      <input
-                        ref={titleInputRef}
-                        type="text"
-                        value={customTitle}
-                        onChange={(e) => {
-                          setCustomTitle(e.target.value);
-                          if (formError) setFormError(null);
-                          if (fieldHighlight === 'title') setFieldHighlight(null);
-                        }}
-                        placeholder="اكتب موضوع وعنوان الطلب بالتفصيل هنا..."
-                        className={`w-full p-3 bg-white border rounded-xl focus:outline-none font-medium text-xs shadow-2xs ${
-                          fieldHighlight === 'title' 
-                            ? 'border-rose-500 ring-2 ring-rose-500/20' 
-                            : 'border-slate-200 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 text-slate-900'
-                        }`}
-                      />
-                    ) : (
-                      <select
-                        value={selectedTitlePreset}
-                        onChange={(e) => {
-                          if (e.target.value.startsWith('✏️')) {
-                            setIsCustomTitle(true);
-                            setCustomTitle('');
-                          } else {
-                            setSelectedTitlePreset(e.target.value);
-                          }
-                          if (formError) setFormError(null);
-                          if (fieldHighlight === 'title') setFieldHighlight(null);
-                        }}
-                        className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 font-bold text-slate-900 text-xs shadow-2xs"
-                      >
-                        {EXPENSE_TITLE_TEMPLATES.map((tpl) => (
-                          <option key={tpl} value={tpl}>{tpl}</option>
-                        ))}
-                      </select>
-                    )}
                   </div>
                 </div>
 
