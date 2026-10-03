@@ -113,10 +113,6 @@ service cloud.firestore {
         get(profilePath()).data.get('orgId', '') in orgIds;
     }
 
-    function hasSharedOrgRole(orgIds, roles) {
-      return inSharedOrgViaProfile(orgIds) && get(profilePath()).data.get('role', null) in roles;
-    }
-
     // Payout details (bank, IBAN, InstaPay, wallet) belong in users/{uid} only: members/*
     // can be listed by every member of the company.
     function payoutKeys() {
