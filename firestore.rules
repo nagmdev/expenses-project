@@ -459,7 +459,18 @@ service cloud.firestore {
       // No exception for a missing document: "allowed when missing, refused when it exists" would
       // tell anyone which company codes exist (ids are org-<code>). Only its members and the
       // platform owner (createOrganization) read one, existing or not.
-      allow get: if isAuthenticated() && (isSuperAdmin() || isOrgMember(orgId));
+      // ... and an invitee reads the company that invited it by email before its profile links there
+      // (the company switcher shows its name): its active invitation members/pending-<email>_<org>,
+      // addressed to its UID (re-pointed) or to its verified address. One read, last.
+      function invitedTo(orgId) {
+        return request.auth.token.get('email', null) is string && request.auth.token.email != '' &&
+          invitationOf(get(/databases/$(database)/documents/members/$('pending-' + keyPart(request.auth.token.email.lower()) + '_' + orgId)), orgId);
+      }
+      function invitationOf(d, orgId) {
+        return grantsOrg(d, orgId) && (d.data.get('userId', null) == request.auth.uid ||
+          (hasVerifiedEmail() && d.data.get('userEmail', null) == verifiedEmail()));
+      }
+      allow get: if isAuthenticated() && (isSuperAdmin() || isOrgMember(orgId) || invitedTo(orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(orgId));
       allow create: if isSuperAdmin();
       // An org admin keeps the recipient list (membership changes) and the descriptive

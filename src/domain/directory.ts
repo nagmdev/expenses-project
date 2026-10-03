@@ -690,6 +690,7 @@ export function assertMemberUpdatable(actor: Actor, mem: MemberIdentity, changes
  */
 async function invitationReplacedBy(
   tx: TxContext,
+  actor: Actor,
   key: UniqueKeyRead | null,
   email: string,
   userId: string,
@@ -699,9 +700,56 @@ async function invitationReplacedBy(
   if (key.owner.id !== `${pendingUserIdForEmail(email)}_${orgId}`) return null;
   const invitation = await tx.get<OrganizationMember>(COL.members, key.owner.id);
   if (!invitation || invitation.orgId !== orgId || normalizeEmail(invitation.userEmail) !== email) return null;
-  // Already taken by another login (its profile linked it): not this one's to replace.
-  if (isRealUid(invitation.userId) && invitation.userId !== userId) return null;
+  // Already taken by a login (its profile linked it): another login's is not this one's to replace,
+  // and this login is already a member there (it can switch to it). Only the platform owner turns
+  // it into <uid>_<org>: for an org admin the rules keep the record while the person's profile still
+  // names it (members delete → ownProfileLetGo), which failed a multi-company add half-way.
+  if (isRealUid(invitation.userId) && (invitation.userId !== userId || actor.role !== 'super_admin')) return null;
   return invitation;
+}
+
+/**
+ * The record already at members/<id> when a membership is added, or null. A record whose orgId
+ * is not the company its id names was moved by an older app version (updateMember(id, { orgId })):
+ * it holds the id this company's membership needs. Its company's admin cannot even read it
+ * (permission-denied). Either way the platform owner repairs it by saving it once
+ * (updateMemberRecord re-keys it to the id of the company it is in).
+ */
+async function existingMemberFor<T extends OrganizationMember>(tx: TxContext, id: string, orgId: string): Promise<T | null> {
+  let existing: T | null;
+  try {
+    existing = await tx.get<T>(COL.members, id);
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === 'permission-denied') throw movedRecordError();
+    throw err;
+  }
+  if (existing && existing.orgId !== orgId) throw movedRecordError();
+  return existing;
+}
+const movedRecordError = () => new DomainError(
+  'moved_record',
+  'يوجد لهذا الشخص سجل قديم بنفس المعرّف نُقل إلى شركة أخرى بإصدار سابق من النظام. يرجى من المشرف العام فتح ذلك السجل وحفظه مرة واحدة لإصلاحه، ثم أعد الإضافة.',
+);
+
+/**
+ * Addresses the app mints for logins created without an email (AppContext.createCompanyUser:
+ * emp_<key>@company.local). No mail ever reaches them, so the address can never be verified.
+ */
+export const isInternalLoginEmail = (email?: string | null) => normalizeEmail(email).endsWith('@company.local');
+
+/**
+ * An email invitation (pending-<email>) is taken only by the verified owner of the address
+ * (firestore.rules → isGrantFor): one to an internal login address could never be taken, and
+ * the person would be told to verify an address that receives no mail. Such a person is added
+ * with its login (UID), or gets a new login.
+ */
+function assertInvitable(userId: string, email: string) {
+  if (userId.startsWith('pending-') && isInternalLoginEmail(email)) {
+    throw new DomainError(
+      'internal_email',
+      `البريد (${email}) عنوان داخلي أنشأه النظام لحساب دخول بدون بريد، ولا يستقبل رسائل التأكيد، فلا يمكن إضافته كدعوة بالبريد. أنشئ له حساب دخول جديداً من نموذج "مستخدم جديد".`,
+    );
+  }
 }
 
 /** Write phase of invitationReplacedBy: the invitation goes, its key now names `memberId`. */
@@ -735,9 +783,10 @@ export async function createMember(
   const userId = input.userId && !input.userId.startsWith('temp_') ? input.userId : email ? pendingUserIdForEmail(email) : idFromKey('usr', operationKey);
   const id = `${userId}_${input.orgId}`;
   const nowIso = now.toISOString();
+  assertInvitable(userId, email);
 
   return store.runTransaction(async tx => {
-    const existing = await tx.get<OrganizationMember & { operationKey?: string }>(COL.members, id);
+    const existing = await existingMemberFor<OrganizationMember & { operationKey?: string }>(tx, id, input.orgId);
     if (existing) {
       if (existing.operationKey === operationKey) return { value: existing, changed: false, reason: 'duplicate_operation' };
       throw new DomainError('duplicate', `البريد الإلكتروني (${email || input.userName}) مسجل بالفعل في هذه المؤسسة باسم "${existing.userName}"`);
@@ -887,6 +936,100 @@ export function switchableMemberships(
   return eligible.filter((m, i) => eligible.findIndex(o => o.orgId === m.orgId) === i);
 }
 
+export type CompanySwitchChoice = OrganizationMember & { relinkable: boolean };
+
+/**
+ * The company switcher's entries: switchableMemberships, plus the membership behind the profile's
+ * current company when the account may not link it itself (an unverified account whose legacy
+ * profile is linked to a placeholder record). That one is `relinkable: false`: after leaving it the
+ * account comes back only once its email is verified (the record is addressed to it): that company's
+ * admin can no longer find its profile there to re-point the record (AppContext → linkedProfileIds).
+ */
+export function companySwitchChoices(
+  memberships: OrganizationMember[],
+  identity: { uid: string; email?: string | null; emailVerified: boolean },
+  profile: IdentityProfile | null,
+): CompanySwitchChoice[] {
+  const choices: CompanySwitchChoice[] = switchableMemberships(memberships, identity).map(m => ({ ...m, relinkable: true }));
+  const orgId = profile?.orgId?.trim() || '';
+  if (!orgId || choices.some(c => c.orgId === orgId) || !profileMembershipState(profile, memberships, identity).current) return choices;
+  const email = normalizeEmail(identity.email);
+  const backing = memberships.find(m =>
+    m.orgId === orgId && m.active !== false && m.role === profile?.role && (!profile?.memberId || m.id === profile.memberId) &&
+    (m.userId === identity.uid || (Boolean(email) && normalizeEmail(m.userEmail) === email)),
+  );
+  return backing ? [{ ...backing, relinkable: false }, ...choices] : choices;
+}
+
+/**
+ * Profiles that grant a company (users/{uid}.orgId, firestore.rules → inOrgViaProfile) although no
+ * record of that company is theirs: by UID, by the record their memberId names, or by their address.
+ * Older app versions left them (a removal that did not detach the profile, a placeholder record
+ * deleted on its own). No member list shows them, so no company admin can revoke them.
+ * The platform owner's own profile and super admins' are left alone.
+ */
+export function orphanProfiles<P extends { id: string; orgId?: string | null; memberId?: string | null; role?: string | null; email?: string | null; verifiedEmail?: string | null }>(
+  profiles: P[],
+  members: Array<Pick<OrganizationMember, 'id' | 'orgId' | 'userId' | 'userEmail'>>,
+): P[] {
+  return profiles.filter(p => {
+    const orgId = typeof p.orgId === 'string' ? p.orgId.trim() : '';
+    if (!orgId || p.role === 'super_admin' || isPlatformOwnerEmail(p.email) || isPlatformOwnerEmail(p.verifiedEmail)) return false;
+    const addresses = [p.email, p.verifiedEmail].map(normalizeEmail).filter(Boolean);
+    return !members.some(m =>
+      m.orgId === orgId &&
+      (m.userId === p.id || (Boolean(p.memberId) && m.id === p.memberId) || addresses.includes(normalizeEmail(m.userEmail))),
+    );
+  });
+}
+
+/**
+ * Detaches the orphanProfiles (no company, employee), as removeMember would have done, one audit
+ * entry each. Each profile is re-read first: one that changed company since, or whose own record
+ * (<uid>_<org>) exists now, is left alone. Platform owner only (it reads every profile and record).
+ */
+export async function detachOrphanProfiles(
+  store: DataStore,
+  actor: Actor,
+  orphans: Array<{ id: string; orgId?: string | null }>,
+  now: Date = new Date(),
+): Promise<number> {
+  assertRole(actor, ['super_admin'], 'هذا الإجراء متاح للمشرف العام للمنصة فقط.');
+  const nowIso = now.toISOString();
+  let detached = 0;
+  for (let i = 0; i < orphans.length; i += MIGRATION_CHUNK) {
+    const chunk = orphans.slice(i, i + MIGRATION_CHUNK);
+    detached += await store.runTransaction(async tx => {
+      const due: Array<{ id: string; orgId: string; name: string }> = [];
+      for (const o of chunk) {
+        const orgId = String(o.orgId || '');
+        const profile = orgId ? await tx.get<Record<string, any>>(COL.users, o.id) : null;
+        if (!profile || profile.orgId !== orgId || (await tx.get(COL.members, `${o.id}_${orgId}`))) continue;
+        due.push({ id: o.id, orgId, name: String(profile.name || profile.email || o.id) });
+      }
+      for (const d of due) {
+        tx.update(COL.users, d.id, { orgId: '', role: 'employee', memberId: null, updatedAt: nowIso });
+        writeAudit(
+          tx,
+          actor,
+          {
+            actionType: 'update',
+            entityType: 'member',
+            entityId: d.id,
+            entityName: d.name,
+            orgId: d.orgId,
+            details: `تم فصل ملف المستخدم "${d.name}" عن الشركة: لا يقابله أي سجل موظف فيها (بقايا إصدار سابق)`,
+          },
+          auditIdFor(`orphan-${d.id}-${nowIso}`),
+          nowIso,
+        );
+      }
+      return due.length;
+    });
+  }
+  return detached;
+}
+
 /** The identity fields of a user's own users/{uid} profile. */
 export interface IdentityProfile {
   orgId?: string | null;
@@ -985,18 +1128,32 @@ export async function updateMemberRecord(
     // Moved to another company (platform owner): the record moves to the id the rules look a
     // membership up by (<userId>_<orgId>, firestore.rules → inOrgViaMember). Kept under the old
     // company's id it would grant neither company, and block adding the person back there.
-    const targetId = orgChanged && memberId === `${mem.userId}_${mem.orgId}` ? `${mem.userId}_${after.orgId}` : memberId;
-    if (targetId !== memberId && (await tx.get<OrganizationMember>(COL.members, targetId))) {
+    // A login's record always goes to <uid>_<company> (also a re-pointed invitation, whose id still
+    // names the address), and so does one an older app moved without re-keying it (its id names
+    // another company: repaired by any save of the platform owner's, see existingMemberFor).
+    // Otherwise a moved record's id swaps its company.
+    const companySuffix = `_${mem.orgId}`;
+    const ownsIdPrefix = Boolean(mem.userId) && memberId.startsWith(`${mem.userId}_`);
+    const targetId = (isRealUid(mem.userId) && orgChanged) || (actor.role === 'super_admin' && ownsIdPrefix)
+      ? `${mem.userId}_${after.orgId}`
+      : orgChanged && memberId.endsWith(companySuffix)
+      ? `${memberId.slice(0, -companySuffix.length)}_${after.orgId}`
+      : memberId;
+    const rekeyed = targetId !== memberId;
+    if (rekeyed && (await tx.get<OrganizationMember>(COL.members, targetId))) {
       throw new DomainError('duplicate', 'هذا الشخص عضو بالفعل في الشركة المختارة.');
     }
-    let oldKey = (emailChanged || orgChanged) && mem.userEmail ? await readUniqueKey(tx, 'member_email', mem.orgId, mem.userEmail) : null;
-    let newKey = (emailChanged || orgChanged) && after.userEmail ? await readUniqueKey(tx, 'member_email', after.orgId, after.userEmail) : null;
+    const keysMove = emailChanged || orgChanged || rekeyed;
+    let oldKey = keysMove && mem.userEmail ? await readUniqueKey(tx, 'member_email', mem.orgId, mem.userEmail) : null;
+    let newKey = keysMove && after.userEmail ? await readUniqueKey(tx, 'member_email', after.orgId, after.userEmail) : null;
     if (newKey && isKeyTakenByOther(newKey, memberId) && isKeyTakenByOther(newKey, targetId)) {
       throw new DomainError('duplicate', `البريد الإلكتروني (${after.userEmail}) مسجل لموظف آخر في هذه المؤسسة.`);
     }
     if (oldKey && newKey && oldKey.docId === newKey.docId) {
-      oldKey = null;
-      newKey = null;
+      // Same key: kept as it is, or (re-keyed within its company) now naming the record's new id
+      // (one under its pre-2026-10 id is released there and claimed under the current one).
+      if (!rekeyed) newKey = null;
+      if (!rekeyed || !newKey?.legacyDocId) oldKey = null;
     }
 
     const realUids = Array.from(new Set(linkedUserIds.filter(isRealUid)));
@@ -1349,6 +1506,7 @@ export async function createMemberInOrgs(
   const userId = input.userId && !input.userId.startsWith('temp_') ? input.userId : email ? pendingUserIdForEmail(email) : idFromKey('usr', operationKey);
   const who = email ? `البريد الإلكتروني (${email})` : `الموظف (${input.userName})`;
   const nowIso = now.toISOString();
+  assertInvitable(userId, email);
   type Stored = OrganizationMember & { operationKey?: string };
 
   // `replacing`: this transaction replaces invitations (and nothing else). Otherwise companies whose
@@ -1364,14 +1522,14 @@ export async function createMemberInOrgs(
     for (const orgId of chunk) {
       const org = await readTargetOrg(tx, orgId);
       const id = `${userId}_${orgId}`;
-      const existing = await tx.get<Stored>(COL.members, id);
+      const existing = await existingMemberFor<Stored>(tx, id, orgId);
       if (existing) {
         if (existing.operationKey === operationKey) replayed.push(existing);
         else skipped.push({ orgId, reason: 'already_member', existingName: existing.userName });
         continue;
       }
       const key = email ? await readUniqueKey(tx, 'member_email', orgId, email) : null;
-      const invitation = await invitationReplacedBy(tx, key, email, userId, orgId);
+      const invitation = await invitationReplacedBy(tx, actor, key, email, userId, orgId);
       if (invitation && !replacing) {
         deferred.push(orgId);
         continue;

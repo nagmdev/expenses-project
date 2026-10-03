@@ -116,7 +116,9 @@ import {
   migrateLegacyUniqueKeys,
   normalizeOrgIds,
   profileMembershipState,
-  switchableMemberships,
+  companySwitchChoices,
+  detachOrphanProfiles,
+  orphanProfiles,
   reusableProvisionedAccount,
   type MultiOrgSkip,
   removeMember as removeMemberOp,
@@ -171,7 +173,8 @@ export type { MultiOrgSkip };
 /** The platform owner's uniqueness-key migration in this session: running, then its result or error. */
 export interface KeyMigrationState {
   pending: boolean;
-  result?: UniqueKeyMigration;
+  /** orphansDetached: profiles left with a company but no record there (detachOrphanProfiles). */
+  result?: UniqueKeyMigration & { orphansDetached?: number };
   error?: string;
 }
 
@@ -420,7 +423,8 @@ interface AppContextType {
    * the switch (its own profile re-linked to that company's membership, a self-write the rules
    * accept: grantsMembership). Empty / unused for a member of one company.
    */
-  companyChoices: Array<{ orgId: string; name: string; role: Role }>;
+  /** relinkable false: the current company, which this account could not switch back to by itself. */
+  companyChoices: Array<{ orgId: string; name: string; role: Role; relinkable: boolean }>;
   switchOwnCompany: (orgId: string) => Promise<void>;
   /** email_verified of the current ID token (what the security rules see). */
   emailVerified: boolean;
@@ -1151,9 +1155,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // A member of several companies picks the one it works in: its own profile is re-linked to that
   // company's membership (linkOwnProfile, the self-link the rules accept). Otherwise the profile's
   // company always wins (effectiveOrgId), e.g. after a suspension moved it to another company.
+  // (The current company is listed too when the account could not link it itself: companySwitchChoices.)
   const switchChoices = useMemo(
-    () => (firebaseUser && !isSuperAdmin ? switchableMemberships(myMemberships, { uid: firebaseUser.uid, email: firebaseUser.email, emailVerified }) : []),
-    [firebaseUser, isSuperAdmin, myMemberships, emailVerified],
+    () => (firebaseUser && !isSuperAdmin ? companySwitchChoices(myMemberships, { uid: firebaseUser.uid, email: firebaseUser.email, emailVerified }, userDocProfile) : []),
+    [firebaseUser, isSuperAdmin, myMemberships, emailVerified, userDocProfile],
   );
   const [companyNames, setCompanyNames] = useState<Record<string, string>>({});
   const switchOrgIds = switchChoices.length > 1 ? switchChoices.map(m => m.orgId).join('|') : '';
@@ -1161,7 +1166,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const db = switchOrgIds ? getDb() : null;
     if (!db) return;
     let cancelled = false;
-    // Readable through each membership (organizations get: isOrgMember).
+    // Readable through each membership (organizations get: isOrgMember), or the email invitation (invitedTo).
     void Promise.all(switchOrgIds.split('|').map(id =>
       getDoc(doc(db, 'organizations', id)).then(snap => [id, String(snap.data()?.name || id)] as const, () => [id, id] as const),
     )).then(entries => {
@@ -1170,11 +1175,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => { cancelled = true; };
   }, [switchOrgIds]);
   const companyChoices = useMemo(
-    () => (switchChoices.length > 1 ? switchChoices.map(m => ({ orgId: m.orgId, name: companyNames[m.orgId] || m.orgId, role: m.role })) : []),
+    () => (switchChoices.length > 1 ? switchChoices.map(m => ({ orgId: m.orgId, name: companyNames[m.orgId] || m.orgId, role: m.role, relinkable: m.relinkable })) : []),
     [switchChoices, companyNames],
   );
   const switchOwnCompany = async (orgId: string) => {
-    const target = switchChoices.find(m => m.orgId === orgId);
+    const target = switchChoices.find(m => m.orgId === orgId && m.relinkable);
     const db = getDb();
     if (!firebaseUser || !db || !target) throw new DomainError('forbidden', 'لا توجد لك عضوية نشطة في هذه الشركة.');
     await linkOwnProfile(db, firebaseUser, target);
@@ -2250,8 +2255,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // An email invitation of that login's address is not "taken": adding the login replaces it
     // (directory.ts → invitationReplacedBy), the only way it opens for a person who already
     // works in another company.
+    // One already re-pointed to the login is the login's membership there: only the platform owner
+    // turns it into <uid>_<org> (directory.ts → invitationReplacedBy).
     const replaceableInvitation = (m: OrganizationMember) =>
-      Boolean(loginUid) && m.id === `${pendingUserIdForEmail(email)}_${m.orgId}` && (!isRealUid(m.userId) || m.userId === loginUid);
+      Boolean(loginUid) && m.id === `${pendingUserIdForEmail(email)}_${m.orgId}` && (!isRealUid(m.userId) || (isSuperAdmin && m.userId === loginUid));
     return runMultiOrgAdd<OrganizationMember & { operationKey?: string }>({
       targets,
       reason: 'already_member',
@@ -2273,8 +2280,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   /**
    * users/{uid} profiles that may carry a membership's access and that this user can
    * read: the member's own UID, and profiles self-linked to the membership (memberId)
-   * — members invited by email keep a placeholder userId after their first sign-in.
-   * (Profiles are no longer matched by email: that field is not proof of identity.)
+   * — members invited by email keep a placeholder userId after their first sign-in — and, for a
+   * placeholder record, the profiles of ITS company holding its address: the original app linked
+   * them by email only (no memberId), and an unverified account cannot self-link a placeholder.
+   * (Only within the record's company: a profile's email is its own verified address or what an
+   * admin of its company wrote, firestore.rules → users. The domain re-checks each one:
+   * profileCarriesMembership.)
    */
   const linkedProfileIds = async (mem: OrganizationMember | undefined): Promise<string[]> => {
     const db = getDb();
@@ -2293,6 +2304,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       snap.docs.forEach(d => ids.add(d.id));
     } catch (e) {
       console.warn('[members] linked profile lookup skipped:', e);
+    }
+    const email = normalizeEmail(mem.userEmail);
+    if (!isRealUid(mem.userId) && email) {
+      try {
+        const snap = await getDocs(query(collection(db, 'users'), where('orgId', '==', mem.orgId), where('email', '==', email)));
+        snap.docs.forEach(d => ids.add(d.id));
+      } catch (e) {
+        console.warn('[members] profile lookup by address skipped:', e);
+      }
     }
     return Array.from(ids);
   };
@@ -3012,7 +3032,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     setKeyMigration({ pending: true });
     try {
-      const result = await mutate('migrateUniqueKeys', 'all', store => migrateLegacyUniqueKeys(store, actor, owners));
+      const keys = await mutate('migrateUniqueKeys', 'all', store => migrateLegacyUniqueKeys(store, actor, owners));
+      // Same one-time clean-up after the rules update: profiles that still grant a company although
+      // no record there is theirs (older app versions), invisible in every member list.
+      const db = getDb();
+      const profiles = db ? (await getDocs(collection(db, 'users'))).docs.map(d => ({ ...d.data(), id: d.id }) as { id: string; orgId?: string }) : [];
+      const orphans = orphanProfiles(profiles, rawMembers);
+      const orphansDetached = orphans.length > 0 ? await mutate('detachOrphanProfiles', 'all', store => detachOrphanProfiles(store, actor, orphans)) : 0;
+      const result = { ...keys, orphansDetached };
       setKeyMigration({ pending: false, result });
       return result;
     } catch (err: any) {

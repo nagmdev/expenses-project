@@ -55,6 +55,11 @@ export const Header: React.FC<HeaderProps> = ({
   const [switchError, setSwitchError] = useState('');
   const handleSwitchOwnCompany = (orgId: string) => {
     if (orgId === effectiveOrgId) return;
+    // The current company may be one this account cannot switch back to by itself (companySwitchChoices).
+    const leaving = companyChoices.find(c => c.orgId === effectiveOrgId);
+    if (leaving && !leaving.relinkable && !window.confirm(
+      `لن تتمكن من العودة إلى "${leaving.name}" بنفسك قبل تأكيد بريدك الإلكتروني. هل تريد المتابعة؟`,
+    )) return;
     setSwitchError('');
     switchOwnCompany(orgId).catch(err => {
       console.warn('[Company switch]', err?.message || err);

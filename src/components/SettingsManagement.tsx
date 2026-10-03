@@ -77,9 +77,10 @@ export const SettingsManagement: React.FC = () => {
     ? { msg: keyMigration.error, isError: true }
     : migrationResult
     ? {
-        msg: migrationResult.moved + migrationResult.replaced === 0
+        msg: (migrationResult.moved + migrationResult.replaced === 0
           ? `لا توجد مفاتيح بالصيغة القديمة تحتاج إلى ترحيل.${migrationResult.skipped ? ` (${migrationResult.skipped} مفتاح قديم لا يخص سجلاً حالياً تُرك كما هو)` : ''}`
-          : `تم ترحيل ${migrationResult.moved} مفتاح، وإزالة ${migrationResult.replaced} مفتاح قديم مكرر.${migrationResult.skipped ? ` (${migrationResult.skipped} مفتاح قديم لا يخص سجلاً حالياً تُرك كما هو)` : ''}`,
+          : `تم ترحيل ${migrationResult.moved} مفتاح، وإزالة ${migrationResult.replaced} مفتاح قديم مكرر.${migrationResult.skipped ? ` (${migrationResult.skipped} مفتاح قديم لا يخص سجلاً حالياً تُرك كما هو)` : ''}`)
+          + (migrationResult.orphansDetached ? ` وتم فصل ${migrationResult.orphansDetached} ملف مستخدم عن شركة لا يقابله فيها أي سجل موظف.` : ''),
       }
     : null;
   const handleMigrateUniqueKeys = () => {
