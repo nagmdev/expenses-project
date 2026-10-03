@@ -717,6 +717,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [rawDepartments, setRawDepartments] = useState<Department[]>([]);
   const [keyMigration, setKeyMigration] = useState<KeyMigrationState | null>(null);
   const [consistencyCheck, setConsistencyCheck] = useState<ConsistencyCheckState | null>(null);
+  /** The current consistency run; bumped on sign-out so a run still reading never shows its report to the next user. */
+  const consistencyRunRef = useRef(0);
   const [outboxEvents, setOutboxEvents] = useState<OutboxEvent[]>([]);
   const [legacyEmailLogs, setLegacyEmailLogs] = useState<EmailLogEntry[]>([]);
   const [emailLogsClearedAt, setEmailLogsClearedAt] = useState<string>('');
@@ -1695,6 +1697,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setOrgsLoaded(false);
     setSuperAdminRecords([]);
     setPermissionDeniedSources([]);
+    // The owner's last consistency report holds every company's balances.
+    consistencyRunRef.current += 1;
+    setConsistencyCheck(null);
     platformRecipientsBackfillRef.current = false;
   }, [firebaseUser]);
 
@@ -3122,7 +3127,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!db) throw new DomainError('offline', 'قاعدة البيانات غير متصلة.');
     const total = CONSISTENCY_COLLECTIONS.length;
     let done = 0;
-    setConsistencyCheck({ pending: true, progress: { done, total } });
+    const runId = ++consistencyRunRef.current;
+    const setRun = (state: ConsistencyCheckState) => {
+      if (consistencyRunRef.current === runId) setConsistencyCheck(state);
+    };
+    setRun({ pending: true, progress: { done, total } });
     try {
       const data: ConsistencyData = {};
       const unreadable: FinancialConsistencyRun['unreadable'] = [];
@@ -3138,7 +3147,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             });
           } finally {
             done += 1;
-            setConsistencyCheck({ pending: true, progress: { done, total } });
+            setRun({ pending: true, progress: { done, total } });
           }
         }),
       );
@@ -3147,10 +3156,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       unreadable.sort((a, b) => CONSISTENCY_COLLECTIONS.indexOf(a.collection) - CONSISTENCY_COLLECTIONS.indexOf(b.collection));
       const result: FinancialConsistencyRun = { ...checkFinancialConsistency(data, new Date()), unreadable };
-      setConsistencyCheck({ pending: false, result });
+      setRun({ pending: false, result });
       return result;
     } catch (err: any) {
-      setConsistencyCheck({ pending: false, error: err?.message || 'تعذر تشغيل الفحص. تحقق من الاتصال ثم أعد المحاولة.' });
+      setRun({ pending: false, error: err?.message || 'تعذر تشغيل الفحص. تحقق من الاتصال ثم أعد المحاولة.' });
       throw err;
     }
   };
