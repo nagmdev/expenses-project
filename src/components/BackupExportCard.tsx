@@ -4,7 +4,7 @@ import { useApp } from '../context/AppContext';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
 import { can } from '../utils/permissions';
 import { showToast } from '../utils/toast';
-import { BackupCancelledError, backupSteps, saveBackupFile, type BackupStep } from '../lib/backupExport';
+import { BACKUP_COLLECTIONS, BackupCancelledError, backupSteps, saveBackupFile, type BackupStep } from '../lib/backupExport';
 import type { BackupSkipped } from '../utils/backupFormat';
 
 interface ExportResult {
@@ -50,6 +50,11 @@ export const BackupExportCard: React.FC = () => {
           { includeAttachments, includeSecrets, signal: controller.signal },
           step => setSteps(prev => prev.map(s => (s.name === step.name ? step : s))),
         );
+        // Nothing could be read (offline, quota used up, not the owner on the server): a file of
+        // failures only would look like a backup. Say so instead of downloading it.
+        if (BACKUP_COLLECTIONS.every(c => !file.collections[c.name])) {
+          throw new Error('تعذرت قراءة أي بيانات من السحابة، ولم يُنزَّل أي ملف. تحقق من الاتصال ومن الحصة اليومية ثم أعد المحاولة.');
+        }
         const fileName = saveBackupFile(file);
         const total = Object.values(file.collections).reduce((sum, docs) => sum + docs.length, 0);
         const failed = file.skipped.filter(s => s.failed);
@@ -152,6 +157,7 @@ export const BackupExportCard: React.FC = () => {
               {stepIcon(s)}
               <span className="font-bold text-slate-800">{s.label}</span>
               <span dir="ltr" className="font-mono text-slate-400">{s.name}</span>
+              {s.state === 'failed' && s.note && <span dir="ltr" className="font-mono text-rose-600 truncate">{s.note}</span>}
               <span className="mr-auto font-mono text-slate-700">{s.state === 'waiting' ? '—' : s.count.toLocaleString('en-US')}</span>
             </li>
           ))}
