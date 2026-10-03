@@ -3,6 +3,7 @@
  * losing their type, secrets masked by default, and the file assembled in pieces that parse
  * back to the same object. The export against real rules is in tests-rules/backup.test.ts.
  */
+import { readFileSync } from 'fs';
 import { describe, expect, it } from 'vitest';
 import { initializeApp } from 'firebase/app';
 import { Bytes, GeoPoint, Timestamp, doc, getFirestore, vector } from 'firebase/firestore';
@@ -18,7 +19,7 @@ import {
   summarizeBackup,
   type BackupFile,
 } from '../src/utils/backupFormat';
-import { BACKUP_COLLECTIONS, NOT_EXPORTABLE, backupSteps, counterIds } from '../src/lib/backupExport';
+import { ATTACHMENT_CHUNKS, BACKUP_COLLECTIONS, COUNTERS, NOT_EXPORTABLE, backupSteps, counterIds } from '../src/lib/backupExport';
 
 // A Firestore instance only to build a DocumentReference: nothing connects.
 const db = getFirestore(initializeApp({ projectId: 'demo-backup-unit', apiKey: 'demo' }, 'backup-unit'));
@@ -153,13 +154,26 @@ describe('secrets are masked by default', () => {
     expect(redacted).toEqual(['meta.webhookUrl', 'list.0.password']);
   });
 
-  it('only strings are masked: a secret-named map is searched, a flag or number is kept', () => {
+  it('everything textual under a secret-named field is masked (maps, arrays, bytes); a flag or number is kept', () => {
     const { data, redacted } = serializeDocData(
-      { credentials: { email: 'a@b.test', password: 'pw' }, apiKeyConfigured: true, tokenCount: 3 },
+      {
+        credentials: { user: 'a@b.test', pass: 'pw', port: 465 },
+        apiKeys: ['k1', '', 'k2'],
+        privateKey: Bytes.fromUint8Array(new Uint8Array([1, 2, 3])),
+        apiKeyConfigured: true,
+        tokenCount: 3,
+      },
       { includeSecrets: false },
     );
-    expect(data).toEqual({ credentials: { email: 'a@b.test', password: { __type: 'redacted' } }, apiKeyConfigured: true, tokenCount: 3 });
-    expect(redacted).toEqual(['credentials.password']);
+    expect(data).toEqual({
+      credentials: { user: { __type: 'redacted' }, pass: { __type: 'redacted' }, port: 465 },
+      apiKeys: [{ __type: 'redacted' }, '', { __type: 'redacted' }],
+      privateKey: { __type: 'redacted' },
+      apiKeyConfigured: true,
+      tokenCount: 3,
+    });
+    expect(redacted).toEqual(['credentials.user', 'credentials.pass', 'apiKeys.0', 'apiKeys.2', 'privateKey']);
+    expect(JSON.stringify(data)).not.toMatch(/pw|k1|k2|a@b/);
   });
 
   it('includeSecrets (the owner opted in) keeps every value', () => {
@@ -241,6 +255,20 @@ describe('what an export reads', () => {
     }
     for (const s of NOT_EXPORTABLE) expect(names).not.toContain(s.name);
     expect(NOT_EXPORTABLE.map(s => s.name).sort()).toEqual(['legacyRestores', 'mail', 'uniqueKeys']);
+  });
+
+  it('in step with firestore.rules: every top-level match block is exported, read by id or reported', () => {
+    // A collection added to the rules without a decision here would silently be missing from backups.
+    const rules = readFileSync('firestore.rules', 'utf8');
+    const topLevel = [...rules.matchAll(/^ {4}match \/([A-Za-z_]+)\/\{/gm)].map(m => m[1]);
+    expect(topLevel.length).toBeGreaterThan(20);
+    const covered = new Set([...BACKUP_COLLECTIONS.map(c => c.name), COUNTERS.name, ...NOT_EXPORTABLE.map(s => s.name)]);
+    for (const name of topLevel) expect(covered.has(name), name).toBe(true);
+    for (const name of covered) expect(topLevel, name).toContain(name);
+    // The only subcollection: attachments/{id}/chunks (read per attachment when asked for).
+    const nested = [...rules.matchAll(/^ {6,}match \/([A-Za-z_]+)\/\{/gm)].map(m => m[1]);
+    expect(nested).toEqual(['chunks']);
+    expect(ATTACHMENT_CHUNKS.name).toBe('attachmentChunks');
   });
 
   it('counters are read by id: every numbered sequence from 2020 to next year', () => {

@@ -108,8 +108,13 @@ interface SerializeContext {
   redacted: string[];
 }
 
-function serializeAt(value: unknown, field: string, ctx: SerializeContext): BackupValue | undefined {
+/** `secret`: the value sits under a secret-named field (e.g. `apiKeys: [...]`, `smtpCredentials: {...}`). */
+function serializeAt(value: unknown, field: string, ctx: SerializeContext, secret = false): BackupValue | undefined {
   if (value === undefined) return undefined;
+  if (secret && !ctx.includeSecrets && ((typeof value === 'string' && value !== '') || value instanceof Bytes || value instanceof Uint8Array)) {
+    ctx.redacted.push(field);
+    return { __type: 'redacted' };
+  }
   if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
   if (typeof value === 'number') {
     if (Number.isFinite(value)) return value;
@@ -131,26 +136,22 @@ function serializeAt(value: unknown, field: string, ctx: SerializeContext): Back
 
   if (Array.isArray(value)) {
     // Firestore arrays never hold undefined; a hole is kept as null so indexes do not shift.
-    return value.map((item, i) => serializeAt(item, `${field}.${i}`, ctx) ?? null);
+    return value.map((item, i) => serializeAt(item, `${field}.${i}`, ctx, secret) ?? null);
   }
 
   // A map (any other object: its own enumerable fields, like Firestore stores it).
   // A stored map that itself has a "__type" key is wrapped, so it is never read back as a type.
-  const out = serializeMap(value as Record<string, unknown>, field, ctx);
+  const out = serializeMap(value as Record<string, unknown>, field, ctx, secret);
   return '__type' in out ? { __type: 'map', value: out } : out;
 }
 
-function serializeMap(map: Record<string, unknown>, prefix: string, ctx: SerializeContext): BackupData {
+// Under a secret-named field every non-empty string (and raw bytes) is masked, however deep (an
+// array of keys, a credentials map): flags and numbers (apiKeyConfigured, tokenCount) are kept.
+function serializeMap(map: Record<string, unknown>, prefix: string, ctx: SerializeContext, secret = false): BackupData {
   const out: BackupData = {};
   for (const key of Object.keys(map)) {
     const field = prefix ? `${prefix}.${key}` : key;
-    const raw = map[key];
-    if (!ctx.includeSecrets && typeof raw === 'string' && raw !== '' && isSecretFieldName(key)) {
-      out[key] = { __type: 'redacted' };
-      ctx.redacted.push(field);
-      continue;
-    }
-    const v = serializeAt(raw, field, ctx);
+    const v = serializeAt(map[key], field, ctx, secret || isSecretFieldName(key));
     if (v !== undefined) out[key] = v;
   }
   return out;
@@ -162,8 +163,8 @@ export function serializeValue(value: unknown): BackupValue {
 }
 
 /**
- * A document's data as backup JSON. Non-empty string fields whose name marks a secret are
- * masked (at any depth) unless `includeSecrets`; `redacted` lists their dotted field paths.
+ * A document's data as backup JSON. Non-empty strings under a field whose name marks a secret
+ * are masked (at any depth) unless `includeSecrets`; `redacted` lists their dotted field paths.
  */
 export function serializeDocData(
   data: Record<string, unknown>,
