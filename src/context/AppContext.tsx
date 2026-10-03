@@ -138,6 +138,13 @@ import {
   outboxToEmailLogs,
   type OutboxEvent,
 } from '../domain/outbox';
+import {
+  CONSISTENCY_COLLECTIONS,
+  checkFinancialConsistency,
+  type ConsistencyCollection,
+  type ConsistencyData,
+  type ConsistencyReport,
+} from '../domain/reconciliation';
 import { newOperationKey } from '../utils/ids';
 import { singleFlight } from '../utils/singleFlight';
 import { HOME_TAB, canOpenTab } from '../utils/permissions';
@@ -183,6 +190,20 @@ export interface OrphanProfileRow {
 export interface KeyMigrationState {
   pending: boolean;
   result?: UniqueKeyMigration;
+  error?: string;
+}
+
+/** A financial consistency run: the report plus the collections that could not be read (and why). */
+export interface FinancialConsistencyRun extends ConsistencyReport {
+  unreadable: Array<{ collection: ConsistencyCollection; reason: string }>;
+}
+
+/** The platform owner's consistency check in this session: running (with progress), then its report or error. */
+export interface ConsistencyCheckState {
+  pending: boolean;
+  /** Collections read so far / to read. */
+  progress?: { done: number; total: number };
+  result?: FinancialConsistencyRun;
   error?: string;
 }
 
@@ -641,6 +662,13 @@ interface AppContextType {
   detachOrphans: (rows: OrphanProfileRow[]) => Promise<number>;
   /** The last migration of this session (running / result / error): kept here so leaving Settings mid-run does not lose it. */
   keyMigration: KeyMigrationState | null;
+  /**
+   * Platform owner: READ-ONLY financial consistency check (src/domain/reconciliation.ts) over
+   * every company's records, read fresh from the database. Never writes anything.
+   */
+  runFinancialConsistencyCheck: () => Promise<FinancialConsistencyRun>;
+  /** The last consistency check of this session (running / report / error), kept across pages. */
+  consistencyCheck: ConsistencyCheckState | null;
 
   // Visa Issuance & Expense Management (طلبات وإصدار التأشيرات ومصروفاتها)
   visaRequests: VisaRequest[];
@@ -688,6 +716,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [rawCustodySettlements, setRawCustodySettlements] = useState<CustodySettlementItem[]>([]);
   const [rawDepartments, setRawDepartments] = useState<Department[]>([]);
   const [keyMigration, setKeyMigration] = useState<KeyMigrationState | null>(null);
+  const [consistencyCheck, setConsistencyCheck] = useState<ConsistencyCheckState | null>(null);
   const [outboxEvents, setOutboxEvents] = useState<OutboxEvent[]>([]);
   const [legacyEmailLogs, setLegacyEmailLogs] = useState<EmailLogEntry[]>([]);
   const [emailLogsClearedAt, setEmailLogsClearedAt] = useState<string>('');
@@ -3079,6 +3108,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return mutate('detachOrphanProfiles', 'all', store => detachOrphanProfiles(store, actor, rows));
   };
 
+  // Financial consistency check (READ-ONLY). Every collection it needs is read fresh with
+  // getDocs — never the live listeners, which are scoped to a company / role and may still be
+  // loading. The platform owner may list each of them (firestore.rules → isSuperAdmin()); one
+  // that cannot be read anyway (offline, rules not yet published) is reported and its checks
+  // are skipped. Nothing is written: fixes go through the normal, audited operations.
+  const runFinancialConsistencyCheck = async (): Promise<FinancialConsistencyRun> => {
+    if (!isSuperAdmin) throw new DomainError('forbidden', 'فحص سلامة الحسابات متاح للمشرف العام للمنصة فقط.');
+    const db = getDb();
+    if (!db) throw new DomainError('offline', 'قاعدة البيانات غير متصلة.');
+    const total = CONSISTENCY_COLLECTIONS.length;
+    let done = 0;
+    setConsistencyCheck({ pending: true, progress: { done, total } });
+    try {
+      const data: ConsistencyData = {};
+      const unreadable: FinancialConsistencyRun['unreadable'] = [];
+      await Promise.all(
+        CONSISTENCY_COLLECTIONS.map(async name => {
+          try {
+            const snap = await getDocs(collection(db, name));
+            (data as Record<string, unknown>)[name] = snap.docs.map(d => ({ ...d.data(), id: d.id }));
+          } catch (err: any) {
+            unreadable.push({
+              collection: name,
+              reason: err?.code === 'permission-denied' ? 'لا توجد صلاحية قراءة (قواعد الأمان)' : err?.message || 'تعذرت القراءة',
+            });
+          } finally {
+            done += 1;
+            setConsistencyCheck({ pending: true, progress: { done, total } });
+          }
+        }),
+      );
+      const result: FinancialConsistencyRun = { ...checkFinancialConsistency(data, new Date()), unreadable };
+      setConsistencyCheck({ pending: false, result });
+      return result;
+    } catch (err: any) {
+      setConsistencyCheck({ pending: false, error: err?.message || 'تعذر تشغيل الفحص. تحقق من الاتصال ثم أعد المحاولة.' });
+      throw err;
+    }
+  };
+
   // =========================================================================
   // AUTH & PROFILE
   // =========================================================================
@@ -3331,6 +3400,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         findOrphanProfiles,
         detachOrphans,
         keyMigration,
+        runFinancialConsistencyCheck,
+        consistencyCheck,
         refreshData,
         resetToSampleData,
       }}
