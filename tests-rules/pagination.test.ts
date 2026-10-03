@@ -208,6 +208,11 @@ describe('treasury ledger, paged (accountTransactions)', () => {
     expect(statement.state.items).toHaveLength(4);
     const transfers = await assertSucceeds(getDocs(eqQuery(db(OWNER), 'accountTransactions', scopeFor(OWNER, [['referenceType', 'transfer']]))));
     expect(transfers.size).toBe(3);
+    // The owner's fresh pre-delete check (deletePaymentAccount): on the account alone, any company.
+    const ownerCheck = await assertSucceeds(getDocs(query(eqQuery(db(OWNER), 'accountTransactions', [['accountId', 'acc-x']]), limit(1))));
+    expect(ownerCheck.size).toBe(1);
+    // ...which staff may not send (they keep the orgId filter).
+    await assertFails(getDocs(query(eqQuery(db(ADMIN), 'accountTransactions', [['accountId', 'acc-a']]), limit(1))));
   });
 });
 
