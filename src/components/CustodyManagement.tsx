@@ -36,6 +36,8 @@ import {
 } from '../utils/validation';
 import { InvoiceViewerModal } from './InvoiceViewerModal';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
+import { useProgressiveList } from '../hooks/useProgressiveList';
+import { ShowMoreButton } from './ListPaging';
 import { useAttachmentPreview } from '../hooks/useAttachmentPreview';
 import { formatFileSize } from '../utils/fileUpload';
 import type { StoredAttachment } from '../lib/attachments';
@@ -278,6 +280,12 @@ export const CustodyManagement: React.FC = () => {
       return true;
     });
   }, [cleanTargetSettlements, selectedOrgFilter, employeeFilter, searchQuery]);
+
+  // Custodies and settlements stay fully loaded (the KPIs below and the dashboard need all of
+  // them); only their rendering is progressive: the first rows, then "عرض المزيد".
+  const listFilterKey = JSON.stringify([selectedOrgFilter, employeeFilter, statusFilter, searchQuery]);
+  const custodyRows = useProgressiveList(filteredCustodies, listFilterKey);
+  const settlementRows = useProgressiveList(filteredSettlements, listFilterKey);
 
   // KPI Calculations, per currency (a custody takes the currency of the account it was paid
   // from, so amounts in different currencies are never added under one label).
@@ -1112,7 +1120,7 @@ export const CustodyManagement: React.FC = () => {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-              {filteredCustodies.map((custody) => {
+              {custodyRows.visible.map((custody) => {
                 // totalAmount = settled (invoices) + returned (deposited back) + remaining (cash in hand)
                 const remainingAmount = Number(custody.remainingAmount || 0);
                 const returnedAmount = Number(custody.returnedAmount || 0);
@@ -1342,6 +1350,7 @@ export const CustodyManagement: React.FC = () => {
               })}
             </div>
           )}
+          <ShowMoreButton remaining={custodyRows.remaining} noun="عهدة" onClick={custodyRows.showMore} />
         </>
       )}
 
@@ -1378,7 +1387,7 @@ export const CustodyManagement: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredSettlements.map((item) => (
+                  {settlementRows.visible.map((item) => (
                     <tr key={item.id} className="hover:bg-slate-50/70 transition">
                       <td className="p-4 text-slate-600 font-mono whitespace-nowrap">
                         {item.invoiceDate || formatLocalDate(item.createdAt)}
@@ -1431,6 +1440,7 @@ export const CustodyManagement: React.FC = () => {
                   ))}
                 </tbody>
               </table>
+              <ShowMoreButton remaining={settlementRows.remaining} noun="فاتورة" onClick={settlementRows.showMore} className="p-3 text-center border-t border-slate-100" />
             </div>
           )}
         </div>

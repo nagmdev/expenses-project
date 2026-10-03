@@ -22,6 +22,8 @@ import { ExpenseRequest } from '../types';
 import { NewRequestModal } from './NewRequestModal';
 import { InvoiceViewerModal, InvoiceViewerAttachment, AttachmentImage } from './InvoiceViewerModal';
 import { useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import { useProgressiveList } from '../hooks/useProgressiveList';
+import { ShowMoreButton } from './ListPaging';
 import {
   fmtMoney,
   formatLocalDate,
@@ -79,14 +81,16 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
     });
   }, [requests, currentRole, currentUser]);
 
-  const filteredRequests = myRequests.filter(r => {
+  const filteredRequests = useMemo(() => myRequests.filter(r => {
     const matchStatus = filterStatus === 'all' || r.status === filterStatus;
     const matchSearch = 
       r.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
       r.requestNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
       r.serviceCategoryName.toLowerCase().includes(searchQuery.toLowerCase());
     return matchStatus && matchSearch;
-  });
+  }), [myRequests, filterStatus, searchQuery]);
+  // Every request stays loaded (the totals above need them); only the cards are rendered progressively.
+  const requestRows = useProgressiveList(filteredRequests, JSON.stringify([filterStatus, searchQuery]));
 
   // Selected request for deep tracking — always one of the listed (filtered) requests, so
   // a request the status tab hides is not kept on screen.
@@ -335,7 +339,7 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
 
           {/* List Items */}
           <div className="space-y-3">
-            {filteredRequests.map((req) => {
+            {requestRows.visible.map((req) => {
               const isSelected = activeRequest?.id === req.id;
               const hasClarification = req.status === 'clarification_requested';
 
@@ -416,6 +420,8 @@ export const RequesterTracker: React.FC<RequesterTrackerProps> = ({
                 </div>
               );
             })}
+
+            <ShowMoreButton remaining={requestRows.remaining} noun="طلب" onClick={requestRows.showMore} />
 
             {filteredRequests.length === 0 && (
               <div className="bg-white p-8 rounded-2xl border border-slate-200 text-center">
