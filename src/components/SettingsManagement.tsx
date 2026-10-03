@@ -93,11 +93,12 @@ export const SettingsManagement: React.FC = () => {
   });
   // Both sources are paged separately: an entry of one older than what the other has loaded so
   // far is held back until "تحميل المزيد" reaches it (no gap in the middle of the list).
-  const emailSources = [
-    { hasMore: outboxHistory.hasMore, oldest: oldestLoadedTime(outboxHistory.items, 'createdAt'), loadMore: outboxHistory.loadMore },
-    { hasMore: legacyEmailHistory.hasMore, oldest: oldestLoadedTime(legacyEmailHistory.items, 'timestamp'), loadMore: legacyEmailHistory.loadMore },
-  ];
-  const emailCutoff = mergedHistoryCutoff(emailSources);
+  const outboxOldest = useMemo(() => oldestLoadedTime(outboxHistory.items, 'createdAt'), [outboxHistory.items]);
+  const legacyOldest = useMemo(() => oldestLoadedTime(legacyEmailHistory.items, 'timestamp'), [legacyEmailHistory.items]);
+  const emailCutoff = mergedHistoryCutoff([
+    { hasMore: outboxHistory.hasMore, oldest: outboxOldest },
+    { hasMore: legacyEmailHistory.hasMore, oldest: legacyOldest },
+  ]);
   const emailLogs = useMemo(() => {
     const merged = [
       ...outboxToEmailLogs(atOrAfter(outboxHistory.items, 'createdAt', emailCutoff)),
@@ -114,11 +115,11 @@ export const SettingsManagement: React.FC = () => {
     error: outboxHistory.error || legacyEmailHistory.error,
     // The source that limits the merged list (its oldest loaded entry is the cutoff) reads its next page.
     loadMore: async () => {
-      await Promise.all(
-        emailSources
-          .filter(s => s.hasMore && (!Number.isFinite(s.oldest) || s.oldest >= emailCutoff))
-          .map(s => s.loadMore()),
-      );
+      const limits = (hasMore: boolean, oldest: number) => hasMore && (!Number.isFinite(oldest) || oldest >= emailCutoff);
+      await Promise.all([
+        limits(outboxHistory.hasMore, outboxOldest) ? outboxHistory.loadMore() : undefined,
+        limits(legacyEmailHistory.hasMore, legacyOldest) ? legacyEmailHistory.loadMore() : undefined,
+      ]);
     },
   };
 
