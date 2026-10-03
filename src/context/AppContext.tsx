@@ -2618,8 +2618,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       assertPaymentAccountDeletable(account);
       let hasLedger: boolean;
       try {
-        // Filtered on the account's company too, so firestore.rules can prove it for an org admin.
-        hasLedger = await ledgerHasLines([['orgId', account.orgId], ['accountId', accountId]]);
+        // The owner checks every line of the account, whatever company it carries (as the whole
+        // ledger it used to load did); anyone else filters on the account's company too, so
+        // firestore.rules can prove the query.
+        hasLedger = await ledgerHasLines(
+          isSuperAdmin || !account.orgId ? [['accountId', accountId]] : [['orgId', account.orgId], ['accountId', accountId]],
+        );
       } catch (err) {
         throw err instanceof DomainError
           ? err
