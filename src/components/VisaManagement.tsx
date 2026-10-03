@@ -21,6 +21,8 @@ import {
 } from '../utils/recordAttachments';
 import { useAttachmentPreview } from '../hooks/useAttachmentPreview';
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
+import { useProgressiveList } from '../hooks/useProgressiveList';
+import { ShowMoreButton } from './ListPaging';
 import { InvoiceViewerModal } from './InvoiceViewerModal';
 import { can } from '../utils/permissions';
 import { isArchivedOrg } from '../domain/common';
@@ -266,6 +268,8 @@ export const VisaManagement: React.FC = () => {
       return matchSearch && matchType && matchStatus;
     });
   }, [cleanVisaRequests, searchTerm, selectedTypeFilter, selectedStatusFilter]);
+  // Every visa stays loaded (the metrics below need them); only the table rows are rendered progressively.
+  const visaRows = useProgressiveList(filteredVisaRequests, JSON.stringify([searchTerm, selectedTypeFilter, selectedStatusFilter]));
 
   // Overall Financial Metrics, per currency (a SAR and an EGP amount are never added under one label).
   // Rejected visas cost nothing; only approved (partly) unpaid visas are payable. Pending visas
@@ -879,7 +883,7 @@ export const VisaManagement: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-medium">
-                {filteredVisaRequests.map((req) => {
+                {visaRows.visible.map((req) => {
                   const statusConfig = VISA_STATUS_LABELS[req.status] || VISA_STATUS_LABELS.pending;
                   const progressPct = req.totalAmount > 0 ? Math.min(100, Math.round((req.paidAmount / req.totalAmount) * 100)) : 0;
 
@@ -965,6 +969,7 @@ export const VisaManagement: React.FC = () => {
                 })}
               </tbody>
             </table>
+            <ShowMoreButton remaining={visaRows.remaining} noun="طلب" onClick={visaRows.showMore} className="p-3 text-center border-t border-slate-100" />
           </div>
         )}
       </div>

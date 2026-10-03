@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useApp, type OrphanProfileRow } from '../context/AppContext';
 import { openLegacyRecovery } from './LegacyDataRecovery';
 import { EmailVerificationCard } from './EmailVerificationCard';
@@ -27,8 +27,12 @@ import {
   XCircle,
   Database
 } from 'lucide-react';
-import { EmailEventType } from '../types';
+import { EmailEventType, type EmailLogEntry } from '../types';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
+import { usePagedHistory } from '../hooks/usePagedHistory';
+import { atOrAfter, countLabel, historyScope, mergedHistoryCutoff, oldestLoadedTime } from '../lib/pagination';
+import { outboxToEmailLogs, type OutboxEvent } from '../domain/outbox';
+import { HistoryPagerFooter } from './ListPaging';
 import { can, canOpenTab } from '../utils/permissions';
 import { formatLocalDateTime } from '../utils/requestUi';
 import { sanitizePhone } from '../utils/validation';
@@ -44,7 +48,8 @@ export const SettingsManagement: React.FC = () => {
     isFirebaseConnected,
     emailSettings,
     updateEmailSettings,
-    emailLogs,
+    emailLogsClearedAt,
+    activeOrgId,
     sendTestEmail,
     clearEmailLogs,
     migrateUniqueKeys,
@@ -71,6 +76,54 @@ export const SettingsManagement: React.FC = () => {
     (!canUseEmailTools && selectedSubTab === 'email') || (!isPlatformAdmin && selectedSubTab === 'cloud') || (!canSeeAudit && selectedSubTab === 'audit')
       ? 'profile'
       : selectedSubTab;
+
+  // The email delivery log: the notification outbox (the whole platform for the owner, the
+  // admin's own company otherwise) and, for the owner, the email_logs older app versions wrote.
+  // Newest first, paged on the server, read only while the email tab is open.
+  const emailLogOpen = canUseEmailTools && activeSubTab === 'email';
+  const outboxHistory = usePagedHistory<OutboxEvent>({
+    col: 'outbox',
+    orderField: 'createdAt',
+    enabled: emailLogOpen,
+    filters: historyScope({ isSuperAdmin: isPlatformAdmin, activeOrgId }),
+  });
+  const legacyEmailHistory = usePagedHistory<EmailLogEntry>({
+    col: 'email_logs',
+    orderField: 'timestamp',
+    enabled: emailLogOpen && isPlatformAdmin,
+    filters: [],
+  });
+  // Both sources are paged separately: an entry of one older than what the other has loaded so
+  // far is held back until "تحميل المزيد" reaches it (no gap in the middle of the list).
+  const outboxOldest = useMemo(() => oldestLoadedTime(outboxHistory.items, 'createdAt'), [outboxHistory.items]);
+  const legacyOldest = useMemo(() => oldestLoadedTime(legacyEmailHistory.items, 'timestamp'), [legacyEmailHistory.items]);
+  const emailCutoff = mergedHistoryCutoff([
+    { hasMore: outboxHistory.hasMore, oldest: outboxOldest },
+    { hasMore: legacyEmailHistory.hasMore, oldest: legacyOldest },
+  ]);
+  const emailLogs = useMemo(() => {
+    const merged = [
+      ...outboxToEmailLogs(atOrAfter(outboxHistory.items, 'createdAt', emailCutoff)),
+      ...atOrAfter(legacyEmailHistory.items, 'timestamp', emailCutoff),
+    ];
+    merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return emailLogsClearedAt ? merged.filter(l => l.timestamp > emailLogsClearedAt) : merged;
+  }, [outboxHistory.items, legacyEmailHistory.items, emailLogsClearedAt, emailCutoff]);
+  const emailLogPaging = {
+    // After "مسح السجل" every older page would be hidden anyway: nothing more to load.
+    hasMore: !emailLogsClearedAt && (outboxHistory.hasMore || legacyEmailHistory.hasMore),
+    loadingMore: outboxHistory.loadingMore || legacyEmailHistory.loadingMore,
+    loading: outboxHistory.loading,
+    error: outboxHistory.error || legacyEmailHistory.error,
+    // The source that limits the merged list (its oldest loaded entry is the cutoff) reads its next page.
+    loadMore: async () => {
+      const limits = (hasMore: boolean, oldest: number) => hasMore && (!Number.isFinite(oldest) || oldest >= emailCutoff);
+      await Promise.all([
+        limits(outboxHistory.hasMore, outboxOldest) ? outboxHistory.loadMore() : undefined,
+        limits(legacyEmailHistory.hasMore, legacyOldest) ? legacyEmailHistory.loadMore() : undefined,
+      ]);
+    },
+  };
 
   // Uniqueness keys migration (platform owner, once after the rules update). Its running state
   // and result live in the app context: leaving this page mid-run and coming back still shows them.
@@ -861,7 +914,7 @@ export const SettingsManagement: React.FC = () => {
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Clock className="h-4 w-4 text-slate-500" />
-                <h3 className="font-bold text-sm text-slate-900">سجل الإشعارات البريدية المرسلة حديثاً ({emailLogs.length})</h3>
+                <h3 className="font-bold text-sm text-slate-900">سجل الإشعارات البريدية المرسلة حديثاً ({countLabel(emailLogs.length, emailLogPaging.hasMore)})</h3>
               </div>
 
               {emailLogs.length > 0 && (
@@ -878,7 +931,9 @@ export const SettingsManagement: React.FC = () => {
 
             {emailLogs.length === 0 ? (
               <div className="p-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200 text-xs text-slate-500">
-                لم يتم إرسال أي إشعارات بريدية بعد. ستظهر هنا كافة الرسائل المرسلة تلقائياً عند تغيير حالات طلبات الصرف.
+                {emailLogPaging.loading
+                  ? 'جارٍ تحميل السجل...'
+                  : 'لم يتم إرسال أي إشعارات بريدية بعد. ستظهر هنا كافة الرسائل المرسلة تلقائياً عند تغيير حالات طلبات الصرف.'}
               </div>
             ) : (
               <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
@@ -916,6 +971,7 @@ export const SettingsManagement: React.FC = () => {
                 ))}
               </div>
             )}
+            <HistoryPagerFooter history={emailLogPaging} shown={emailLogs.length} noun="الإشعارات" className="pt-1 text-center space-y-2" />
           </div>
 
         </div>

@@ -16,10 +16,8 @@ import {
   AuditActionType,
   AuditEntityType,
   EmailNotificationSettings,
-  EmailLogEntry,
   EmailEventType,
   isServiceMatchingOrg,
-  AccountTransaction,
   TransactionType,
   RequestType,
   PettyCashCustody,
@@ -137,7 +135,6 @@ import {
   buildOutboxEvent,
   dispatchOutboxEvent,
   isDue,
-  outboxToEmailLogs,
   type OutboxEvent,
 } from '../domain/outbox';
 import {
@@ -150,6 +147,8 @@ import {
 import { newOperationKey } from '../utils/ids';
 import { singleFlight } from '../utils/singleFlight';
 import { HOME_TAB, canOpenTab } from '../utils/permissions';
+import { RECENT_AUDIT_WINDOW, isMissingIndexError } from '../lib/pagination';
+import { eqQuery } from '../lib/pagedFirestore';
 
 export {
   signInWithGoogle,
@@ -549,8 +548,8 @@ interface AppContextType {
   // Payment Accounts & Vaults
   paymentAccounts: PaymentAccount[];
   allPaymentAccounts: PaymentAccount[];
-  transactions: AccountTransaction[];
-  allTransactions: AccountTransaction[];
+  // The ledger (accountTransactions) is never loaded whole: the treasury page pages through it
+  // (usePagedHistory) and counts it per account (useAccountLedgerCounts).
   addPaymentAccount: (account: Omit<PaymentAccount, 'id' | 'createdAt'>, opts?: MutationOptions) => Promise<void>;
   updatePaymentAccount: (accountId: string, updates: Partial<PaymentAccount>) => Promise<void>;
   deletePaymentAccount: (accountId: string) => Promise<void>;
@@ -636,9 +635,9 @@ interface AppContextType {
   updateDepartment: (deptId: string, updates: Partial<Department>) => Promise<void>;
   deleteDepartment: (deptId: string) => Promise<EntityRemoval>;
 
-  // Audit Trail & Logging
+  // Audit Trail & Logging: the newest RECENT_AUDIT_WINDOW entries only (notifications, the
+  // settings page's latest entries); the audit log page pages through the rest itself.
   auditLogs: AuditLogEntry[];
-  allAuditLogs: AuditLogEntry[];
   logAuditAction: (params: {
     actionType: AuditActionType;
     entityType: AuditEntityType;
@@ -653,7 +652,8 @@ interface AppContextType {
   // Email Notifications & Settings
   emailSettings: EmailNotificationSettings;
   updateEmailSettings: (settings: Partial<EmailNotificationSettings>) => Promise<void>;
-  emailLogs: EmailLogEntry[];
+  /** Rows older than this are hidden from the email delivery log ("مسح السجل"; the outbox itself is kept). */
+  emailLogsClearedAt: string;
   sendTestEmail: (recipientEmail: string, templateType?: EmailEventType) => Promise<{ success: boolean; message: string }>;
   clearEmailLogs: () => Promise<void>;
   /** Platform owner: moves the uniqueness keys of existing records to the current id format (once, after the rules update). */
@@ -721,7 +721,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [rawVisaRequests, setRawVisaRequests] = useState<VisaRequest[]>([]);
   const [rawAuditLogs, setRawAuditLogs] = useState<AuditLogEntry[]>([]);
   const [rawPaymentAccounts, setRawPaymentAccounts] = useState<PaymentAccount[]>([]);
-  const [rawTransactions, setRawTransactions] = useState<AccountTransaction[]>([]);
   const [rawCustodies, setRawCustodies] = useState<PettyCashCustody[]>([]);
   const [rawCustodySettlements, setRawCustodySettlements] = useState<CustodySettlementItem[]>([]);
   const [rawDepartments, setRawDepartments] = useState<Department[]>([]);
@@ -729,8 +728,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [consistencyCheck, setConsistencyCheck] = useState<ConsistencyCheckState | null>(null);
   /** The current consistency run; bumped on sign-out so a run still reading never shows its report to the next user. */
   const consistencyRunRef = useRef(0);
-  const [outboxEvents, setOutboxEvents] = useState<OutboxEvent[]>([]);
-  const [legacyEmailLogs, setLegacyEmailLogs] = useState<EmailLogEntry[]>([]);
   const [emailLogsClearedAt, setEmailLogsClearedAt] = useState<string>('');
   const [emailSettings, setEmailSettings] = useState<EmailNotificationSettings>(DEFAULT_EMAIL_SETTINGS);
   // system_settings/notification_recipients: platform super admins notified about every org
@@ -1369,18 +1366,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return rawPaymentAccounts.filter(a => a.orgId === effectiveOrgId);
   }, [firebaseUser, resolvedRole, rawPaymentAccounts, effectiveOrgId]);
 
-  // NOTE: no "de-duplication by reference number" here any more. Two ledger entries
-  // with the same reference (e.g. a custody issued and later replenished) are both
-  // real money movements; hiding (or worse, deleting) one breaks reconciliation.
-  const scopedTransactions = useMemo(() => {
-    if (!firebaseUser) return [];
-    if (resolvedRole === 'super_admin') {
-      return effectiveOrgId === 'all' ? rawTransactions : rawTransactions.filter(t => t.orgId === effectiveOrgId);
-    }
-    if (!effectiveOrgId) return [];
-    return rawTransactions.filter(t => t.orgId === effectiveOrgId);
-  }, [firebaseUser, resolvedRole, rawTransactions, effectiveOrgId]);
-
   const scopedCustodies = useMemo(() => {
     if (!firebaseUser) return [];
     if (resolvedRole === 'super_admin') {
@@ -1440,12 +1425,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!effectiveOrgId) return [];
     return rawAuditLogs.filter(l => l.orgId === effectiveOrgId);
   }, [firebaseUser, resolvedRole, rawAuditLogs, effectiveOrgId]);
-
-  const emailLogs = useMemo(() => {
-    const merged = [...outboxToEmailLogs(outboxEvents), ...legacyEmailLogs];
-    merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-    return emailLogsClearedAt ? merged.filter(l => l.timestamp > emailLogsClearedAt) : merged;
-  }, [outboxEvents, legacyEmailLogs, emailLogsClearedAt]);
 
   const users: User[] = useMemo(() => {
     if (!firebaseUser) return [];
@@ -1511,6 +1490,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const items = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as unknown as T)).filter(filter);
         apply(items);
       }, handleListenerError(name)));
+    };
+
+    // A query that needs a composite index (firestore.indexes.json), with the previous query as
+    // its fallback while the index is not deployed yet (failed-precondition): a warning, never
+    // an empty or broken screen.
+    const listenOrFallback = <T extends { id: string },>(
+      name: string,
+      primary: Query<DocumentData>,
+      fallback: Query<DocumentData>,
+      apply: (items: T[]) => void,
+    ) => {
+      let fallbackUnsub: (() => void) | null = null;
+      const toItems = (docs: Array<{ id: string; data: () => DocumentData }>) => docs.map(d => ({ ...d.data(), id: d.id } as unknown as T));
+      const unsubPrimary = onSnapshot(primary, snapshot => {
+        setIsFirebaseConnected(true);
+        apply(toItems(snapshot.docs));
+      }, err => {
+        if (isMissingIndexError(err) && !fallbackUnsub) {
+          console.warn(`[Firebase] ${name}: index not deployed yet, loading the whole list instead.`, err?.message || err);
+          fallbackUnsub = onSnapshot(fallback, snapshot => {
+            setIsFirebaseConnected(true);
+            apply(toItems(snapshot.docs));
+          }, handleListenerError(name));
+          return;
+        }
+        handleListenerError(name)(err);
+      });
+      unsubs.push(() => {
+        unsubPrimary();
+        fallbackUnsub?.();
+      });
     };
 
     const orgScoped = (col: string) =>
@@ -1623,7 +1633,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // 5. Treasury (finance & org admins only)
     listen<PaymentAccount>('Payment Accounts', financeScoped('paymentAccounts'), setRawPaymentAccounts, notDummy);
-    listen<AccountTransaction>('Account Transactions', financeScoped('accountTransactions'), list => setRawTransactions([...list].sort(byCreatedDesc)), notDummy);
+    // The ledger (accountTransactions) grows without bound and is NOT listened to here: every
+    // balance / total the app shows is the account's stored aggregate (currentBalance, totalIn,
+    // totalOut); the treasury page pages through the ledger and loads only the transfer lines
+    // its headline needs (src/components/TreasuryManagement.tsx).
 
     // 6. Custodies & settlements. Staff: their company. Everyone else: their OWN custodies /
     // settlements — by UID, or by their VERIFIED email (issued while invited by email).
@@ -1662,24 +1675,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       listenOwn<CustodySettlementItem>('Custody Settlements', 'custodySettlements', list => setRawCustodySettlements([...list].sort(byCreatedDesc)));
     }
 
-    // 7. Audit logs
-    listen<AuditLogEntry>(
-      'Audit Logs',
-      isSuperAdmin ? collection(db, 'auditLogs') : resolvedRole === 'org_admin' && effectiveOrgId ? query(collection(db, 'auditLogs'), where('orgId', '==', effectiveOrgId)) : null,
-      list => setRawAuditLogs([...list].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())),
-    );
+    // 7. Audit logs: the newest RECENT_AUDIT_WINDOW entries, live (notifications' recent activity,
+    // the settings page's latest entries). The audit log page pages through the whole history
+    // itself (usePagedHistory in OrganizationsManagement). An org admin's query needs the
+    // (orgId, timestamp desc) index; until it is deployed, the whole company list as before.
+    const sortAudit = (list: AuditLogEntry[]) =>
+      [...list].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    const auditCol = collection(db, 'auditLogs');
+    if (isSuperAdmin) {
+      listenOrFallback<AuditLogEntry>('Audit Logs', query(auditCol, orderBy('timestamp', 'desc'), limit(RECENT_AUDIT_WINDOW)), auditCol, list => setRawAuditLogs(sortAudit(list)));
+    } else if (resolvedRole === 'org_admin' && effectiveOrgId) {
+      const byOrg = where('orgId', '==', effectiveOrgId);
+      listenOrFallback<AuditLogEntry>(
+        'Audit Logs',
+        query(auditCol, byOrg, orderBy('timestamp', 'desc'), limit(RECENT_AUDIT_WINDOW)),
+        query(auditCol, byOrg),
+        list => setRawAuditLogs(sortAudit(list)),
+      );
+    } else {
+      setRawAuditLogs([]);
+    }
 
-    // 8. Notification outbox (doubles as the email log) + legacy email logs
-    listen<OutboxEvent>(
-      'Outbox',
-      isSuperAdmin
-        ? query(collection(db, 'outbox'), orderBy('createdAt', 'desc'), limit(150))
-        : resolvedRole === 'org_admin' && effectiveOrgId
-        ? query(collection(db, 'outbox'), where('orgId', '==', effectiveOrgId))
-        : null,
-      setOutboxEvents,
-    );
-    listen<EmailLogEntry>('Email Logs', isSuperAdmin ? collection(db, 'email_logs') : null, setLegacyEmailLogs);
+    // 8. The notification outbox (the email delivery log) and the legacy email_logs are read by
+    // the settings page's email log only, paged (usePagedHistory), never listened to here.
 
     return () => unsubs.forEach(u => {
       try { u(); } catch {}
@@ -1698,12 +1716,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setRawVisaRequests([]);
     setRawAuditLogs([]);
     setRawPaymentAccounts([]);
-    setRawTransactions([]);
     setRawCustodies([]);
     setRawCustodySettlements([]);
     setRawDepartments([]);
-    setOutboxEvents([]);
-    setLegacyEmailLogs([]);
     setOrgsLoaded(false);
     setSuperAdminRecords([]);
     setPermissionDeniedSources([]);
@@ -2182,15 +2197,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  /**
+   * Whether the ledger holds at least one line matching these equality filters, read FRESH
+   * from the database (the ledger is never loaded whole): one document read at most.
+   */
+  const ledgerHasLines = async (filters: Array<[string, string]>): Promise<boolean> => {
+    const db = getDb();
+    if (!db) throw new DomainError('offline', 'قاعدة البيانات السحابية غير متصلة. لا يمكن حفظ أي عملية بدون اتصال بقاعدة البيانات.');
+    const snap = await getDocs(query(eqQuery(db, 'accountTransactions', filters), limit(1)));
+    return !snap.empty;
+  };
+
   const deleteOrganization = async (orgId: string): Promise<{ success: boolean; message?: string }> => {
     // Every company is created with its default treasury accounts: only an account with a
     // balance or history counts as a financial record (the empty ones are deleted with it).
     const orgAccounts = rawPaymentAccounts.filter(a => a.orgId === orgId);
+    let hasLedger: boolean;
+    try {
+      hasLedger = await ledgerHasLines([['orgId', orgId]]);
+    } catch (err) {
+      console.warn('[Organizations] ledger check:', err);
+      return { success: false, message: 'تعذر التحقق من الحركات المالية للشركة. تحقق من الاتصال ثم أعد المحاولة.' };
+    }
     const hasFinancialRecords =
       rawRequests.some(r => r.orgId === orgId) ||
       rawVisaRequests.some(v => v.orgId === orgId) ||
       rawCustodies.some(c => c.orgId === orgId) ||
-      rawTransactions.some(t => t.orgId === orgId) ||
+      hasLedger ||
       orgAccounts.some(paymentAccountHasHistory);
     // People, services, providers and departments that still belong to it keep it too (archived, not orphaned).
     const hasDirectoryRecords =
@@ -2620,14 +2653,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   /**
    * Only an account with no balance and no history may be deleted (the domain and the rules
-   * check its balance / totals; the loaded ledger is checked here as well, for older
-   * accounts whose totals were never kept). Otherwise: deactivate it.
+   * check its balance / totals; the ledger is read here as well, fresh, for older accounts
+   * whose totals were never kept). Otherwise: deactivate it.
    */
   const deletePaymentAccount = async (accountId: string) => {
     const account = rawPaymentAccounts.find(a => a.id === accountId);
     if (account) {
       assertPaymentAccountDeletable(account);
-      if (rawTransactions.some(t => t.accountId === accountId)) {
+      let hasLedger: boolean;
+      try {
+        // The owner checks every line of the account, whatever company it carries (as the whole
+        // ledger it used to load did); anyone else filters on the account's company too, so
+        // firestore.rules can prove the query.
+        hasLedger = await ledgerHasLines(
+          isSuperAdmin || !account.orgId ? [['accountId', accountId]] : [['orgId', account.orgId], ['accountId', accountId]],
+        );
+      } catch (err) {
+        throw err instanceof DomainError
+          ? err
+          : new DomainError('ledger_check_failed', 'تعذر التحقق من حركات الحساب في دفتر الخزينة. تحقق من الاتصال ثم أعد المحاولة.');
+      }
+      if (hasLedger) {
         throw new DomainError(
           'account_has_history',
           `لا يمكن حذف الحساب "${account.name}" لأن له حركات مالية مسجلة في دفتر الخزينة. يمكنك تعطيله بدلاً من الحذف مع الاحتفاظ بسجله المالي.`,
@@ -3397,8 +3443,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteVisaRequest,
         paymentAccounts: scopedPaymentAccounts,
         allPaymentAccounts: rawPaymentAccounts,
-        transactions: scopedTransactions,
-        allTransactions: rawTransactions,
         addPaymentAccount,
         updatePaymentAccount,
         deletePaymentAccount,
@@ -3422,11 +3466,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateDepartment,
         deleteDepartment,
         auditLogs: scopedAuditLogs,
-        allAuditLogs: rawAuditLogs,
         logAuditAction,
         emailSettings,
         updateEmailSettings,
-        emailLogs,
+        emailLogsClearedAt,
         sendTestEmail,
         clearEmailLogs,
         migrateUniqueKeys,

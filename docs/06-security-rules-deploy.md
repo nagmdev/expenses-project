@@ -181,8 +181,8 @@ A green run does not publish anything: Vercel deploys the frontend from `main`, 
    Until the lists exist, the new rules reject request notifications to that org's
    admins. That would make creating a request fail.
 3. **Publish `firestore.rules`** from this repo: Firebase Console → Firestore → Rules
-   → paste → Publish. With the CLI (the repo's `firebase.json` deploys Firestore rules
-   only), run
+   → paste → Publish. With the CLI (the repo's `firebase.json` names the Firestore rules
+   and indexes; `--only firestore:rules` deploys the rules alone), run
    `npx firebase-tools deploy --only firestore:rules --project expenses-project-ce1f9`.
    **Only Firestore rules are deployed.** Do not deploy `storage.rules`: Storage is not
    available on the Spark plan.
@@ -417,3 +417,33 @@ owner does it with the Admin SDK (which bypasses the rules), outside this repo.
    (the email provider key belongs in Vercel env: `GMAIL_APP_PASSWORD`, `BREVO_API_KEY`, `RESEND_API_KEY`),
    sign in as the owner and check the companies, the treasury balances against the ledger
    (`accountTransactions`), and the next request / custody numbers (`counters`).
+
+### Deploying the history pagination (composite indexes)
+
+The treasury ledger / account statements, the audit log page and the email delivery log
+are now read page by page, newest first (`src/lib/pagination.ts`): the first page live,
+«تحميل المزيد» for older pages. Their queries filter on the company and sort on the date,
+which needs the composite indexes in `firestore.indexes.json` (no rules change):
+
+| Collection | Fields | Used by |
+| --- | --- | --- |
+| `accountTransactions` | `orgId` ↑, `createdAt` ↓ | company ledger (finance / org admin, owner's company filter) |
+| `accountTransactions` | `orgId` ↑, `accountId` ↑, `createdAt` ↓ | one account's statement |
+| `auditLogs` | `orgId` ↑, `timestamp` ↓ | audit log page and the recent-activity window (org admin, owner's company filter) |
+| `outbox` | `orgId` ↑, `createdAt` ↓ | email delivery log (org admin) |
+
+The owner's unfiltered lists only sort on one field (automatic single-field indexes).
+
+Deploy the indexes **before** the frontend (they do not affect the live app):
+
+```
+npx -y firebase-tools@15.32.0 deploy --only firestore:indexes --project expenses-project-ce1f9
+```
+
+Building them takes a few minutes (Firebase Console → Firestore → Indexes shows
+"Enabled" when done). The order is not critical: until an index is ready, Firestore answers
+these queries with `failed-precondition` and the app logs a warning
+(`[Pagination] … index not deployed yet`) and loads that list the old way (the whole
+company list), so nothing breaks; it is only less economical. If the CLI offers to delete
+indexes that are not in the file, answer **No** (or create the four indexes by hand in the
+console instead).
