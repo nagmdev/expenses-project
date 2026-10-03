@@ -29,3 +29,8 @@ database.sqlite-journal
 firestore-debug.log
 firebase-debug.log
 ui-debug.log
+
+# Playwright (npm run test:e2e)
+test-results/
+playwright-report/
+blob-report/

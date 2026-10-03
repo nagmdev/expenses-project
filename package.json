@@ -13,7 +13,8 @@
     "preview": "vite preview",
     "dev:e2e": "vite --mode e2e",
     "e2e:emulators": "npx -y firebase-tools@15.32.0 emulators:start --project demo-expenses-e2e --only firestore,auth",
-    "e2e:seed": "vitest run -c vitest.e2e.config.ts"
+    "e2e:seed": "vitest run -c vitest.e2e.config.ts",
+    "test:e2e": "npx -y firebase-tools@15.32.0 emulators:exec --project demo-expenses-e2e --only firestore,auth \"npm run e2e:seed && playwright test\""
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^5.0.2",
+    "@playwright/test": "^1.63.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^24.13.3",
