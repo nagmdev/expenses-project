@@ -141,6 +141,8 @@
 
 ## Before deploying
 
+Export a backup first (Settings → «تصدير نسخة احتياطية», see [Backups](#backups-spark-plan)).
+
 1. **Super admins who sign in with email/password.** An unverified account that is a
    super admin only by email loses that role. For each such account, create
    `super_admins/{uid}` (UID-keyed records need no verified email). Or the person can
@@ -199,3 +201,134 @@ frontend as well. Publish the rules **first**, then deploy the frontend:
    `attachments/{id}` document with `complete: true` and its `chunks` appear.
 4. Leave `VITE_USE_FIREBASE_STORAGE` unset on Vercel. Set it to `true` only after a
    Blaze upgrade (and after deploying `storage.rules` then).
+
+## Backups (Spark plan)
+
+Managed Firestore backups, PITR and `gcloud firestore export` need the Blaze plan. On Spark
+the platform owner exports the data from the app:
+**Settings → الاتصال السحابي وقاعدة البيانات → «تصدير نسخة احتياطية» → «تصدير»**.
+
+- It reads every collection the rules let the owner list, straight from the server, one
+  collection at a time (paged by document id), and downloads `masrofy-backup-YYYY-MM-DD.json`.
+  It never writes to Firestore. Code: `src/lib/backupExport.ts` (reads),
+  `src/utils/backupFormat.ts` (file format); tests: `tests/backupFormat.test.ts` and
+  `tests-rules/backup.test.ts`.
+- **«تضمين المرفقات»** adds the files themselves (`attachments/{id}/chunks/*`). Off by default:
+  each file is up to 10 MB, so the backup grows a lot.
+- **Secrets are masked by default.** A non-empty string field whose name contains `apiKey`,
+  `secret`, `password`, `token`, `privateKey`, `credential`, `webhookUrl`, ... (at any depth:
+  e.g. an email provider key that older versions saved in `system_settings/email_notifications`,
+  or `outbox/*` `meta.webhookUrl`) is written as `{ "__type": "redacted" }` and listed in
+  `redacted`. «تضمين المفاتيح السرية» keeps them (the app warns and asks to confirm).
+- **Cost:** every document is one read of the free quota (50,000 reads/day). The summary shows
+  documents per collection; export when the app is quiet.
+- **Not in the file** (listed under `skipped` with the reason): `uniqueKeys`,
+  `legacyRestores` and `mail` (the rules allow get by id only, never list), and attachment
+  chunks unless asked for. `counters` cannot be listed either, so the export reads them by
+  id (`requests|visa|custodies|transfers-<year>`, 2020 to next year). A collection that
+  failed to read is in `skipped` with `"failed": true` and shown in red: export again.
+- **Firebase Auth accounts are not in Firestore.** Export them alongside (works on Spark):
+  `npx firebase-tools auth:export auth-users.json --format=json --project expenses-project-ce1f9`.
+
+### How often
+
+- **Weekly** without attachments, and **monthly** with «تضمين المرفقات».
+- **Always before** publishing `firestore.rules`, a bulk owner action (key migration,
+  detaching orphan profiles, restoring legacy data), and at month-end closing.
+- Keep at least the last 4 weekly files and 3 monthly ones **off this computer** (an
+  encrypted drive or a private cloud folder). The file holds personal data (emails, phones,
+  bank / IBAN / wallet details) even with secrets masked: never share it.
+- Open a recent file once in a while and check the summary (counts per company, nothing
+  `failed`).
+
+### File format (version 1)
+
+```json
+{
+  "format": "masrofy-backup", "version": 1, "exportedAt": "...", "projectId": "expenses-project-ce1f9",
+  "exportedBy": "...", "options": { "includeAttachments": false, "includeSecrets": false },
+  "skipped": [{ "name": "uniqueKeys", "reason": "..." }],
+  "redacted": [{ "path": "system_settings/email_notifications", "field": "directApiKey" }],
+  "collections": { "requests": [{ "id": "req-1", "path": "requests/req-1", "data": {} }] }
+}
+```
+
+`path` is where the document is restored (chunks: `attachments/<id>/chunks/<n>`, grouped
+under `attachmentChunks`). Plain JSON values are stored as they are; Firestore types are tagged:
+`{"__type":"timestamp","seconds","nanoseconds"}`, `{"__type":"reference","path"}`,
+`{"__type":"bytes","base64"}`, `{"__type":"geopoint","latitude","longitude"}`,
+`{"__type":"vector","values"}`, `{"__type":"number","value":"NaN"|"Infinity"|"-Infinity"}`,
+`{"__type":"map","value":{...}}` (a stored map that has its own `__type` key) and
+`{"__type":"redacted"}` (a masked secret: leave the field out).
+
+### Restore (manual; not in the app)
+
+The app never restores a backup: a restore overwrites money records and permissions, so the
+owner does it with the Admin SDK (which bypasses the rules), outside this repo.
+
+1. **Decide the target.** Prefer an empty project (or the emulator) to check the file first.
+   Restoring onto the live project overwrites every document in the file with its backed-up
+   version (documents created since are kept). Export the current state first.
+2. **Service account:** Firebase Console → Project settings → Service accounts → Generate new
+   private key. Keep the JSON out of the repo, and delete the key (Google Cloud → IAM →
+   Service accounts → Keys) when done.
+3. In an empty folder: `npm init -y && npm i firebase-admin`, then `restore.mjs`:
+
+   ```js
+   import { readFileSync } from 'node:fs';
+   import { initializeApp, cert } from 'firebase-admin/app';
+   import { getFirestore, Timestamp, GeoPoint, FieldValue } from 'firebase-admin/firestore';
+
+   initializeApp({ credential: cert(JSON.parse(readFileSync('./service-account.json', 'utf8'))) });
+   const db = getFirestore();
+   const backup = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+   if (backup.format !== 'masrofy-backup' || backup.version !== 1) throw new Error('not a v1 backup');
+
+   const REDACTED = Symbol('redacted');
+   const revive = v => {
+     if (Array.isArray(v)) return v.map(revive);
+     if (!v || typeof v !== 'object') return v;
+     switch (v.__type) {
+       case 'timestamp': return new Timestamp(v.seconds, v.nanoseconds);
+       case 'reference': return db.doc(v.path);
+       case 'bytes': return Buffer.from(v.base64, 'base64');
+       case 'geopoint': return new GeoPoint(v.latitude, v.longitude);
+       case 'vector': return FieldValue.vector(v.values);
+       case 'number': return Number(v.value);
+       case 'redacted': return REDACTED;
+       case 'map': v = v.value; break;
+     }
+     const out = {};
+     for (const [k, x] of Object.entries(v)) { const r = revive(x); if (r !== REDACTED) out[k] = r; }
+     return out;
+   };
+
+   for (const [name, docs] of Object.entries(backup.collections)) {
+     let batch = db.batch(), n = 0, bytes = 0;
+     for (const d of docs) {
+       const size = JSON.stringify(d.data).length;
+       if (n === 400 || (n > 0 && bytes + size > 8_000_000)) { await batch.commit(); batch = db.batch(); n = 0; bytes = 0; }
+       batch.set(db.doc(d.path), revive(d.data));
+       n++; bytes += size;
+     }
+     if (n) await batch.commit();
+     console.log(name, docs.length);
+   }
+   ```
+
+   Run `node restore.mjs masrofy-backup-YYYY-MM-DD.json`. Restore attachment metadata and
+   chunks from the same file (an `fsattach://` link whose chunks are missing opens as a
+   broken file).
+4. **Rebuild `uniqueKeys`** (not in the backup): for every record listed by
+   `uniqueKeyOwnersOf` (`src/domain/directory.ts`: org codes, member emails, service codes,
+   provider / department names, account identifiers) whose `normalizeKeyValue(value, scope)`
+   is not empty, write `uniqueKeys/<uniqueKeyDocId(scope, orgId, value)>` =
+   `{ scope, orgId, value: normalizeKeyValue(value, scope), entityCollection, entityId, createdAt }`
+   (`src/domain/common.ts`). Without them, duplicates of those values can be created.
+5. **Auth (new project only):** `npx firebase-tools auth:import auth-users.json --project <target>`
+   with the source project's password hash parameters (Console → Authentication → ⋮ →
+   Password hash parameters). UIDs are kept, so `users/{uid}` and `members/{uid}_{org}` still match.
+6. **After the restore:** publish `firestore.rules` (new project), re-enter masked secrets
+   (the email provider key belongs in Vercel env: `GMAIL_APP_PASSWORD`, `BREVO_API_KEY`, `RESEND_API_KEY`),
+   sign in as the owner and check the companies, the treasury balances against the ledger
+   (`accountTransactions`), and the next request / custody numbers (`counters`).
