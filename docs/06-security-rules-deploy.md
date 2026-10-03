@@ -215,11 +215,11 @@ the platform owner exports the data from the app:
   `tests-rules/backup.test.ts`.
 - **«تضمين المرفقات»** adds the files themselves (`attachments/{id}/chunks/*`). Off by default:
   each file is up to 10 MB, so the backup grows a lot.
-- **Secrets are masked by default.** A non-empty string field whose name contains `apiKey`,
-  `secret`, `password`, `token`, `privateKey`, `credential`, `webhookUrl`, ... (at any depth:
-  e.g. an email provider key that older versions saved in `system_settings/email_notifications`,
-  or `outbox/*` `meta.webhookUrl`) is written as `{ "__type": "redacted" }` and listed in
-  `redacted`. «تضمين المفاتيح السرية» keeps them (the app warns and asks to confirm).
+- **Secrets are masked by default.** Under a field whose name contains `apiKey`, `secret`,
+  `password`, `token`, `privateKey`, `credential`, `webhookUrl`, ... (at any depth: e.g. an
+  email provider key that older versions saved in `system_settings/email_notifications`, or
+  `outbox/*` `meta.webhookUrl`), every non-empty text (also inside a list or a map under that
+  field) is written as `{ "__type": "redacted" }` and listed in `redacted`. «تضمين المفاتيح السرية» keeps them (the app warns and asks to confirm).
 - **Cost:** every document is one read of the free quota (50,000 reads/day). The summary shows
   documents per collection; export when the app is quiet.
 - **Not in the file** (listed under `skipped` with the reason): `uniqueKeys`,
@@ -285,8 +285,14 @@ owner does it with the Admin SDK (which bypasses the rules), outside this repo.
    if (backup.format !== 'masrofy-backup' || backup.version !== 1) throw new Error('not a v1 backup');
 
    const REDACTED = Symbol('redacted');
+   // A document's `data` is always its fields (never a tagged value): revive it with fields().
+   const fields = m => {
+     const out = {};
+     for (const [k, x] of Object.entries(m)) { const r = revive(x); if (r !== REDACTED) out[k] = r; }
+     return out;
+   };
    const revive = v => {
-     if (Array.isArray(v)) return v.map(revive);
+     if (Array.isArray(v)) return v.map(x => { const r = revive(x); return r === REDACTED ? null : r; });
      if (!v || typeof v !== 'object') return v;
      switch (v.__type) {
        case 'timestamp': return new Timestamp(v.seconds, v.nanoseconds);
@@ -296,11 +302,9 @@ owner does it with the Admin SDK (which bypasses the rules), outside this repo.
        case 'vector': return FieldValue.vector(v.values);
        case 'number': return Number(v.value);
        case 'redacted': return REDACTED;
-       case 'map': v = v.value; break;
+       case 'map': return fields(v.value);
+       default: return fields(v);
      }
-     const out = {};
-     for (const [k, x] of Object.entries(v)) { const r = revive(x); if (r !== REDACTED) out[k] = r; }
-     return out;
    };
 
    for (const [name, docs] of Object.entries(backup.collections)) {
@@ -308,7 +312,7 @@ owner does it with the Admin SDK (which bypasses the rules), outside this repo.
      for (const d of docs) {
        const size = JSON.stringify(d.data).length;
        if (n === 400 || (n > 0 && bytes + size > 8_000_000)) { await batch.commit(); batch = db.batch(); n = 0; bytes = 0; }
-       batch.set(db.doc(d.path), revive(d.data));
+       batch.set(db.doc(d.path), fields(d.data));
        n++; bytes += size;
      }
      if (n) await batch.commit();
