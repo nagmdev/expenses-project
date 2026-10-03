@@ -119,9 +119,10 @@ export const LoginPage: React.FC = () => {
       setResetSuccess(true);
     } catch (err: unknown) {
       const code = String((err as { code?: unknown } | null)?.code || '');
-      setResetError(code === 'auth/user-not-found'
-        ? 'لم يتم العثور على حساب مسجل بهذا البريد الإلكتروني.'
-        : authErrorMessage(err, 'تعذر إرسال رابط إعادة التعيين. تأكد من صحة البريد والمحاولة ثانية.'));
+      // An unknown address gets the same answer as a known one: the page never tells
+      // anyone which e-mails have an account.
+      if (code === 'auth/user-not-found') setResetSuccess(true);
+      else setResetError(authErrorMessage(err, 'تعذر إرسال رابط إعادة التعيين. تأكد من صحة البريد والمحاولة ثانية.'));
     } finally {
       setResetLoading(false);
     }
@@ -272,7 +273,7 @@ export const LoginPage: React.FC = () => {
           {/* Privacy & Security Guarantee */}
           <div className="mt-6 pt-4 border-t border-slate-800/80 flex items-center justify-center gap-2 text-[11px] text-slate-500">
             <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" />
-            <span>نظام عزل بيانات مشفر ومصرفي 100%</span>
+            <span>دخول آمن عبر Firebase وعزل صارم لبيانات وصلاحيات كل شركة</span>
           </div>
 
         </div>
@@ -296,7 +297,7 @@ export const LoginPage: React.FC = () => {
             {resetSuccess ? (
               <div className="bg-emerald-950/70 border border-emerald-800 text-emerald-200 p-4 rounded-xl text-center space-y-2">
                 <CheckCircle2 className="h-8 w-8 text-emerald-400 mx-auto" />
-                <p className="font-bold">تم إرسال رابط التعيين بنجاح!</p>
+                <p className="font-bold">إذا كان البريد مسجلاً لدينا، فسيصله رابط إعادة التعيين.</p>
                 <p className="text-[11px] text-emerald-300">
                   يرجى مراجعة صندوق الوارد (أو البريد غير الهام Junk/Spam) واتباع التعليمات.
                 </p>
