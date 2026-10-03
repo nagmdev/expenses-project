@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import {
+  AccountTransaction,
   PaymentAccount,
   PaymentAccountType,
   SUPPORTED_CURRENCIES,
@@ -41,6 +42,10 @@ import {
   sanitizeInstaPay
 } from '../utils/validation';
 import { useKeyedSubmitGuard, useSubmitGuard } from '../hooks/useSubmitGuard';
+import { useLiveEqQuery, usePagedHistory } from '../hooks/usePagedHistory';
+import { useAccountLedgerCounts } from '../hooks/useAccountLedgerCounts';
+import { historyScope } from '../lib/pagination';
+import { HistoryPagerFooter } from './ListPaging';
 import { isLegacyLinkedWallet, linkedParentIdOf, MAX_CUSTODY_RETURN_BATCH } from '../domain/treasury';
 import { isArchivedOrg, toMoney } from '../domain/common';
 import { showToast } from '../utils/toast';
@@ -97,8 +102,6 @@ export const TreasuryManagement: React.FC = () => {
   const { 
     paymentAccounts, 
     allPaymentAccounts,
-    transactions,
-    allTransactions,
     organizations,
     allOrganizations,
     activeOrgId,
@@ -129,21 +132,7 @@ export const TreasuryManagement: React.FC = () => {
   // A new account goes only to a company that is still active (an archived one takes no new records).
   const creatableOrgs = orgList.filter(o => !isArchivedOrg(o));
   const targetAccounts = isSuperAdmin ? allPaymentAccounts : paymentAccounts;
-  const targetTransactions = isSuperAdmin ? allTransactions : transactions;
   const targetCustodies = isSuperAdmin ? allCustodies : custodies;
-
-  // De-duplicate ledger entries by document id ONLY. Ledger ids are deterministic
-  // (derived from the operation key), so a retried operation can never create a second
-  // entry; two entries sharing a reference (a custody issued then replenished, several
-  // custody returns, both legs of a transfer…) are distinct real money movements.
-  const cleanTargetTransactions = useMemo(() => {
-    const seenIds = new Set<string>();
-    return targetTransactions.filter(tx => {
-      if (seenIds.has(tx.id)) return false;
-      seenIds.add(tx.id);
-      return true;
-    });
-  }, [targetTransactions]);
 
   // Linked parent bank of an account: an InstaPay channel's bank, or the bank a legacy
   // wallet still mirrors to until it is detached. New wallets are standalone treasuries.
@@ -166,36 +155,28 @@ export const TreasuryManagement: React.FC = () => {
     setNotice(text);
   };
 
-  // Ledger entries per account (history check before a delete, and the card's statement count)
-  const ledgerCountByAccount = useMemo(() => {
-    const counts = new Map<string, number>();
-    cleanTargetTransactions.forEach(tx => counts.set(tx.accountId, (counts.get(tx.accountId) || 0) + 1));
-    return counts;
-  }, [cleanTargetTransactions]);
-
-  // An account that holds money or has any history is never hard-deleted (its ledger would be
-  // orphaned); it is deactivated instead. Mirrors the domain guard on deletePaymentAccount.
-  const accountHasHistory = (acc: PaymentAccount) =>
-    balanceOf(acc) !== 0 ||
-    toMoney(acc.totalIn) !== 0 ||
-    toMoney(acc.totalOut) !== 0 ||
-    toMoney(acc.initialBalance) !== 0 ||
-    (ledgerCountByAccount.get(acc.id) || 0) > 0;
-
   // Internal transfers only move money between the company's own accounts: they change the
   // balances but are neither income nor spending, so the Total IN / Total OUT headline leaves
-  // them out (both legs, and the mirror entry on an InstaPay channel's bank).
+  // them out (both legs, and the mirror entry on an InstaPay channel's bank). Only the transfer
+  // lines are loaded for this (live, equality filters only: no composite index), never the
+  // whole ledger; the ledger itself is paged below.
+  const transferLegs = useLiveEqQuery<AccountTransaction>(
+    'accountTransactions',
+    canViewTreasury ? historyScope({ isSuperAdmin, activeOrgId, extra: [['referenceType', 'transfer']] }) : null,
+  );
   const transferTotalsByAccount = useMemo(() => {
     const totals = new Map<string, { in: number; out: number }>();
-    cleanTargetTransactions.forEach(tx => {
-      if (tx.referenceType !== 'transfer') return;
+    const seenIds = new Set<string>();
+    transferLegs.items.forEach(tx => {
+      if (tx.referenceType !== 'transfer' || seenIds.has(tx.id)) return;
+      seenIds.add(tx.id);
       const row = totals.get(tx.accountId) || { in: 0, out: 0 };
       if (tx.type === 'in') row.in += Number(tx.amount || 0);
       else row.out += Number(tx.amount || 0);
       totals.set(tx.accountId, row);
     });
     return totals;
-  }, [cleanTargetTransactions]);
+  }, [transferLegs.items]);
 
   // Filters & State
   const [selectedOrgFilter, setSelectedOrgFilter] = useState<string>(
@@ -280,11 +261,48 @@ export const TreasuryManagement: React.FC = () => {
     );
   }, [orgScopedAccounts, searchNeedle]);
 
+  // Ledger lines per account (the card's statement count, and the history check before a
+  // delete): counted by Firestore for the cards on screen, never by loading the whole ledger.
+  const ledgerCountByAccount = useAccountLedgerCounts(filteredAccounts, canViewTreasury && activeTab === 'accounts');
+
+  // An account that holds money or has any history is never hard-deleted (its ledger would be
+  // orphaned); it is deactivated instead. Mirrors the domain guard on deletePaymentAccount
+  // (deletePaymentAccount in AppContext also reads the ledger fresh before deleting).
+  const accountHasHistory = (acc: PaymentAccount) =>
+    balanceOf(acc) !== 0 ||
+    toMoney(acc.totalIn) !== 0 ||
+    toMoney(acc.totalOut) !== 0 ||
+    toMoney(acc.initialBalance) !== 0 ||
+    Boolean(acc.lastLedgerId) ||
+    (ledgerCountByAccount.get(acc.id) || 0) > 0;
+
+  // The ledger, newest first, paged on the server (first page live, "تحميل المزيد" for the
+  // older ones): the whole company / platform ledger, the owner's company filter, or one
+  // account's statement (accountId). Loaded only while the ledger tab is open.
+  const ledger = usePagedHistory<AccountTransaction>({
+    col: 'accountTransactions',
+    orderField: 'createdAt',
+    enabled: canViewTreasury && activeTab === 'ledger',
+    filters: historyScope({
+      isSuperAdmin,
+      orgFilter: selectedOrgFilter,
+      activeOrgId,
+      extra: inspectingAccount ? [['accountId', inspectingAccount.id]] : [],
+      recordOrgId: inspectingAccount?.orgId,
+    }),
+  });
+
   // Filtered Transactions: the same search as the cards (every movement of a matching account),
   // plus a match on the entry's own text (description, reference, responsible person).
-  const filteredTransactions = useMemo(() => {
+  // Ledger ids are deterministic (derived from the operation key), so entries are de-duplicated
+  // by document id ONLY: two entries sharing a reference (a custody issued then replenished,
+  // both legs of a transfer…) are distinct real money movements.
+  const filterLedger = useCallback((entries: AccountTransaction[]) => {
     const matchingAccountIds = new Set(filteredAccounts.map(a => a.id));
-    return cleanTargetTransactions.filter(tx => {
+    const seenIds = new Set<string>();
+    return entries.filter(tx => {
+      if (seenIds.has(tx.id)) return false;
+      seenIds.add(tx.id);
       if (selectedOrgFilter !== 'all' && tx.orgId !== selectedOrgFilter) return false;
       if (inspectingAccount && tx.accountId !== inspectingAccount.id) return false;
       if (searchNeedle) {
@@ -296,7 +314,8 @@ export const TreasuryManagement: React.FC = () => {
       }
       return true;
     });
-  }, [cleanTargetTransactions, filteredAccounts, selectedOrgFilter, inspectingAccount, searchNeedle]);
+  }, [filteredAccounts, selectedOrgFilter, inspectingAccount, searchNeedle]);
+  const filteredTransactions = useMemo(() => filterLedger(ledger.items), [filterLedger, ledger.items]);
 
   // Overall Financial Stats (Aggregated only across primary physical containers to prevent double counting linked channels)
   const stats = useMemo(() => {
@@ -349,8 +368,25 @@ export const TreasuryManagement: React.FC = () => {
     };
   }, [filteredAccounts, linkedParentOf, transferTotalsByAccount, activeOrg?.currency]);
 
-  // Export Filtered Ledger Transactions to Excel / CSV with UTF-8 BOM
+  // Export Filtered Ledger Transactions to Excel / CSV with UTF-8 BOM. The export covers the
+  // WHOLE ledger / statement of the current scope: the older pages not shown yet are read first.
+  const exportGuard = useSubmitGuard();
   const exportLedgerToExcel = () => {
+    void exportGuard.run(async () => {
+      let entries = filteredTransactions;
+      if (ledger.hasMore) {
+        try {
+          entries = filterLedger(await ledger.loadAll());
+        } catch (err) {
+          console.error(err);
+          showToast('تعذر تحميل كامل الحركات للتصدير. أعد المحاولة.', 'error');
+          return;
+        }
+      }
+      writeLedgerCsv(entries);
+    });
+  };
+  const writeLedgerCsv = (entries: AccountTransaction[]) => {
     const headers = [
       'التاريخ والوقت',
       'الحساب',
@@ -372,7 +408,7 @@ export const TreasuryManagement: React.FC = () => {
       return `"${str}"`;
     };
 
-    const rows = filteredTransactions.map(tx => {
+    const rows = entries.map(tx => {
       const orgName = orgList.find(o => o.id === tx.orgId)?.name || activeOrg?.name || 'الشركة';
       const acc = targetAccounts.find(a => a.id === tx.accountId);
       const txCurrency = acc?.currency || activeOrg?.currency || 'EGP';
@@ -1110,6 +1146,9 @@ export const TreasuryManagement: React.FC = () => {
             </div>
           ))}
           <span className="text-[11px] text-slate-400 mt-1 block">توريدات وإيداعات ومردودات عُهد (بدون التحويلات الداخلية بين الحسابات)</span>
+          {transferLegs.error && (
+            <span className="text-[10px] text-amber-700 font-bold mt-1 block">تعذر تحميل التحويلات الداخلية: قد يشمل الإجمالي مبالغ محولة بين الحسابات.</span>
+          )}
         </div>
 
         {/* Total OUT */}
@@ -1129,6 +1168,9 @@ export const TreasuryManagement: React.FC = () => {
             </div>
           ))}
           <span className="text-[11px] text-slate-400 mt-1 block">طلبات صرف، عُهد، ومسحوبات فعلية (بدون التحويلات الداخلية بين الحسابات)</span>
+          {transferLegs.error && (
+            <span className="text-[10px] text-amber-700 font-bold mt-1 block">تعذر تحميل التحويلات الداخلية: قد يشمل الإجمالي مبالغ محولة بين الحسابات.</span>
+          )}
         </div>
       </div>
 
@@ -1472,7 +1514,10 @@ export const TreasuryManagement: React.FC = () => {
                         className="w-full flex items-center justify-center gap-1.5 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-semibold border border-slate-200 transition cursor-pointer"
                       >
                         <History className="h-3.5 w-3.5 text-slate-400" />
-                        <span>عرض كشف وحركات الحساب ({ledgerCountByAccount.get(acc.id) || 0})</span>
+                        <span>
+                          عرض كشف وحركات الحساب
+                          {ledgerCountByAccount.has(acc.id) ? ` (${ledgerCountByAccount.get(acc.id)})` : ''}
+                        </span>
                       </button>
                     </div>
                   </div>
@@ -1509,18 +1554,26 @@ export const TreasuryManagement: React.FC = () => {
               <button
                 type="button"
                 onClick={exportLedgerToExcel}
-                className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs transition cursor-pointer active:scale-95"
-                title="تصدير كشف الحركات المفلترة إلى ملف إكسل CSV"
+                disabled={exportGuard.pending || ledger.loading}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs transition cursor-pointer active:scale-95 disabled:opacity-60 disabled:cursor-wait"
+                title="تصدير كشف الحركات المفلترة (كاملاً، بما فيها الصفحات الأقدم) إلى ملف إكسل CSV"
               >
                 <Download className="h-3.5 w-3.5" />
-                <span>تصدير كشف الحساب إلى Excel (CSV)</span>
+                <span>{exportGuard.pending ? 'جارٍ تجهيز الملف...' : 'تصدير كشف الحساب إلى Excel (CSV)'}</span>
               </button>
             </div>
           </div>
 
+          {searchNeedle && ledger.hasMore && (
+            <p className="px-5 py-2 bg-amber-50 border-b border-amber-100 text-[11px] font-semibold text-amber-800">
+              البحث يشمل الحركات المحمّلة فقط. استخدم «تحميل المزيد» أسفل الجدول للبحث في الحركات الأقدم.
+            </p>
+          )}
           {filteredTransactions.length === 0 ? (
             <div className="p-12 text-center text-slate-400 text-xs space-y-3">
-              {searchNeedle ? (
+              {ledger.loading ? (
+                <p>جارٍ تحميل الحركات...</p>
+              ) : searchNeedle ? (
                 <>
                   <p className="font-bold text-slate-600">لا نتائج مطابقة لـ «{searchQuery.trim()}» في دفتر الحركات.</p>
                   <button
@@ -1611,6 +1664,7 @@ export const TreasuryManagement: React.FC = () => {
               </table>
             </div>
           )}
+          <HistoryPagerFooter history={ledger} shown={ledger.items.length} noun="الحركات" />
         </div>
       )}
 

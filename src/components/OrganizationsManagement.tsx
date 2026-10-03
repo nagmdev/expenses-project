@@ -12,6 +12,9 @@ import {
   membershipProtection,
 } from '../domain/directory';
 import { paymentAccountHasHistory } from '../domain/treasury';
+import { usePagedHistory } from '../hooks/usePagedHistory';
+import { countLabel, historyScope } from '../lib/pagination';
+import { HistoryPagerFooter } from './ListPaging';
 import { can } from '../utils/permissions';
 import { fmtMoney, formatLocalDateTime, copyTextToClipboard, accountBalance } from '../utils/requestUi';
 import {
@@ -61,7 +64,8 @@ import {
   isServiceMatchingOrg,
   BudgetPeriod,
   RecurringFrequency,
-  PaymentMethod
+  PaymentMethod,
+  AuditLogEntry
 } from '../types';
 import { 
   sanitizeDigitsOnly, 
@@ -154,8 +158,6 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     allPaymentAccounts,
     departments,
     allDepartments,
-    auditLogs,
-    allAuditLogs,
     addOrganization, 
     updateOrganization,
     deleteOrganization,
@@ -287,7 +289,6 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   const targetVendors = canManageOrgs ? allProviders : providers;
   const targetVaults = canManageOrgs ? allPaymentAccounts : paymentAccounts;
   const targetDepartments = canManageOrgs ? allDepartments : departments;
-  const targetAuditLogs = canManageOrgs ? allAuditLogs : auditLogs;
 
   // Per-row / confirm-dialog actions (toggle, delete, demote...): one in-flight call per scope.
   const rowGuard = useKeyedSubmitGuard();
@@ -1676,6 +1677,17 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     );
   }, [targetDepartments, selectedOrgFilter, deptSearch]);
 
+  // The audit log, newest first, paged on the server (first page live, "تحميل المزيد" for the
+  // older entries): the whole platform or the company picked (owner), the admin's own company
+  // otherwise (the only list firestore.rules accept from an org admin).
+  const auditHistory = usePagedHistory<AuditLogEntry>({
+    col: 'auditLogs',
+    orderField: 'timestamp',
+    enabled: canViewAuditLog,
+    filters: historyScope({ isSuperAdmin: canManageOrgs, orgFilter: selectedOrgFilter, activeOrgId }),
+  });
+  const targetAuditLogs = auditHistory.items;
+
   const filteredAuditLogs = useMemo(() => {
     const orgFiltered = targetAuditLogs.filter(log => selectedOrgFilter === 'all' || log.orgId === selectedOrgFilter);
     return orgFiltered.filter(log => {
@@ -1914,7 +1926,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           { id: 'vaults', label: `💳 الخزائن وحسابات الدفع (${tabVaultsCount})`, icon: Wallet, active: 'bg-amber-600 text-white shadow-md shadow-amber-500/20' },
           { id: 'departments', label: `🏷️ الأقسام والهيكل (${tabDepartmentsCount})`, icon: FolderTree, active: 'bg-purple-600 text-white shadow-md shadow-purple-500/20' },
           { id: 'super_admins', label: `🛡️ المشرفون والصلاحيات (${superAdminEmails.length})`, icon: ShieldCheck, active: 'bg-rose-600 text-white shadow-md shadow-rose-500/20' },
-          { id: 'audit_log', label: `📜 سجل العمليات والتعديلات (${filteredAuditLogs.length})`, icon: History, active: 'bg-slate-900 text-white shadow-md shadow-slate-900/20' },
+          { id: 'audit_log', label: `📜 سجل العمليات والتعديلات (${countLabel(filteredAuditLogs.length, auditHistory.hasMore)})`, icon: History, active: 'bg-slate-900 text-white shadow-md shadow-slate-900/20' },
         ] as Array<{ id: AdminSection; label: string; icon: typeof Building2; active: string }>)
           .filter(tab => sectionAllowed[tab.id])
           .map(tab => {
@@ -3349,6 +3361,11 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+            {auditHistory.hasMore && (auditSearch.trim() || auditActionFilter !== 'all' || auditEntityFilter !== 'all') && (
+              <p className="px-4 py-2 bg-amber-50 border-b border-amber-100 text-[11px] font-semibold text-amber-800">
+                البحث والتصفية يشملان السجلات المحمّلة فقط. استخدم «تحميل المزيد» أسفل الجدول للبحث في السجلات الأقدم.
+              </p>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full text-right text-xs">
                 <thead>
@@ -3364,7 +3381,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   {filteredAuditLogs.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="text-center py-8 text-slate-400">
-                        لا توجد حركات مسجلة تطابق خيارات البحث الحالية.
+                        {auditHistory.loading ? 'جارٍ تحميل السجل...' : 'لا توجد حركات مسجلة تطابق خيارات البحث الحالية.'}
                       </td>
                     </tr>
                   ) : (
@@ -3414,6 +3431,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                 </tbody>
               </table>
             </div>
+            <HistoryPagerFooter history={auditHistory} shown={auditHistory.items.length} noun="السجلات" />
           </div>
         </div>
       )}
