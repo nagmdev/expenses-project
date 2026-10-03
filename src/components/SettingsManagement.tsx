@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useApp, type OrphanProfileRow } from '../context/AppContext';
 import { openLegacyRecovery } from './LegacyDataRecovery';
 import { EmailVerificationCard } from './EmailVerificationCard';
+import { FinancialConsistencyCheck } from './FinancialConsistencyCheck';
 import { 
   Bell, 
   Mail, 
@@ -1052,6 +1053,9 @@ export const SettingsManagement: React.FC = () => {
               </div>
             )}
           </div>
+
+          {/* Financial consistency check: READ-ONLY re-derivation of balances and counters */}
+          <FinancialConsistencyCheck />
         </div>
       )}
 
