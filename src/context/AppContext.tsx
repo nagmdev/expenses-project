@@ -170,11 +170,19 @@ export interface MultiOrgAddResult {
 }
 export type { MultiOrgSkip };
 
+/** A profile that grants a company in which no member record is the person's (older app versions). */
+export interface OrphanProfileRow {
+  id: string;
+  orgId: string;
+  name: string;
+  email: string;
+  role: string;
+}
+
 /** The platform owner's uniqueness-key migration in this session: running, then its result or error. */
 export interface KeyMigrationState {
   pending: boolean;
-  /** orphansDetached: profiles left with a company but no record there (detachOrphanProfiles). */
-  result?: UniqueKeyMigration & { orphansDetached?: number };
+  result?: UniqueKeyMigration;
   error?: string;
 }
 
@@ -627,6 +635,10 @@ interface AppContextType {
   clearEmailLogs: () => Promise<void>;
   /** Platform owner: moves the uniqueness keys of existing records to the current id format (once, after the rules update). */
   migrateUniqueKeys: () => Promise<UniqueKeyMigration>;
+  /** Platform owner: profiles that still grant a company where no member record is theirs (read fresh). */
+  findOrphanProfiles: () => Promise<OrphanProfileRow[]>;
+  /** Platform owner: detaches the given orphan profiles (after the owner reviewed the list). */
+  detachOrphans: (rows: OrphanProfileRow[]) => Promise<number>;
   /** The last migration of this session (running / result / error): kept here so leaving Settings mid-run does not lose it. */
   keyMigration: KeyMigrationState | null;
 
@@ -3032,20 +3044,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     setKeyMigration({ pending: true });
     try {
-      const keys = await mutate('migrateUniqueKeys', 'all', store => migrateLegacyUniqueKeys(store, actor, owners));
-      // Same one-time clean-up after the rules update: profiles that still grant a company although
-      // no record there is theirs (older app versions), invisible in every member list.
-      const db = getDb();
-      const profiles = db ? (await getDocs(collection(db, 'users'))).docs.map(d => ({ ...d.data(), id: d.id }) as { id: string; orgId?: string }) : [];
-      const orphans = orphanProfiles(profiles, rawMembers);
-      const orphansDetached = orphans.length > 0 ? await mutate('detachOrphanProfiles', 'all', store => detachOrphanProfiles(store, actor, orphans)) : 0;
-      const result = { ...keys, orphansDetached };
+      const result = await mutate('migrateUniqueKeys', 'all', store => migrateLegacyUniqueKeys(store, actor, owners));
       setKeyMigration({ pending: false, result });
       return result;
     } catch (err: any) {
       setKeyMigration({ pending: false, error: err?.message || 'تعذر ترحيل المفاتيح. تحقق من الاتصال ثم أعد المحاولة.' });
       throw err;
     }
+  };
+
+  // Profiles that still grant a company although no member record there is theirs (older app
+  // versions): invisible in every member list, so no admin can suspend or remove them. Both lists
+  // are read fresh from the database (never the live listeners, which may be incomplete), and
+  // nothing changes until the owner has reviewed the names and confirmed.
+  const findOrphanProfiles = async (): Promise<OrphanProfileRow[]> => {
+    if (!isSuperAdmin) throw new DomainError('forbidden', 'هذا الإجراء متاح للمشرف العام للمنصة فقط.');
+    const db = getDb();
+    if (!db) throw new DomainError('offline', 'قاعدة البيانات غير متصلة.');
+    const [usersSnap, membersSnap] = await Promise.all([getDocs(collection(db, 'users')), getDocs(collection(db, 'members'))]);
+    const profiles = usersSnap.docs.map(d => ({ ...d.data(), id: d.id }) as { id: string; orgId?: string; name?: string; email?: string; role?: string });
+    const members = membersSnap.docs.map(d => ({ ...d.data(), id: d.id }) as OrganizationMember);
+    return orphanProfiles(profiles, members).map(p => ({
+      id: p.id,
+      orgId: String(p.orgId || ''),
+      name: String(p.name || ''),
+      email: String(p.email || ''),
+      role: String(p.role || ''),
+    }));
+  };
+
+  const detachOrphans = async (rows: OrphanProfileRow[]): Promise<number> => {
+    if (!isSuperAdmin) throw new DomainError('forbidden', 'هذا الإجراء متاح للمشرف العام للمنصة فقط.');
+    if (rows.length === 0) return 0;
+    return mutate('detachOrphanProfiles', 'all', store => detachOrphanProfiles(store, actor, rows));
   };
 
   // =========================================================================
@@ -3297,6 +3328,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sendTestEmail,
         clearEmailLogs,
         migrateUniqueKeys,
+        findOrphanProfiles,
+        detachOrphans,
         keyMigration,
         refreshData,
         resetToSampleData,

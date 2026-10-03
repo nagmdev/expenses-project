@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useApp } from '../context/AppContext';
+import { useApp, type OrphanProfileRow } from '../context/AppContext';
 import { openLegacyRecovery } from './LegacyDataRecovery';
 import { EmailVerificationCard } from './EmailVerificationCard';
 import { 
@@ -46,6 +46,9 @@ export const SettingsManagement: React.FC = () => {
     sendTestEmail,
     clearEmailLogs,
     migrateUniqueKeys,
+    findOrphanProfiles,
+    detachOrphans,
+    organizations,
     keyMigration,
     auditLogs,
     updateUserProfileInfo,
@@ -77,16 +80,47 @@ export const SettingsManagement: React.FC = () => {
     ? { msg: keyMigration.error, isError: true }
     : migrationResult
     ? {
-        msg: (migrationResult.moved + migrationResult.replaced === 0
+        msg: migrationResult.moved + migrationResult.replaced === 0
           ? `لا توجد مفاتيح بالصيغة القديمة تحتاج إلى ترحيل.${migrationResult.skipped ? ` (${migrationResult.skipped} مفتاح قديم لا يخص سجلاً حالياً تُرك كما هو)` : ''}`
-          : `تم ترحيل ${migrationResult.moved} مفتاح، وإزالة ${migrationResult.replaced} مفتاح قديم مكرر.${migrationResult.skipped ? ` (${migrationResult.skipped} مفتاح قديم لا يخص سجلاً حالياً تُرك كما هو)` : ''}`)
-          + (migrationResult.orphansDetached ? ` وتم فصل ${migrationResult.orphansDetached} ملف مستخدم عن شركة لا يقابله فيها أي سجل موظف.` : ''),
+          : `تم ترحيل ${migrationResult.moved} مفتاح، وإزالة ${migrationResult.replaced} مفتاح قديم مكرر.${migrationResult.skipped ? ` (${migrationResult.skipped} مفتاح قديم لا يخص سجلاً حالياً تُرك كما هو)` : ''}`,
       }
     : null;
   const handleMigrateUniqueKeys = () => {
     if (migrationPending) return;
     // The outcome (or the error) is shown from keyMigration; a second click joins the running call.
     migrateUniqueKeys().catch(() => undefined);
+  };
+
+  // Profiles granting a company with no member record there (older app versions): listed first,
+  // detached only after the owner confirmed the names.
+  const orphanGuard = useSubmitGuard();
+  const [orphanRows, setOrphanRows] = useState<OrphanProfileRow[] | null>(null);
+  const [orphanFeedback, setOrphanFeedback] = useState<{ msg: string; isError?: boolean } | null>(null);
+  const orgName = (orgId: string) => organizations.find(o => o.id === orgId)?.name || orgId;
+  const handleFindOrphans = () => {
+    void orphanGuard.run(async () => {
+      setOrphanFeedback(null);
+      try {
+        const rows = await findOrphanProfiles();
+        setOrphanRows(rows);
+        if (rows.length === 0) setOrphanFeedback({ msg: 'لا توجد حسابات مرتبطة بشركة من غير سجل موظف.' });
+      } catch (err: any) {
+        setOrphanFeedback({ msg: err?.message || 'تعذر قراءة الحسابات.', isError: true });
+      }
+    });
+  };
+  const handleDetachOrphans = () => {
+    if (!orphanRows || orphanRows.length === 0) return;
+    if (!window.confirm(`سيتم فصل ${orphanRows.length} حساب عن شركاتهم (لن يدخلوا الشركة حتى يضيفهم مديرها من جديد). متابعة؟`)) return;
+    void orphanGuard.run(async () => {
+      try {
+        const n = await detachOrphans(orphanRows);
+        setOrphanRows(null);
+        setOrphanFeedback({ msg: `تم فصل ${n} حساب. أي شخص منهم ما زال يعمل يضيفه مدير شركته من قائمة الموظفين.` });
+      } catch (err: any) {
+        setOrphanFeedback({ msg: err?.message || 'تعذر فصل الحسابات.', isError: true });
+      }
+    });
   };
 
   // Email Test state
@@ -965,6 +999,56 @@ export const SettingsManagement: React.FC = () => {
               }`}>
                 {migrationFeedback.isError ? <AlertCircle className="h-4 w-4 shrink-0" /> : <CheckCircle2 className="h-4 w-4 shrink-0" />}
                 <span>{migrationFeedback.msg}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Profiles that grant a company with no member record there: review, then detach */}
+          <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-extrabold text-slate-900">حسابات مرتبطة بشركة من غير سجل موظف</div>
+                <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                  بقايا إصدارات سابقة: حساب يفتح شركة ولا يظهر في قائمة موظفيها، فلا يستطيع مديرها إيقافه أو حذفه. اعرض القائمة أولاً، ولا يتغير شيء إلا بعد تأكيدك.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleFindOrphans}
+                disabled={orphanGuard.pending}
+                className="shrink-0 flex items-center justify-center gap-1.5 px-4 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-50"
+              >
+                {orphanGuard.pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <User className="h-3.5 w-3.5" />}
+                <span>عرض الحسابات</span>
+              </button>
+            </div>
+            {orphanRows && orphanRows.length > 0 && (
+              <div className="space-y-2">
+                <ul className="max-h-60 overflow-y-auto divide-y divide-slate-200 bg-white border border-slate-200 rounded-xl">
+                  {orphanRows.map(r => (
+                    <li key={`${r.id}_${r.orgId}`} className="px-3 py-2 text-[11px] flex flex-wrap gap-x-3 gap-y-0.5">
+                      <span className="font-bold text-slate-900">{r.name || '—'}</span>
+                      <span dir="ltr" className="font-mono text-slate-600">{r.email || r.id}</span>
+                      <span className="text-slate-500">{orgName(r.orgId)} · {r.role || 'employee'}</span>
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  type="button"
+                  onClick={handleDetachOrphans}
+                  disabled={orphanGuard.pending}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                >
+                  فصل هذه الحسابات ({orphanRows.length})
+                </button>
+              </div>
+            )}
+            {orphanFeedback && (
+              <div className={`p-3 rounded-xl text-xs font-bold flex items-center gap-2 ${
+                orphanFeedback.isError ? 'bg-rose-50 text-rose-800 border border-rose-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+              }`}>
+                {orphanFeedback.isError ? <AlertCircle className="h-4 w-4 shrink-0" /> : <CheckCircle2 className="h-4 w-4 shrink-0" />}
+                <span>{orphanFeedback.msg}</span>
               </div>
             )}
           </div>
