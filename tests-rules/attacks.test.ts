@@ -1,5 +1,5 @@
 /**
- * Adversarial and legitimacy suite for firestore.rules (rules-spec-v1, rounds r1 and r2).
+ * Adversarial and legitimacy suite for firestore.rules (rules-spec-v1, rounds r1 to r4).
  *
  * An attacker uses the raw Firestore Web SDK with their own credentials (single writes,
  * batches, transactions, chosen ids, fields the domain never writes); every legitimate
@@ -14,12 +14,13 @@
  * message / spec §11). Every other test is coverage.
  *
  * Sections (each seeds its own data): requests and counters, custodies, tenancy and
- * identity, legitimate operations, round r2 (tenancy lane, legitimacy lane).
+ * identity, legitimate operations, round r2 (tenancy lane, legitimacy lane), round r3 lanes,
+ * round r4 (identity lane [R4-In], login lane [LOGIN-n]).
  */
 import { readFileSync } from 'fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { assertFails, assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
-import { collection, deleteDoc, deleteField, doc, getDoc, getDocs, or, query, setDoc, updateDoc, where, writeBatch, type Firestore } from 'firebase/firestore';
+import { collection, deleteDoc, deleteField, doc, getDoc, getDocs, limit, or, query, runTransaction, setDoc, updateDoc, where, writeBatch, type Firestore } from 'firebase/firestore';
 import { createFirestoreStore } from '../src/domain/firestoreStore';
 import { createExpenseRequest, disburseExpenseRequest, transitionExpenseRequest, updateExpenseRequest } from '../src/domain/requests';
 import {
@@ -48,6 +49,7 @@ import {
   profileMembershipState,
   removeMember,
   removeOrganization,
+  switchableMemberships,
   syncOwnMembership,
   updateEntity,
   updateMemberRecord,
@@ -57,7 +59,8 @@ import {
 import { addVisaPayment, createVisaRequest, decideVisaRequest, deleteVisaRequest, updateVisaRequest } from '../src/domain/visa';
 import { LEGACY_STORES, restoreBlock, restoreRecord, type LegacyRecord } from '../src/domain/legacyRecovery';
 import { isDomainError, normalizeEmail, normalizeKeyValue, normalizeKeyValueV1, toMoney, uniqueKeyDocId, uniqueKeyDocIdV1, type Actor } from '../src/domain/common';
-import type { OrganizationMember } from '../src/types';
+import type { OrganizationMember, Role } from '../src/types';
+import { can } from '../src/utils/permissions';
 import { DEFAULT_EMAIL_SETTINGS } from '../src/services/emailTemplates';
 
 const ORG = 'org-acme';
@@ -1278,7 +1281,9 @@ describe('tenancy, identity, keys, outbox, audit', () => {
       await assertFails(getDoc(doc(db(CAIRO_FIN), 'organizations', ORG)));
       await assertFails(getDoc(doc(db(STRANGER), 'organizations', ORG)));
       await assertFails(getDocs(collection(db(ADMIN), 'organizations')));
-      await assertSucceeds(getDoc(doc(db(STRANGER), 'organizations', 'org-missing')));
+      // (round 4, R4-I4: refused like an existing one, so the answer tells nothing; the owner reads it)
+      await assertFails(getDoc(doc(db(STRANGER), 'organizations', 'org-missing')));
+      await assertSucceeds(getDoc(doc(db(OWNER), 'organizations', 'org-missing')));
       await assertSucceeds(getDoc(doc(db(EMP), 'organizations', ORG)));
       await assertFails(getDoc(doc(db(SUSP_FIN), 'organizations', ORG)));
     });
@@ -2593,7 +2598,9 @@ describe('round r2: identity, audit ids, restore markers, keys (tenancy lane)', 
     it('[TEN2-1] users/{uid}.verifiedEmail is written by that account only, from its verified token', async () => {
       const a = db(ADMIN);
       await assertFails(setDoc(doc(a, 'users', STRANGER.uid), { orgId: ORG, role: 'employee', active: true, verifiedEmail: VICTIM_EMAIL }));
-      await assertSucceeds(setDoc(doc(a, 'users', STRANGER.uid), { orgId: ORG, role: 'employee', active: true }));
+      // (round 4, R4-I1: a profile no membership backs is refused; planted here)
+      await assertFails(setDoc(doc(a, 'users', STRANGER.uid), { orgId: ORG, role: 'employee', active: true }));
+      await seed(f => setDoc(doc(f, 'users', STRANGER.uid), { orgId: ORG, role: 'employee', active: true }));
       await assertFails(updateDoc(doc(a, 'users', STRANGER.uid), { verifiedEmail: VICTIM_EMAIL }));
       await assertFails(updateDoc(doc(a, 'users', EMP.uid), { verifiedEmail: EMP.email }));
       await assertFails(updateDoc(doc(db(STRANGER), 'users', STRANGER.uid), { verifiedEmail: VICTIM_EMAIL }));
@@ -5701,6 +5708,1110 @@ describe('round r3: legitimate operations lane ([LG3-1] invitation of a person o
       await removeAttachment(db(EMP, false), EMP.uid, a1.attachmentId);
       await removeAttachment(db(ADMIN), ADMIN.uid, a2.attachmentId);
       expect(img.url).toMatch(/^fsattach:\/\//);
+    });
+  });
+});
+
+describe('round r4: identity lane ([R4-I1] org-admin profile writes bound to a membership, [R4-I2] self-addressed memberships, [R4-I3] corrected invitation address, [R4-I4] missing-document oracle)', () => {
+  // Raw Firestore Web SDK with the attacker's own credentials; legitimate operations through the
+  // real domain functions the way AppContext calls them. [R4-Ix] tests assert the fixed outcome.
+  const ORG = 'org-acme';
+  const OTHER_ORG = 'org-other';
+
+  type U = { uid: string; email: string };
+  const OWNER: U = { uid: 'uidOwner000000000000000001', email: 'mahmoud@tieapps.com' };
+  const ADMIN: U = { uid: 'uidAdmin000000000000000001', email: 'admin@acme.test' };
+  const ADMIN2: U = { uid: 'uidAdmin000000000000000002', email: 'admin2@acme.test' };
+  const FIN: U = { uid: 'uidFinance00000000000000001', email: 'fin@acme.test' };
+  const EMP: U = { uid: 'uidEmployee0000000000000001', email: 'emp@acme.test' };
+  const EMP2: U = { uid: 'uidEmployee0000000000000002', email: 'emp2@acme.test' };
+  const SUSP: U = { uid: 'uidSuspAdmin0000000000001', email: 'sadmin@acme.test' };
+  const CAIRO_ADMIN: U = { uid: 'uidCairoAdmin000000000001', email: 'admin@other.test' };
+  const CAIRO_EMP: U = { uid: 'uidCairoEmp00000000000001', email: 'emp@other.test' };
+  const STRANGER: U = { uid: 'uidStranger00000000000001', email: 'stranger@evil.test' };
+  const TYPO: U = { uid: 'uidTypoOwner0000000000001', email: 'mona.salem@acme-test.com' }; // owns the mistyped address
+  const NEWHIRE: U = { uid: 'uidNewHire000000000000001', email: 'newhire@acme.test' };
+  const MONA: U = { uid: 'uidMonaSalem0000000000001', email: 'mona.salem@acme.test' }; // the intended invitee
+
+  const db = (u: U, verified = true, email = u.email): Firestore =>
+    env.authenticatedContext(u.uid, { email, email_verified: verified }).firestore() as unknown as Firestore;
+  const store = (u: U, verified = true) => createFirestoreStore(db(u, verified));
+  const actor = (u: U, role: Actor['role'], orgId?: string): Actor => ({ id: u.uid, name: u.email, email: u.email, role, ...(orgId ? { orgId } : {}) });
+  let n = 0;
+  const key = () => `key-r4i${String(++n).padStart(7, '0')}`;
+  const seed = (fn: (f: Firestore) => Promise<unknown>) => env.withSecurityRulesDisabled(ctx => fn(ctx.firestore() as unknown as Firestore));
+  const read = async (c: string, id: string) => {
+    let data: Record<string, any> | undefined;
+    await env.withSecurityRulesDisabled(async ctx => {
+      data = (await getDoc(doc(ctx.firestore(), c, id))).data();
+    });
+    return data;
+  };
+  const mid = (u: U, org = ORG) => `${u.uid}_${org}`;
+  const inv = (email: string, org = ORG) => `${pendingUserIdForEmail(email)}_${org}`;
+  const allows = async (p: Promise<unknown>) => p.then(() => true, () => false);
+
+  // ---- AppContext.linkedProfileIds (verbatim shape) ----
+  const linkedProfileIds = async (f: Firestore, mem: OrganizationMember | undefined): Promise<string[]> => {
+    if (!mem) return [];
+    const ids = new Set<string>();
+    if (isRealUid(mem.userId)) {
+      try {
+        await getDoc(doc(f, 'users', mem.userId));
+        ids.add(mem.userId);
+      } catch {
+        // not ours
+      }
+    }
+    try {
+      const snap = await getDocs(query(collection(f, 'users'), where('orgId', '==', mem.orgId), where('memberId', '==', mem.id)));
+      snap.docs.forEach(d => ids.add(d.id));
+    } catch {
+      // skipped
+    }
+    return Array.from(ids);
+  };
+  const memberAs = async (f: Firestore, id: string) => ({ id, ...(await getDoc(doc(f, 'members', id))).data() } as OrganizationMember);
+  // AppContext.updateMember
+  const appUpdateMember = async (who: U, role: Actor['role'], memberId: string, updates: Partial<OrganizationMember>) => {
+    const f = db(who);
+    const mem = await memberAs(f, memberId);
+    return updateMemberRecord(store(who), actor(who, role, ORG), memberId, updates, await linkedProfileIds(f, mem), key());
+  };
+  // AppContext.removeMember
+  const appRemoveMember = async (who: U, role: Actor['role'], memberId: string) => {
+    const f = db(who);
+    const mem = await memberAs(f, memberId);
+    const all = (await getDocs(query(collection(f, 'members'), where('orgId', '==', ORG)))).docs.map(d => ({ id: d.id, ...d.data() } as OrganizationMember));
+    const email = normalizeEmail(mem.userEmail);
+    const samePerson = email ? all.filter(m => m.id !== memberId && isRealUid(m.userId) && normalizeEmail(m.userEmail) === email) : [];
+    const ids = new Set(await linkedProfileIds(f, mem));
+    for (const other of samePerson) (await linkedProfileIds(f, other)).forEach(id => ids.add(id));
+    return removeMember(store(who), actor(who, role, ORG), memberId, Array.from(ids), key());
+  };
+  // AppContext.linkOwnProfile (verbatim shape)
+  const linkOwnProfile = (f: Firestore, user: U & { emailVerified: boolean }, m: OrganizationMember) =>
+    setDoc(doc(f, 'users', user.uid), {
+      id: user.uid,
+      ...(user.emailVerified ? { email: normalizeEmail(user.email) } : {}),
+      name: m.userName || 'موظف',
+      role: m.role,
+      orgId: m.orgId,
+      memberId: m.id,
+      department: m.department || '',
+      phone: m.phone || '',
+      active: true,
+      updatedAt: new Date().toISOString(),
+    }, { merge: true });
+  // What the company's member list (the only people list the app shows) contains.
+  const memberListUids = async (who: U) =>
+    (await getDocs(query(collection(db(who), 'members'), where('orgId', '==', ORG)))).docs.map(d => String(d.data().userId));
+
+  // What an account can do in ORG, observed through the rules.
+  const powers = async (u: U) => ({
+    readsTreasury: await allows(getDoc(doc(db(u), 'paymentAccounts', 'acc-cash'))),
+    editsMembers: await allows(updateDoc(doc(db(u), 'members', mid(EMP2)), { jobTitle: `probe-${++n}` })),
+  });
+
+
+  beforeEach(async () => {
+    await env.clearFirestore();
+    await seed(async f => {
+      await setDoc(doc(f, 'organizations', ORG), { id: ORG, name: 'Acme', code: 'ACME', currency: 'EGP', notificationRecipients: [ADMIN.email, ADMIN2.email] });
+      await setDoc(doc(f, 'organizations', OTHER_ORG), { id: OTHER_ORG, name: 'Other', code: 'OTH', currency: 'EGP', notificationRecipients: [CAIRO_ADMIN.email] });
+      for (const [u, role, org] of [
+        [ADMIN, 'org_admin', ORG], [ADMIN2, 'org_admin', ORG], [FIN, 'finance', ORG], [EMP, 'employee', ORG], [EMP2, 'employee', ORG],
+        [CAIRO_ADMIN, 'org_admin', OTHER_ORG], [CAIRO_EMP, 'employee', OTHER_ORG],
+      ] as const) {
+        await setDoc(doc(f, 'users', u.uid), { orgId: org, role, active: true, email: u.email, verifiedEmail: u.email, memberId: mid(u, org), name: u.email });
+        await setDoc(doc(f, 'members', mid(u, org)), { orgId: org, userId: u.uid, userEmail: u.email, role, active: true, userName: u.email });
+        await setDoc(doc(f, 'uniqueKeys', uniqueKeyDocId('member_email', org, u.email)),
+          { scope: 'member_email', orgId: org, value: normalizeKeyValue(u.email, 'member_email'), entityCollection: 'members', entityId: mid(u, org) });
+      }
+      await setDoc(doc(f, 'users', SUSP.uid), { orgId: ORG, role: 'org_admin', active: false, email: SUSP.email, memberId: mid(SUSP) });
+      await setDoc(doc(f, 'members', mid(SUSP)), { orgId: ORG, userId: SUSP.uid, userEmail: SUSP.email, role: 'org_admin', active: false, userName: 'S' });
+      await setDoc(doc(f, 'members', mid(OWNER)), { orgId: ORG, userId: OWNER.uid, userEmail: OWNER.email, role: 'org_admin', active: true, userName: 'Owner' });
+      await setDoc(doc(f, 'paymentAccounts', 'acc-cash'), { orgId: ORG, name: 'cash', type: 'cash', currency: 'EGP', active: true, balance: 1000, currentBalance: 1000 });
+      await setDoc(doc(f, 'paymentAccounts', 'acc-ob'), { orgId: OTHER_ORG, name: 'ob', type: 'bank', currency: 'EGP', active: true, balance: 9000, currentBalance: 9000 });
+    });
+  });
+
+  // =============================================================================
+  // FINDINGS
+  // =============================================================================
+  describe('round r4 identity: findings', () => {
+    it('[R4-I1] an org admin cannot write a users/{uid} profile that no membership backs: no invisible org admin', async () => {
+      const a = db(ADMIN);
+      // STRANGER: any account the admin controls (fresh sign-up, no profile, no membership anywhere).
+      await assertFails(setDoc(doc(a, 'users', STRANGER.uid), { orgId: ORG, role: 'org_admin', active: true, name: 'svc' }));
+      await assertFails(setDoc(doc(a, 'users', STRANGER.uid), { orgId: ORG, role: 'employee', active: true }));
+      // naming someone else's membership, or one of another role
+      await assertFails(setDoc(doc(a, 'users', STRANGER.uid), { orgId: ORG, role: 'org_admin', memberId: mid(ADMIN), active: true }));
+      await assertFails(setDoc(doc(a, 'users', STRANGER.uid), { orgId: ORG, role: 'org_admin', memberId: mid(EMP), active: true }));
+      expect(await powers(STRANGER)).toEqual({ readsTreasury: false, editsMembers: false });
+      // The visible way: a membership in the member list, the profile in the same transaction (createCompanyUser).
+      await createMember(store(ADMIN), actor(ADMIN, 'org_admin', ORG), {
+        orgId: ORG, userId: STRANGER.uid, userName: 'svc', userEmail: STRANGER.email, role: 'org_admin', department: '', jobTitle: '', active: true, phone: '',
+      } as any, key(), { writeUserProfile: true });
+      expect(await memberListUids(OWNER)).toContain(STRANGER.uid);
+      expect(await powers(STRANGER)).toEqual({ readsTreasury: true, editsMembers: true });
+      // ... whose record cannot then be deleted alone, leaving the profile (the invisible admin again)
+      await assertFails(deleteDoc(doc(a, 'members', mid(STRANGER))));
+      // the app's removal (record + profile detached in one transaction) passes, and takes everything
+      await appRemoveMember(ADMIN, 'org_admin', mid(STRANGER));
+      expect(await read('users', STRANGER.uid)).toMatchObject({ orgId: '', role: 'employee', memberId: null });
+      expect(await powers(STRANGER)).toEqual({ readsTreasury: false, editsMembers: false });
+    });
+
+    it('[R4-I1] (variants) an org admin cannot promote, re-activate or re-point a profile against its membership; taking access away still works', async () => {
+      const a = db(ADMIN);
+      await assertFails(updateDoc(doc(a, 'users', EMP.uid), { role: 'org_admin' }));
+      await assertFails(updateDoc(doc(a, 'users', SUSP.uid), { active: true }));
+      await assertFails(updateDoc(doc(a, 'users', EMP.uid), { memberId: mid(EMP2) }));
+      await assertFails(updateDoc(doc(a, 'users', EMP.uid), { memberId: mid(FIN), role: 'finance' }));
+      await assertFails(setDoc(doc(a, 'users', EMP.uid), { orgId: ORG, role: 'org_admin', active: true, memberId: mid(EMP) }));
+      expect(await powers(EMP)).toEqual({ readsTreasury: false, editsMembers: false }); // still an employee
+      expect(await allows(getDoc(doc(db(SUSP), 'paymentAccounts', 'acc-cash')))).toBe(false);
+      // edits that grant nothing new: name / payout details
+      await assertSucceeds(updateDoc(doc(a, 'users', EMP.uid), { name: 'E', iban: 'EG1' }));
+      // taking access away: a suspension, a detach (never planting another memberId)
+      await assertSucceeds(updateDoc(doc(a, 'users', EMP2.uid), { active: false }));
+      await assertFails(updateDoc(doc(a, 'users', FIN.uid), { orgId: '', role: 'employee', memberId: mid(ADMIN) }));
+      await assertSucceeds(updateDoc(doc(a, 'users', EMP2.uid), { orgId: '', role: 'employee', memberId: null }));
+      // the domain's role change and re-activation (membership + profile in one transaction) pass
+      await appUpdateMember(ADMIN, 'org_admin', mid(EMP), { role: 'finance' });
+      expect(await read('users', EMP.uid)).toMatchObject({ role: 'finance', memberId: mid(EMP) });
+      await appUpdateMember(ADMIN, 'org_admin', mid(SUSP), { active: true });
+      expect(await read('users', SUSP.uid)).toMatchObject({ active: true });
+      expect(await allows(getDoc(doc(db(SUSP), 'paymentAccounts', 'acc-cash')))).toBe(true);
+    });
+
+    it('[R4-I1] (known, accepted) an invitee that self-linked keeps its profile when an admin raw-deletes the invitation (no rule can find that profile)', async () => {
+      // A placeholder record names no UID, so the delete rule cannot check the profile linked to it;
+      // the app's removal (AppContext.removeMember: profiles where memberId == id) detaches it.
+      const pid = inv(NEWHIRE.email);
+      await seed(f => setDoc(doc(f, 'members', pid), { orgId: ORG, userId: pendingUserIdForEmail(NEWHIRE.email), userEmail: NEWHIRE.email, role: 'employee', active: true, userName: 'N' }));
+      await assertSucceeds(linkOwnProfile(db(NEWHIRE), { ...NEWHIRE, emailVerified: true }, await memberAs(db(NEWHIRE), pid)));
+      await appRemoveMember(ADMIN, 'org_admin', pid);
+      expect(await read('users', NEWHIRE.uid)).toMatchObject({ orgId: '', memberId: null });
+      expect(await allows(getDoc(doc(db(NEWHIRE), 'paymentAccounts', 'acc-cash')))).toBe(false);
+    });
+
+    it('[R4-I2] an org admin cannot mint a membership addressed to itself (UID or verified email), nor re-address an invitation to itself', async () => {
+      const a2 = db(ADMIN2);
+      const pid = inv(ADMIN2.email);
+      const self = { orgId: ORG, userId: pendingUserIdForEmail(ADMIN2.email), userEmail: ADMIN2.email, role: 'org_admin', active: true, userName: ADMIN2.email };
+      await assertFails(setDoc(doc(a2, 'members', pid), self));
+      await assertFails(setDoc(doc(a2, 'members', `pending-x_${ORG}`), { ...self, userId: 'pending-x', userEmail: 'Admin2@Acme.test' }));
+      // nor the platform owner's address
+      await assertFails(setDoc(doc(a2, 'members', `pending-o_${ORG}`), { ...self, userId: 'pending-o', userEmail: OWNER.email }));
+      // re-address someone else's invitation to itself (old key released in the same commit)
+      const nid = inv(NEWHIRE.email);
+      await seed(async f => {
+        await setDoc(doc(f, 'members', nid), { orgId: ORG, userId: pendingUserIdForEmail(NEWHIRE.email), userEmail: NEWHIRE.email, role: 'org_admin', active: true, userName: 'N' });
+        await setDoc(doc(f, 'uniqueKeys', uniqueKeyDocId('member_email', ORG, NEWHIRE.email)),
+          { scope: 'member_email', orgId: ORG, value: normalizeKeyValue(NEWHIRE.email, 'member_email'), entityCollection: 'members', entityId: nid });
+      });
+      const b = writeBatch(a2);
+      b.update(doc(a2, 'members', nid), { userEmail: ADMIN2.email });
+      b.delete(doc(a2, 'uniqueKeys', uniqueKeyDocId('member_email', ORG, NEWHIRE.email)));
+      await assertFails(b.commit());
+      // ... while the same re-address to another person passes (control)
+      const c = writeBatch(a2);
+      c.update(doc(a2, 'members', nid), { userEmail: 'someone@acme.test' });
+      c.delete(doc(a2, 'uniqueKeys', uniqueKeyDocId('member_email', ORG, NEWHIRE.email)));
+      await assertSucceeds(c.commit());
+      // the platform owner may add any record
+      await assertSucceeds(setDoc(doc(db(OWNER), 'members', pid), self));
+    });
+
+    it('[R4-I2] (removal / suspension) an org admin removed by the owner, or suspended by another admin, keeps nothing', async () => {
+      await appUpdateMember(ADMIN, 'org_admin', mid(ADMIN2), { active: false });
+      expect((await read('users', ADMIN2.uid))).toMatchObject({ active: false });
+      expect(await powers(ADMIN2)).toEqual({ readsTreasury: false, editsMembers: false });
+      await appUpdateMember(ADMIN, 'org_admin', mid(ADMIN2), { active: true });
+      expect(await powers(ADMIN2)).toEqual({ readsTreasury: true, editsMembers: true });
+      await appRemoveMember(OWNER, 'super_admin', mid(ADMIN2));
+      expect((await read('users', ADMIN2.uid))).toMatchObject({ orgId: '', role: 'employee', memberId: null });
+      expect(await powers(ADMIN2)).toEqual({ readsTreasury: false, editsMembers: false });
+    });
+
+    it('[R4-I3] correcting a mistyped invitation email detaches whoever linked under the wrong address; the invitation waits for the corrected one', async () => {
+      // ADMIN invites the new finance manager, mistyping the address (a real address someone else owns).
+      const r = await createMember(store(ADMIN), actor(ADMIN, 'org_admin', ORG), {
+        orgId: ORG, userId: '', userName: 'Mona Salem', userEmail: TYPO.email, role: 'finance', department: 'F', jobTitle: 'FM', active: true, phone: '',
+      } as any, key());
+      const pid = r.value.id;
+      expect(pid).toBe(inv(TYPO.email));
+      // The owner of the mistyped address signs in (verified) and the app links it (forceRefreshUserState → linkOwnProfile).
+      await assertSucceeds(linkOwnProfile(db(TYPO), { ...TYPO, emailVerified: true }, await memberAs(db(TYPO), pid)));
+      expect(await allows(getDoc(doc(db(TYPO), 'paymentAccounts', 'acc-cash')))).toBe(true);
+      // ADMIN notices and corrects the address through the app.
+      await appUpdateMember(ADMIN, 'org_admin', pid, { userEmail: MONA.email });
+      expect(await read('members', pid)).toMatchObject({ userEmail: MONA.email, userId: pendingUserIdForEmail(TYPO.email), role: 'finance', active: true });
+      expect(await read('users', TYPO.uid)).toMatchObject({ orgId: '', role: 'employee', memberId: null });
+      expect(await allows(getDoc(doc(db(TYPO), 'paymentAccounts', 'acc-cash')))).toBe(false);
+      await assertFails(linkOwnProfile(db(TYPO), { ...TYPO, emailVerified: true }, { ...(await read('members', pid)), id: pid } as OrganizationMember));
+      // the intended person links on its first (verified) sign-in
+      await assertSucceeds(linkOwnProfile(db(MONA), { ...MONA, emailVerified: true }, await memberAs(db(MONA), pid)));
+      expect(await allows(getDoc(doc(db(MONA), 'paymentAccounts', 'acc-cash')))).toBe(true);
+    });
+
+    it('[R4-I3] (raw) a placeholder is never re-pointed in the write that changes its address', async () => {
+      const pid = inv(NEWHIRE.email);
+      await seed(async f => {
+        await setDoc(doc(f, 'members', pid), { orgId: ORG, userId: pendingUserIdForEmail(NEWHIRE.email), userEmail: NEWHIRE.email, role: 'finance', active: true, userName: 'N' });
+        await setDoc(doc(f, 'users', NEWHIRE.uid), { orgId: ORG, role: 'finance', memberId: pid, active: true, verifiedEmail: NEWHIRE.email });
+      });
+      const a = db(ADMIN);
+      await assertFails(updateDoc(doc(a, 'members', pid), { userId: NEWHIRE.uid, userEmail: 'other@acme.test' }));
+      await assertSucceeds(updateDoc(doc(a, 'members', pid), { userId: NEWHIRE.uid }));
+    });
+
+    it('[R4-I4] members / organizations get: a missing document is refused wherever an existing one would be (no invitation / company oracle)', async () => {
+      await seed(f => setDoc(doc(f, 'members', inv(NEWHIRE.email)), {
+        orgId: ORG, userId: pendingUserIdForEmail(NEWHIRE.email), userEmail: NEWHIRE.email, role: 'finance', active: true, userName: 'New',
+      }));
+      const s = db(STRANGER, false); // an unverified sign-up, no company
+      const probe = async (f: Firestore, id: string) => allows(getDoc(doc(f, 'members', id)));
+      // the same answer for an existing and a missing document
+      expect(await probe(s, inv(NEWHIRE.email))).toBe(false);
+      expect(await probe(s, inv('nobody@acme.test'))).toBe(false);
+      expect(await probe(s, inv(NEWHIRE.email, OTHER_ORG))).toBe(false);
+      expect(await probe(s, mid(CAIRO_EMP, OTHER_ORG))).toBe(false);
+      expect(await probe(s, mid(CAIRO_EMP, ORG))).toBe(false);
+      expect(await allows(getDoc(doc(s, 'organizations', 'org-acme')))).toBe(false);
+      expect(await allows(getDoc(doc(s, 'organizations', 'org-nosuch')))).toBe(false);
+      // a member of another company learns nothing about ORG either
+      expect(await probe(db(CAIRO_ADMIN), inv('nobody@acme.test'))).toBe(false);
+      expect(await allows(getDoc(doc(db(CAIRO_ADMIN), 'organizations', 'org-nosuch')))).toBe(false);
+      // legitimate reads of a missing document: one's own UID id, a member of the id's company, the owner
+      expect(await probe(s, mid(STRANGER, ORG))).toBe(true);
+      expect(await probe(db(ADMIN), inv('nobody@acme.test'))).toBe(true);
+      expect(await probe(db(EMP), mid(STRANGER, ORG))).toBe(true);
+      expect(await probe(db(OWNER), inv('nobody@other.test', OTHER_ORG))).toBe(true);
+      expect(await allows(getDoc(doc(db(OWNER), 'organizations', 'org-nosuch')))).toBe(true);
+      // the domain's idempotent creates (tx.get of the missing id) keep working
+      const r = await createMember(store(ADMIN), actor(ADMIN, 'org_admin', ORG), {
+        orgId: ORG, userId: '', userName: 'Nobody', userEmail: 'nobody@acme.test', role: 'employee', department: '', jobTitle: '', active: true, phone: '',
+      } as any, key());
+      expect(r.value.id).toBe(inv('nobody@acme.test'));
+    });
+  });
+
+  // =============================================================================
+  // COVERAGE: attacks that are refused
+  // =============================================================================
+  describe('round r4 identity: refused', () => {
+    it('memberId freeze: change, clear (merge / deleteField / null) while keeping the company, on update and create', async () => {
+      const e = db(EMP);
+      await assertFails(setDoc(doc(e, 'users', EMP.uid), { memberId: mid(EMP2) }, { merge: true }));
+      await assertFails(setDoc(doc(e, 'users', EMP.uid), { memberId: deleteField() }, { merge: true }));
+      await assertFails(updateDoc(doc(e, 'users', EMP.uid), { memberId: null }));
+      await assertFails(updateDoc(doc(e, 'users', EMP.uid), { memberId: 'x' }));
+      // full overwrite without memberId (keeps company / role)
+      await assertFails(setDoc(doc(e, 'users', EMP.uid), { orgId: ORG, role: 'employee', active: true, email: EMP.email }));
+      // create with someone else's membership
+      await assertFails(setDoc(doc(db(STRANGER), 'users', STRANGER.uid), { orgId: ORG, role: 'org_admin', memberId: mid(ADMIN), active: true }));
+      await assertFails(setDoc(doc(db(STRANGER), 'users', STRANGER.uid), { orgId: ORG, role: 'employee', memberId: mid(EMP), active: true }));
+      // profile without company may not carry a memberId of someone else
+      await assertFails(setDoc(doc(db(STRANGER), 'users', STRANGER.uid), { orgId: '', role: 'employee', memberId: mid(ADMIN) }));
+      await assertSucceeds(setDoc(doc(db(STRANGER), 'users', STRANGER.uid), { orgId: '', role: 'employee', name: 's' }));
+    });
+
+    it('clear then re-set: detaching works, re-linking only to a membership addressed to the caller', async () => {
+      const e = db(EMP);
+      await assertSucceeds(setDoc(doc(e, 'users', EMP.uid), { orgId: '', role: 'employee', memberId: null }, { merge: true }));
+      await assertFails(setDoc(doc(e, 'users', EMP.uid), { orgId: ORG, role: 'org_admin', memberId: mid(ADMIN) }, { merge: true }));
+      await assertFails(setDoc(doc(e, 'users', EMP.uid), { orgId: ORG, role: 'finance', memberId: mid(FIN) }, { merge: true }));
+      await assertFails(setDoc(doc(e, 'users', EMP.uid), { orgId: ORG, role: 'org_admin', memberId: mid(EMP) }, { merge: true }));
+      await assertSucceeds(setDoc(doc(e, 'users', EMP.uid), { orgId: ORG, role: 'employee', memberId: mid(EMP) }, { merge: true }));
+      // detach keeping a stale memberId of someone else: memberId must be kept or cleared, never changed
+      await assertFails(setDoc(doc(e, 'users', EMP.uid), { orgId: '', role: 'employee', memberId: mid(ADMIN) }, { merge: true }));
+    });
+
+    it('grantsMembership: unverified token, case variants, placeholder ids, suspended / other-company records', async () => {
+      const pid = inv(NEWHIRE.email);
+      await seed(f => setDoc(doc(f, 'members', pid), { orgId: ORG, userId: pendingUserIdForEmail(NEWHIRE.email), userEmail: NEWHIRE.email, role: 'org_admin', active: true, userName: 'N' }));
+      const link = (f: Firestore, uid: string, memberId: string, role = 'org_admin', orgId = ORG) =>
+        setDoc(doc(f, 'users', uid), { orgId, role, memberId, active: true }, { merge: true });
+      // unverified sign-up of the invited address
+      await assertFails(link(db(STRANGER, false, NEWHIRE.email), STRANGER.uid, pid));
+      // verified, but another address that differs only by case / dots
+      await assertFails(link(db(STRANGER, true, 'NewHire@acme.test.'), STRANGER.uid, pid));
+      await assertFails(link(db(STRANGER, true, 'new.hire@acme.test'), STRANGER.uid, pid));
+      // placeholder / odd ids
+      for (const id of ['', '..', '.', `${pid}/x`, 'pending-', `usr-x_${ORG}`]) await assertFails(link(db(NEWHIRE), NEWHIRE.uid, id));
+      // wrong role / company for the right record
+      await assertFails(link(db(NEWHIRE), NEWHIRE.uid, pid, 'finance'));
+      await assertFails(link(db(NEWHIRE), NEWHIRE.uid, pid, 'org_admin', OTHER_ORG));
+      // the invitee itself (verified, upper-case token): ok
+      await assertSucceeds(link(db(NEWHIRE, true, 'NEWHIRE@ACME.TEST'), NEWHIRE.uid, pid));
+      // suspended record
+      await seed(async f => {
+        await updateDoc(doc(f, 'members', pid), { active: false });
+        await setDoc(doc(f, 'users', NEWHIRE.uid), { orgId: '', role: 'employee', memberId: null, active: true });
+      });
+      await assertFails(link(db(NEWHIRE), NEWHIRE.uid, pid));
+    });
+
+    it('removal / suspension: a removed or suspended member cannot regain access with any self-write', async () => {
+      await appRemoveMember(ADMIN, 'org_admin', mid(FIN));
+      const f = db(FIN);
+      expect((await read('users', FIN.uid))).toMatchObject({ orgId: '', role: 'employee' });
+      for (const w of [
+        { orgId: ORG, role: 'finance', memberId: mid(FIN), active: true },
+        { orgId: ORG, role: 'finance' },
+        { orgId: ORG, role: 'employee', memberId: mid(EMP) },
+        { orgId: ORG, role: 'finance', memberId: mid(FIN, OTHER_ORG) },
+      ]) await assertFails(setDoc(doc(f, 'users', FIN.uid), w, { merge: true }));
+      expect(await powers(FIN)).toEqual({ readsTreasury: false, editsMembers: false });
+      // suspended admin (record and profile active:false)
+      const s = db(SUSP);
+      await assertFails(updateDoc(doc(s, 'users', SUSP.uid), { active: true }));
+      await assertFails(setDoc(doc(s, 'users', SUSP.uid), { orgId: ORG, role: 'org_admin', memberId: mid(SUSP), active: true }, { merge: true }));
+      await assertFails(updateDoc(doc(s, 'members', mid(SUSP)), { active: true }));
+      await assertFails(setDoc(doc(s, 'members', `${pendingUserIdForEmail(SUSP.email)}_${ORG}`), { orgId: ORG, userId: pendingUserIdForEmail(SUSP.email), userEmail: SUSP.email, role: 'org_admin', active: true }));
+      // detach + re-attach with active:true and no company grants nothing
+      await assertSucceeds(setDoc(doc(s, 'users', SUSP.uid), { orgId: '', role: 'employee', memberId: null, active: true }, { merge: true }));
+      expect(await allows(getDoc(doc(s, 'paymentAccounts', 'acc-cash')))).toBe(false);
+      // self-service edit of own suspended membership can't touch grant fields
+      await assertFails(updateDoc(doc(s, 'members', mid(SUSP)), { role: 'org_admin', active: true }));
+    });
+
+    it('org admin\'s own profile: no role / company / status / memberId changes; name and payout are fine', async () => {
+      const a = db(ADMIN);
+      await assertSucceeds(updateDoc(doc(a, 'users', ADMIN.uid), { name: 'A', iban: 'EG00' }));
+      await assertFails(updateDoc(doc(a, 'users', ADMIN.uid), { memberId: mid(EMP2) }));
+      await assertFails(updateDoc(doc(a, 'users', ADMIN.uid), { role: 'finance' }));
+      await assertFails(updateDoc(doc(a, 'users', ADMIN.uid), { verifiedEmail: 'x@acme.test' }));
+      await assertFails(updateDoc(doc(a, 'users', ADMIN.uid), { email: 'x@acme.test' }));
+      // own membership's grant fields
+      await assertFails(updateDoc(doc(a, 'members', mid(ADMIN)), { role: 'finance' }));
+      await assertFails(deleteDoc(doc(a, 'members', mid(ADMIN))));
+    });
+
+    it('another company\'s org admin: members create / update / delete, profiles, keys in ORG are refused', async () => {
+      const c = db(CAIRO_ADMIN);
+      await assertFails(setDoc(doc(c, 'members', `${CAIRO_ADMIN.uid}_${ORG}`), { orgId: ORG, userId: CAIRO_ADMIN.uid, userEmail: CAIRO_ADMIN.email, role: 'org_admin', active: true }));
+      await assertFails(setDoc(doc(c, 'members', `${CAIRO_ADMIN.uid}_${ORG}`), { orgId: OTHER_ORG, userId: CAIRO_ADMIN.uid, userEmail: CAIRO_ADMIN.email, role: 'org_admin', active: true }));
+      await assertFails(updateDoc(doc(c, 'members', mid(EMP)), { role: 'org_admin' }));
+      await assertFails(updateDoc(doc(c, 'members', mid(EMP)), { orgId: OTHER_ORG }));
+      await assertFails(deleteDoc(doc(c, 'members', mid(EMP))));
+      await assertFails(updateDoc(doc(c, 'users', EMP.uid), { role: 'org_admin' }));
+      await assertFails(updateDoc(doc(c, 'users', EMP.uid), { orgId: OTHER_ORG }));
+      await assertFails(updateDoc(doc(c, 'users', EMP.uid), { orgId: '', role: 'employee' }));
+      await assertFails(setDoc(doc(c, 'users', NEWHIRE.uid), { orgId: ORG, role: 'org_admin', active: true }));
+      // profile in OTHER (no membership behind it: refused since R4-I1; planted), then moved
+      await assertFails(setDoc(doc(c, 'users', NEWHIRE.uid), { orgId: OTHER_ORG, role: 'employee', active: true }));
+      await seed(f => setDoc(doc(f, 'users', NEWHIRE.uid), { orgId: OTHER_ORG, role: 'employee', active: true }));
+      await assertFails(updateDoc(doc(c, 'users', NEWHIRE.uid), { orgId: ORG }));
+      await assertFails(updateDoc(doc(c, 'users', NEWHIRE.uid), { verifiedEmail: NEWHIRE.email }));
+      // key of ORG re-pointed to an OTHER record holding the same value
+      await seed(f => setDoc(doc(f, 'members', `${pendingUserIdForEmail(EMP.email)}_${OTHER_ORG}`), { orgId: OTHER_ORG, userId: pendingUserIdForEmail(EMP.email), userEmail: EMP.email, role: 'employee', active: true }));
+      await assertFails(setDoc(doc(c, 'uniqueKeys', uniqueKeyDocId('member_email', ORG, EMP.email)),
+        { scope: 'member_email', orgId: ORG, value: normalizeKeyValue(EMP.email, 'member_email'), entityCollection: 'members', entityId: `${pendingUserIdForEmail(EMP.email)}_${OTHER_ORG}` }));
+      await assertFails(setDoc(doc(c, 'uniqueKeys', uniqueKeyDocId('member_email', ORG, EMP.email)),
+        { scope: 'member_email', orgId: OTHER_ORG, value: normalizeKeyValue(EMP.email, 'member_email'), entityCollection: 'members', entityId: `${pendingUserIdForEmail(EMP.email)}_${OTHER_ORG}` }));
+    });
+
+    it('invitation takeover: an employee, or another company, cannot replace an invitation or re-point its key; a live key is never moved', async () => {
+      const pid = inv(NEWHIRE.email);
+      const kid = uniqueKeyDocId('member_email', ORG, NEWHIRE.email);
+      await seed(async f => {
+        await setDoc(doc(f, 'members', pid), { orgId: ORG, userId: pendingUserIdForEmail(NEWHIRE.email), userEmail: NEWHIRE.email, role: 'finance', active: true, userName: 'N' });
+        await setDoc(doc(f, 'uniqueKeys', kid), { scope: 'member_email', orgId: ORG, value: normalizeKeyValue(NEWHIRE.email, 'member_email'), entityCollection: 'members', entityId: pid });
+      });
+      const keyFor = (entityId: string) => ({ scope: 'member_email', orgId: ORG, value: normalizeKeyValue(NEWHIRE.email, 'member_email'), entityCollection: 'members', entityId });
+      // employee: own record does not hold the value
+      await assertFails(setDoc(doc(db(EMP), 'uniqueKeys', kid), keyFor(mid(EMP))));
+      // employee: creates the replacing membership itself
+      const ed = db(EMP);
+      const e = writeBatch(ed);
+      e.set(doc(ed, 'members', mid(EMP)), { orgId: ORG, userId: EMP.uid, userEmail: NEWHIRE.email, role: 'finance', active: true }, { merge: true });
+      e.set(doc(ed, 'uniqueKeys', kid), keyFor(mid(EMP)));
+      await assertFails(e.commit());
+      // a second live record holding the value (admin-written duplicate): the key stays on the live one
+      await seed(f => setDoc(doc(f, 'members', `${STRANGER.uid}_${ORG}`), { orgId: ORG, userId: STRANGER.uid, userEmail: NEWHIRE.email, role: 'finance', active: true }));
+      await assertFails(setDoc(doc(db(EMP), 'uniqueKeys', kid), keyFor(`${STRANGER.uid}_${ORG}`)));
+      await assertFails(setDoc(doc(db(ADMIN), 'uniqueKeys', kid), keyFor(`${STRANGER.uid}_${ORG}`)));
+      // the invitee cannot delete its invitation / re-point itself
+      await assertFails(deleteDoc(doc(db(NEWHIRE), 'members', pid)));
+      await assertFails(updateDoc(doc(db(NEWHIRE), 'members', pid), { userId: NEWHIRE.uid }));
+      // an outsider cannot replace in a transaction either
+      const cd = db(CAIRO_ADMIN);
+      await assertFails(runTransaction(cd, async tx => {
+        tx.delete(doc(cd, 'members', pid));
+        tx.set(doc(cd, 'uniqueKeys', kid), keyFor(mid(CAIRO_ADMIN, OTHER_ORG)));
+      }));
+    });
+
+    it('keyLeftWithRecord: a raw email change must release the old key; the domain change passes', async () => {
+      await assertFails(updateDoc(doc(db(ADMIN), 'members', mid(EMP)), { userEmail: 'emp.new@acme.test' }));
+      await appUpdateMember(ADMIN, 'org_admin', mid(EMP), { userEmail: 'emp.new@acme.test' });
+      expect((await read('members', mid(EMP)))?.userEmail).toBe('emp.new@acme.test');
+      expect(await read('uniqueKeys', uniqueKeyDocId('member_email', ORG, EMP.email))).toBeUndefined();
+      expect((await read('uniqueKeys', uniqueKeyDocId('member_email', ORG, 'emp.new@acme.test')))?.entityId).toBe(mid(EMP));
+    });
+
+    it('super_admins: no write by org admins, unverified owner address, or self records', async () => {
+      await assertFails(setDoc(doc(db(ADMIN), 'super_admins', ADMIN.uid), { email: ADMIN.email }));
+      await assertFails(setDoc(doc(db(ADMIN), 'super_admins', ADMIN.email), { email: ADMIN.email }));
+      await assertFails(setDoc(doc(db(STRANGER, false, OWNER.email), 'super_admins', STRANGER.uid), { email: OWNER.email }));
+      await assertFails(setDoc(doc(db(STRANGER, true, 'MAHMOUD@TIEAPPS.COM '), 'super_admins', STRANGER.uid), { email: OWNER.email }));
+      await assertFails(getDocs(collection(db(ADMIN), 'super_admins')));
+      await assertSucceeds(setDoc(doc(db(OWNER), 'super_admins', 'x@acme.test'), { email: 'x@acme.test' }));
+      await assertFails(deleteDoc(doc(db(ADMIN), 'super_admins', 'x@acme.test')));
+    });
+
+    it('members create / update by an org admin: no super_admin role, id must be <userId>_<orgId>, owner\'s record protected', async () => {
+      const a = db(ADMIN);
+      await assertFails(setDoc(doc(a, 'members', `${STRANGER.uid}_${ORG}`), { orgId: ORG, userId: STRANGER.uid, role: 'super_admin', active: true }));
+      await assertFails(setDoc(doc(a, 'members', `${STRANGER.uid}_${OTHER_ORG}`), { orgId: ORG, userId: STRANGER.uid, role: 'org_admin', active: true }));
+      await assertFails(setDoc(doc(a, 'members', `x_${ORG}`), { orgId: ORG, userId: STRANGER.uid, role: 'org_admin', active: true }));
+      await assertFails(updateDoc(doc(a, 'members', mid(OWNER)), { role: 'employee' }));
+      await assertFails(updateDoc(doc(a, 'members', mid(OWNER)), { active: false }));
+      await assertFails(deleteDoc(doc(a, 'members', mid(OWNER))));
+      await assertFails(updateDoc(doc(a, 'members', mid(EMP)), { userId: STRANGER.uid }));   // real login never re-pointed
+      await assertFails(updateDoc(doc(a, 'members', mid(EMP)), { role: 'super_admin' }));
+    });
+  });
+});
+
+describe('round r4: login lane ([LOGIN-1..6] nobody real is locked out: legacy placeholders, unverified invitees, multi-company members, company moves)', () => {
+  // Every flow runs through the REAL domain code and the AppContext self-write effects, copied in the
+  // exact shape the app sends them (appMemberships / appSignIn / knownUidForEmail / appAddMemberToOrgs).
+  // [LOGIN-n] tests assert the correct outcome (they failed before the round-4 fix).
+  const ORG = 'org-acme';
+  const OTHER = 'org-other';
+  const THIRD = 'org-third';
+
+  type U = { uid: string; email: string };
+  const OWNER: U = { uid: 'uidOwner000000000000000001', email: 'mahmoud@tieapps.com' };
+  const ADMIN: U = { uid: 'uidAdmin000000000000000001', email: 'admin@acme.test' };
+  const OADMIN: U = { uid: 'uidCairoAdmin000000000001', email: 'admin@other.test' };
+  const TADMIN: U = { uid: 'uidThirdAdmin000000000001', email: 'admin@third.test' };
+  const u = (tag: string): U => ({ uid: `uidR4${tag}`.padEnd(28, '0'), email: `${tag.toLowerCase()}@people.test` });
+
+  const db = (x: U, verified = true): Firestore =>
+    env.authenticatedContext(x.uid, { email: x.email, email_verified: verified }).firestore() as unknown as Firestore;
+  const store = (x: U, verified = true) => createFirestoreStore(db(x, verified));
+  const actor = (x: U, role: Actor['role'], orgId?: string): Actor => ({ id: x.uid, name: x.email, email: x.email, role, ...(orgId ? { orgId } : {}) });
+  let n = 0;
+  const key = () => `key-r4l${String(++n).padStart(7, '0')}`;
+  const seed = (fn: (f: Firestore) => Promise<unknown>) => env.withSecurityRulesDisabled(ctx => fn(ctx.firestore() as unknown as Firestore));
+  const read = async (c: string, id: string) => {
+    let data: Record<string, any> | undefined;
+    await env.withSecurityRulesDisabled(async ctx => {
+      data = (await getDoc(doc(ctx.firestore(), c, id))).data();
+    });
+    return data;
+  };
+  const mid = (x: U, org = ORG) => `${x.uid}_${org}`;
+  const allows = async (p: Promise<unknown>) => p.then(() => true, () => false);
+  const canOpen = (x: U, org: string, verified = true) => allows(getDoc(doc(db(x, verified), 'organizations', org)));
+  const denial = (p: Promise<unknown>) => p.then(() => 'allowed', (e: any) => `${e?.code || ''} ${String(e?.message || e).replace(/\s+/g, ' ').slice(0, 260)}`);
+  const errText = (e: any) => `${e?.code || ''} ${String(e?.message || e).slice(0, 220)}`;
+
+  // ---- AppContext.buildMembershipQueries (+ the fallback when the OR query is rejected) and, for an
+  // unverified account, profileCompanyQuery (the records of its email in its profile's company) ----
+  const appMemberships = async (x: U, verified: boolean, profile: Record<string, any> | null = null): Promise<OrganizationMember[]> => {
+    const f = db(x, verified);
+    const members = collection(f, 'members');
+    const email = verified ? x.email : '';
+    const toMembers = (docs: Array<{ id: string; data: () => any }>) => docs.map(d => ({ ...d.data(), id: d.id } as OrganizationMember));
+    const unique = (all: OrganizationMember[]) => Array.from(new Map(all.map(m => [m.id, m])).values());
+    let found: OrganizationMember[];
+    try {
+      const combined = email ? query(members, or(where('userId', '==', x.uid), where('userEmail', '==', email))) : query(members, where('userId', '==', x.uid));
+      found = toMembers((await getDocs(combined)).docs);
+    } catch {
+      const qs = [query(members, where('userId', '==', x.uid)), ...(email ? [query(members, where('userEmail', '==', email))] : [])];
+      const res = await Promise.allSettled(qs.map(q => getDocs(q)));
+      found = unique(res.flatMap(r => (r.status === 'fulfilled' ? toMembers(r.value.docs) : [])));
+    }
+    const orgId = typeof profile?.orgId === 'string' ? profile.orgId.trim() : '';
+    if (!verified && orgId) {
+      try {
+        found = unique([...found, ...toMembers((await getDocs(query(members, where('orgId', '==', orgId), where('userEmail', '==', normalizeEmail(x.email))))).docs)]);
+      } catch { /* not readable (e.g. a suspended profile) */ }
+    }
+    return found;
+  };
+
+  // ---- AppContext.linkOwnProfile (verbatim shape) ----
+  const linkOwnProfile = (f: Firestore, x: U, verified: boolean, m: OrganizationMember) =>
+    setDoc(doc(f, 'users', x.uid), JSON.parse(JSON.stringify({
+      id: x.uid,
+      ...(verified ? { email: normalizeEmail(x.email) } : {}),
+      name: m.userName || 'موظف',
+      role: m.role,
+      orgId: m.orgId,
+      memberId: m.id,
+      department: m.department || '',
+      phone: m.phone || '',
+      active: true,
+      updatedAt: new Date().toISOString(),
+    })), { merge: true });
+
+  const ROLE_PRIORITY: Record<string, number> = { super_admin: 5, org_admin: 4, finance: 3, data_entry: 2, employee: 1 };
+
+  /**
+   * One sign-in as the app runs it (AppContext identity effects), repeated until stable:
+   * read users/{uid}, load memberships, profileMembershipState, relink (linkOwnProfile) when asked,
+   * verifiedEmail merge when the token is verified. Returns what the UI then resolves.
+   */
+  const appSignIn = async (x: U, verified: boolean) => {
+    const f = db(x, verified);
+    const refused: string[] = [];
+    const tried = new Set<string>();
+    let profile: any = null;
+    let memberships: OrganizationMember[] = [];
+    let state = profileMembershipState(null, [], { uid: x.uid, email: x.email, emailVerified: verified });
+    for (let i = 0; i < 4; i++) {
+      const snap = await getDoc(doc(f, 'users', x.uid));
+      profile = snap.exists() ? snap.data() : null;
+      memberships = await appMemberships(x, verified, profile);
+      state = profileMembershipState(profile, memberships, { uid: x.uid, email: x.email, emailVerified: verified });
+      let wrote = false;
+      const target = state.relinkTo;
+      if (target) {
+        const attempt = [target.id, target.orgId, target.role, target.userName].join('|');
+        if (!tried.has(attempt)) {
+          tried.add(attempt);
+          try { await linkOwnProfile(f, x, verified, target); wrote = true; } catch (e) { refused.push(`relink ${target.id}: ${errText(e)}`); }
+        }
+      }
+      if (verified && profile && normalizeEmail(profile.verifiedEmail) !== normalizeEmail(x.email) && !tried.has('verifiedEmail')) {
+        tried.add('verifiedEmail');
+        try { await setDoc(doc(f, 'users', x.uid), { verifiedEmail: normalizeEmail(x.email) }, { merge: true }); wrote = true; } catch (e) { refused.push(`verifiedEmail: ${errText(e)}`); }
+      }
+      if (!wrote) break;
+    }
+    // AppContext RBAC resolution
+    const trusted = state.current ? profile : null;
+    const matching = memberships.filter(m => m.userId === x.uid || normalizeEmail(m.userEmail) === normalizeEmail(x.email));
+    const withOrg = matching.filter(m => Boolean(m.orgId && m.orgId.trim()));
+    const pool = withOrg.length > 0 ? withOrg : matching;
+    const userMemberRecord = [...pool].sort((a, b) => (ROLE_PRIORITY[b.role] || 0) - (ROLE_PRIORITY[a.role] || 0))[0];
+    const role: Role = trusted?.role && trusted.role !== 'super_admin' ? trusted.role : userMemberRecord && userMemberRecord.role !== 'super_admin' ? userMemberRecord.role : 'employee';
+    const orgId: string = trusted?.orgId || userMemberRecord?.orgId || '';
+    const suspended = trusted?.orgId ? trusted.active === false : memberships.length > 0 && memberships.every(m => m.active === false);
+    return { state, profile, memberships, refused, orgId, role, suspended, verifyPrompt: state.awaitingVerification };
+  };
+
+  // ---- AppContext.linkedProfileIds / updateMember / removeMember (verbatim logic) ----
+  const linkedProfileIds = async (f: Firestore, mem: OrganizationMember | undefined): Promise<string[]> => {
+    if (!mem) return [];
+    const ids = new Set<string>();
+    if (isRealUid(mem.userId)) {
+      try { await getDoc(doc(f, 'users', mem.userId)); ids.add(mem.userId); } catch { /* not ours */ }
+    }
+    try {
+      const snap = await getDocs(query(collection(f, 'users'), where('orgId', '==', mem.orgId), where('memberId', '==', mem.id)));
+      snap.docs.forEach(d => ids.add(d.id));
+    } catch { /* skipped */ }
+    return Array.from(ids);
+  };
+  const memberAs = async (f: Firestore, id: string) => ({ id, ...(await getDoc(doc(f, 'members', id))).data() } as OrganizationMember);
+  const appUpdateMember = async (who: U, role: Actor['role'], orgId: string | undefined, memberId: string, updates: Partial<OrganizationMember>, verified = true) => {
+    const f = db(who, verified);
+    const mem = await memberAs(f, memberId);
+    return updateMemberRecord(store(who, verified), actor(who, role, orgId), memberId, updates, await linkedProfileIds(f, mem), key());
+  };
+  const orgMembers = async (f: Firestore, orgId?: string) =>
+    (await getDocs(orgId ? query(collection(f, 'members'), where('orgId', '==', orgId)) : collection(f, 'members'))).docs.map(d => ({ id: d.id, ...d.data() } as OrganizationMember & { operationKey?: string }));
+  const appRemoveMember = async (who: U, role: Actor['role'], orgId: string | undefined, memberId: string) => {
+    const f = db(who);
+    const mem = await memberAs(f, memberId);
+    const all = await orgMembers(f, role === 'super_admin' ? undefined : orgId);
+    const email = normalizeEmail(mem.userEmail);
+    const samePerson = email ? all.filter(m => m.id !== memberId && isRealUid(m.userId) && normalizeEmail(m.userEmail) === email) : [];
+    const ids = new Set(await linkedProfileIds(f, mem));
+    for (const other of samePerson) (await linkedProfileIds(f, other)).forEach(id => ids.add(id));
+    return removeMember(store(who), actor(who, role, orgId), memberId, Array.from(ids), key());
+  };
+  // AppContext.knownUidForEmail: rawMembers = what the caller's member listener shows (owner: all; org admin: its company);
+  // the platform owner also finds a login by its proof (users where verifiedEmail == email)
+  const knownUidForEmail = async (who: U, role: Actor['role'], orgId: string | undefined, email: string) => {
+    const f = db(who);
+    const raw = await orgMembers(f, role === 'super_admin' ? undefined : orgId);
+    const findProvenLogins = role === 'super_admin'
+      ? async (target: string) => {
+          const snap = await getDocs(query(collection(f, 'users'), where('verifiedEmail', '==', target), limit(2)));
+          return snap.docs.length === 1 ? [snap.docs[0].id] : [];
+        }
+      : undefined;
+    return verifiedLoginUidOf(raw, email, async uid => {
+      const s = await getDoc(doc(f, 'users', uid));
+      return s.exists() ? String(s.data()?.verifiedEmail || '') : null;
+    }, findProvenLogins);
+  };
+  // AppContext.addMemberToOrgs (pre-skip of companies already holding the email, then createMemberInOrgs)
+  const appAddMemberToOrgs = async (who: U, role: Actor['role'], orgId: string | undefined, x: U, memberRole: Role, targets: string[], name = 'Person') => {
+    const f = db(who);
+    const raw = await orgMembers(f, role === 'super_admin' ? undefined : orgId);
+    const email = normalizeEmail(x.email);
+    const knownUid = await knownUidForEmail(who, role, orgId, email);
+    const replaceable = (m: OrganizationMember) => Boolean(knownUid) && m.id === `${pendingUserIdForEmail(email)}_${m.orgId}` && (!isRealUid(m.userId) || m.userId === knownUid);
+    const free = targets.filter(t => {
+      const holder = raw.find(m => m.orgId === t && normalizeEmail(m.userEmail) === email);
+      return !holder || replaceable(holder);
+    });
+    if (free.length === 0) return { knownUid, added: [] as string[], error: 'duplicate (pre-skip: already registered)' };
+    try {
+      const res = await createMemberInOrgs(store(who), actor(who, role, orgId),
+        { userId: knownUid || '', userName: name, userEmail: email, role: memberRole, department: 'D', jobTitle: 'J', phone: '', active: true } as any, free, key());
+      return { knownUid, added: res.value.created.map(m => m.orgId), skipped: res.value.skipped.map(s => s.orgId), error: '' };
+    } catch (e: any) {
+      return { knownUid, added: [] as string[], error: isDomainError(e) ? `${e.code}` : errText(e) };
+    }
+  };
+  // AppContext.createCompanyUser (the login exists already for `x`): createMember(..., { writeUserProfile: true })
+  const provision = (who: U, role: Actor['role'], orgId: string, x: U, memberRole: Role, name = 'Person') =>
+    createMember(store(who), actor(who, role, role === 'super_admin' ? undefined : orgId), {
+      orgId, userId: x.uid, userName: name, userEmail: x.email, role: memberRole, department: 'D', jobTitle: 'J', phone: '', active: true,
+    } as any, key(), { writeUserProfile: true });
+  // AppContext.addMember (by email, no login proven -> pending invitation)
+  const inviteByEmail = async (who: U, role: Actor['role'], orgId: string, x: U, memberRole: Role, name = 'Invitee') => {
+    const knownUid = await knownUidForEmail(who, role, orgId, x.email);
+    return createMember(store(who), actor(who, role, role === 'super_admin' ? undefined : orgId), {
+      orgId, userId: knownUid || '', userName: name, userEmail: x.email, role: memberRole, department: 'D', jobTitle: 'J', phone: '', active: true,
+    } as any, key());
+  };
+
+  const putMember = (f: Firestore, id: string, data: Record<string, unknown>) => setDoc(doc(f, 'members', id), { userName: 'x', active: true, ...data });
+  const putKey = (f: Firestore, org: string, email: string, memberId: string) =>
+    setDoc(doc(f, 'uniqueKeys', uniqueKeyDocId('member_email', org, email)), { scope: 'member_email', orgId: org, value: normalizeKeyValue(email, 'member_email'), entityCollection: 'members', entityId: memberId });
+
+
+  beforeEach(async () => {
+    await env.clearFirestore();
+    await seed(async f => {
+      for (const [org, name, admin] of [[ORG, 'Acme', ADMIN], [OTHER, 'Other', OADMIN], [THIRD, 'Third', TADMIN]] as const) {
+        await setDoc(doc(f, 'organizations', org), { id: org, name, code: name.toUpperCase(), currency: 'EGP', notificationRecipients: [admin.email] });
+        await setDoc(doc(f, 'users', admin.uid), { orgId: org, role: 'org_admin', active: true, email: admin.email, memberId: mid(admin, org), name: admin.email });
+        await putMember(f, mid(admin, org), { orgId: org, userId: admin.uid, userEmail: admin.email, role: 'org_admin', userName: `Admin ${name}` });
+        await putKey(f, org, admin.email, mid(admin, org));
+        await setDoc(doc(f, 'paymentAccounts', `acc-${org}`), { orgId: org, name: 'cash', type: 'cash', currency: 'EGP', active: true, balance: 100, currentBalance: 100 });
+      }
+    });
+  });
+
+  // =============================================================================
+  describe('first sign-in, provisioning, invitations', () => {
+    it('admin-provisioned password account (unverified) with a uid membership: first sign-in, profile save, later verification', async () => {
+      const P = u('Prov1');
+      await provision(ADMIN, 'org_admin', ORG, P, 'finance', 'Prov One');
+      const s = await appSignIn(P, false);
+      expect({ refused: s.refused, orgId: s.orgId, role: s.role, current: s.state.current }).toEqual({ refused: [], orgId: ORG, role: 'finance', current: true });
+      expect(await canOpen(P, ORG, false)).toBe(true);
+      expect(await allows(getDoc(doc(db(P, false), 'paymentAccounts', `acc-${ORG}`)))).toBe(true);
+      // profile tab save (handleUpdateUserProfileInfo) + membership copy (syncOwnMembership)
+      await assertSucceeds(setDoc(doc(db(P, false), 'users', P.uid), { uid: P.uid, name: 'Prov 1', phone: '0100', instapay: 'p@ip', updatedAt: 'x' }, { merge: true }));
+      await syncOwnMembership(store(P, false), actor(P, 'finance', ORG), mid(P), { userName: 'Prov 1', phone: '0100' });
+      // the next sign-in re-syncs nothing it should not; verification later records the proof
+      const s2 = await appSignIn(P, true);
+      expect(s2.refused).toEqual([]);
+      expect((await read('users', P.uid))?.verifiedEmail).toBe(P.email);
+    });
+
+    it('owner provisioning (first company with profile + more companies under the same UID): unverified first sign-in opens all of them', async () => {
+      const P = u('Prov2');
+      await provision(OWNER, 'super_admin', ORG, P, 'employee');
+      const more = await createMemberInOrgs(store(OWNER), actor(OWNER, 'super_admin'),
+        { userId: P.uid, userName: 'P2', userEmail: P.email, role: 'finance', department: 'D', jobTitle: 'J', active: true } as any, [OTHER, THIRD], key());
+      expect(more.value.created.map(m => m.id)).toEqual([mid(P, OTHER), mid(P, THIRD)]);
+      const s = await appSignIn(P, false);
+      expect({ refused: s.refused, orgId: s.orgId }).toEqual({ refused: [], orgId: ORG });
+      expect([await canOpen(P, ORG, false), await canOpen(P, OTHER, false), await canOpen(P, THIRD, false)]).toEqual([true, true, true]);
+    });
+
+    it('Google sign-in (verified) invited by email: self-link on first sign-in, proof recorded, admin edit re-points the placeholder, name resync accepted', async () => {
+      const G = u('Goog1');
+      const inv = await inviteByEmail(ADMIN, 'org_admin', ORG, G, 'finance', 'Goog');
+      expect(inv.value.userId).toBe(pendingUserIdForEmail(G.email));
+      const s = await appSignIn(G, true);
+      expect({ refused: s.refused, orgId: s.orgId, role: s.role }).toEqual({ refused: [], orgId: ORG, role: 'finance' });
+      expect(await read('users', G.uid)).toMatchObject({ memberId: inv.value.id, verifiedEmail: G.email });
+      await appUpdateMember(ADMIN, 'org_admin', ORG, inv.value.id, { userName: 'Goog Renamed' });
+      expect((await read('members', inv.value.id))?.userId).toBe(G.uid);
+      const s2 = await appSignIn(G, true);
+      expect({ refused: s2.refused, orgId: s2.orgId, name: (await read('users', G.uid))?.name }).toEqual({ refused: [], orgId: ORG, name: 'Goog Renamed' });
+    });
+
+    it('[LOGIN-1] Google user invited by email to TWO companies before the first sign-in gets only one; neither the second company\'s admin nor the platform owner can open the other', async () => {
+      const G = u('Goog2');
+      await inviteByEmail(ADMIN, 'org_admin', ORG, G, 'employee', 'G2');
+      await inviteByEmail(OADMIN, 'org_admin', OTHER, G, 'finance', 'G2');
+      const s = await appSignIn(G, true);
+      const linkedTo = s.orgId;
+      const otherOrg = linkedTo === ORG ? OTHER : ORG;
+      const otherAdmin = otherOrg === ORG ? ADMIN : OADMIN;
+      // the real remedies the app offers: the second company's admin, then the platform owner, add the person again
+      const byAdmin = await appAddMemberToOrgs(otherAdmin, 'org_admin', otherOrg, G, 'finance', [otherOrg]);
+      const byOwner = await appAddMemberToOrgs(OWNER, 'super_admin', undefined, G, 'finance', [otherOrg]);
+      const observed = {
+        refused: s.refused,
+        linkedTo,
+        opensOtherCompany: await canOpen(G, otherOrg),
+        ownerFindsLogin: byOwner.knownUid === G.uid,
+        ownerReAdd: byOwner.error || 'added',
+        adminReAdd: byAdmin.error || 'added',
+        opensOtherCompanyAfterOwnerReAdd: await canOpen(G, otherOrg),
+        denial: await denial(getDoc(doc(db(G), 'organizations', otherOrg))),
+      };
+      console.log('[LOGIN-1] observed', JSON.stringify(observed));
+      expect(observed).toMatchObject({ refused: [], opensOtherCompanyAfterOwnerReAdd: true });
+      expect(observed.opensOtherCompany || observed.ownerFindsLogin).toBe(true);
+    });
+
+    it('[LOGIN-1 workaround] only after an unrelated admin edit of the FIRST invitation (re-points its userId) can the owner open the second company', async () => {
+      const G = u('Goog3');
+      const a = await inviteByEmail(ADMIN, 'org_admin', ORG, G, 'finance', 'G3');
+      await inviteByEmail(OADMIN, 'org_admin', OTHER, G, 'employee', 'G3');
+      const s = await appSignIn(G, true);
+      expect(s.orgId).toBe(ORG);
+      await appUpdateMember(ADMIN, 'org_admin', ORG, a.value.id, { jobTitle: 'any edit' });
+      expect((await read('members', a.value.id))?.userId).toBe(G.uid);
+      const byOwner = await appAddMemberToOrgs(OWNER, 'super_admin', undefined, G, 'employee', [OTHER]);
+      expect(byOwner).toMatchObject({ knownUid: G.uid, added: [OTHER] });
+      expect(await canOpen(G, OTHER)).toBe(true);
+    });
+
+    it('a person who already works in a company and is invited by email to another: owner re-add replaces the invitation (round-3 path)', async () => {
+      const P = u('Prov3');
+      await provision(ADMIN, 'org_admin', ORG, P, 'employee');
+      await inviteByEmail(OADMIN, 'org_admin', OTHER, P, 'finance');
+      await appSignIn(P, true); // records verifiedEmail
+      expect(await canOpen(P, OTHER)).toBe(false);
+      const byOwner = await appAddMemberToOrgs(OWNER, 'super_admin', undefined, P, 'finance', [OTHER]);
+      expect(byOwner).toMatchObject({ knownUid: P.uid, added: [OTHER] });
+      expect(await canOpen(P, OTHER)).toBe(true);
+      expect(await appSignIn(P, true)).toMatchObject({ refused: [], orgId: ORG });
+    });
+  });
+
+  // =============================================================================
+  describe('email invitation of an UNVERIFIED account (admin-provisioned password / self-registered)', () => {
+    it('[LOGIN-2] an unverified sign-up for an invited address is never told to verify: the app cannot see the invitation, profileMembershipState never sets awaitingVerification', async () => {
+      const V = u('Unver1');
+      await inviteByEmail(ADMIN, 'org_admin', ORG, V, 'employee', 'Unver');
+      const before = await appSignIn(V, false);
+      // what the app CAN see: the email query is refused for an unverified token (rules: isInviteeOf)
+      const emailQueryAllowed = await allows(getDocs(query(collection(db(V, false), 'members'), where('userEmail', '==', V.email))));
+      // after verifying, the link works (the only way in)
+      const after = await appSignIn(V, true);
+      const observed = {
+        emailQueryAllowed,
+        membershipsSeen: before.memberships.length,
+        verifyPrompt: before.verifyPrompt,
+        orgIdBefore: before.orgId,
+        orgIdAfterVerification: after.orgId,
+        refusedAfter: after.refused,
+      };
+      console.log('[LOGIN-2] observed', JSON.stringify(observed));
+      expect(observed.orgIdAfterVerification).toBe(ORG);
+      expect(observed.refusedAfter).toEqual([]);
+      // the UI must tell this person to verify (App.tsx membershipNeedsVerification), not "ask your admin to add you"
+      expect(observed.verifyPrompt).toBe(true);
+    });
+
+    it('[LOGIN-2] (Marwa: deleted and re-added) an admin-provisioned password account removed and added again by its admin is locked out with no verification prompt', async () => {
+      const M = u('Marwa1');
+      await provision(ADMIN, 'org_admin', ORG, M, 'finance', 'Marwa');
+      expect((await appSignIn(M, false)).orgId).toBe(ORG);
+      await appRemoveMember(ADMIN, 'org_admin', ORG, mid(M));
+      expect(await read('users', M.uid)).toMatchObject({ orgId: '', role: 'employee', memberId: null });
+      // re-add: OrganizationsManagement "new user" -> createCompanyUser fails with email_in_use -> addMemberToOrgs by email;
+      // UsersManagement provision -> addMemberToOrgs. knownUidForEmail finds no login: the removed record is gone.
+      const readd = await appAddMemberToOrgs(ADMIN, 'org_admin', ORG, M, 'finance', [ORG], 'Marwa');
+      const ownerKnows = await knownUidForEmail(OWNER, 'super_admin', undefined, M.email);
+      const s = await appSignIn(M, false);
+      const observed = { readd, ownerKnows, orgId: s.orgId, verifyPrompt: s.verifyPrompt, opens: await canOpen(M, ORG, false),
+        denial: await denial(getDoc(doc(db(M, false), 'members', `${pendingUserIdForEmail(M.email)}_${ORG}`))) };
+      console.log('[LOGIN-2 Marwa] observed', JSON.stringify(observed));
+      expect(readd.added).toEqual([ORG]);
+      // either the re-add brings the same login back, or the app at least asks her to verify
+      expect(observed.opens || observed.verifyPrompt).toBe(true);
+    });
+
+    it('a verified (Google) user removed and re-invited by its admin gets back in on the next sign-in', async () => {
+      const G = u('Goog4');
+      await inviteByEmail(ADMIN, 'org_admin', ORG, G, 'finance');
+      expect((await appSignIn(G, true)).orgId).toBe(ORG);
+      const id = `${pendingUserIdForEmail(G.email)}_${ORG}`;
+      await appRemoveMember(ADMIN, 'org_admin', ORG, id);
+      expect(await canOpen(G, ORG)).toBe(false);
+      await inviteByEmail(ADMIN, 'org_admin', ORG, G, 'employee');
+      const s = await appSignIn(G, true);
+      expect({ refused: s.refused, orgId: s.orgId, role: s.role }).toEqual({ refused: [], orgId: ORG, role: 'employee' });
+      expect(await canOpen(G, ORG)).toBe(true);
+    });
+  });
+
+  // =============================================================================
+  describe('stale profiles, multi-company members, legacy data', () => {
+    it('Marwa: profile still in company A (membership deleted by an older app) while her memberships are in B and C: relinks to the best one, opens B and C', async () => {
+      const M = u('Marwa2');
+      await seed(async f => {
+        await setDoc(doc(f, 'users', M.uid), { orgId: ORG, role: 'org_admin', active: true, email: M.email, memberId: mid(M, ORG), name: 'Old Marwa' });
+        await putMember(f, mid(M, OTHER), { orgId: OTHER, userId: M.uid, userEmail: M.email, role: 'employee', userName: 'Marwa B' });
+        await putMember(f, mid(M, THIRD), { orgId: THIRD, userId: M.uid, userEmail: M.email, role: 'finance', userName: 'Marwa C' });
+      });
+      for (const verified of [false, true]) {
+        const s = await appSignIn(M, verified);
+        expect({ refused: s.refused, orgId: s.orgId, role: s.role }).toEqual({ refused: [], orgId: THIRD, role: 'finance' });
+      }
+      expect(await read('users', M.uid)).toMatchObject({ orgId: THIRD, role: 'finance', memberId: mid(M, THIRD), name: 'Marwa C' });
+      expect([await canOpen(M, ORG), await canOpen(M, OTHER), await canOpen(M, THIRD)]).toEqual([false, true, true]);
+    });
+
+    it('removed from the profile company while still a member elsewhere: detached, then relinked to the remaining company', async () => {
+      const P = u('Multi1');
+      await provision(ADMIN, 'org_admin', ORG, P, 'finance');
+      await createMemberInOrgs(store(OWNER), actor(OWNER, 'super_admin'),
+        { userId: P.uid, userName: 'P', userEmail: P.email, role: 'employee', department: 'D', jobTitle: 'J', active: true } as any, [OTHER], key());
+      await appRemoveMember(ADMIN, 'org_admin', ORG, mid(P));
+      const s = await appSignIn(P, false);
+      expect({ refused: s.refused, orgId: s.orgId, role: s.role }).toEqual({ refused: [], orgId: OTHER, role: 'employee' });
+      expect([await canOpen(P, ORG, false), await canOpen(P, OTHER, false)]).toEqual([false, true]);
+    });
+
+    it('multi-company member switching company: the rules accept the self-link to each of its own memberships (and back)', async () => {
+      const P = u('Multi2');
+      await provision(ADMIN, 'org_admin', ORG, P, 'finance');
+      await createMemberInOrgs(store(OWNER), actor(OWNER, 'super_admin'),
+        { userId: P.uid, userName: 'P', userEmail: P.email, role: 'employee', department: 'D', jobTitle: 'J', active: true } as any, [OTHER], key());
+      const f = db(P, false);
+      await assertSucceeds(linkOwnProfile(f, P, false, await memberAs(f, mid(P, OTHER))));
+      expect([await canOpen(P, ORG, false), await canOpen(P, OTHER, false)]).toEqual([true, true]);
+      await assertSucceeds(linkOwnProfile(f, P, false, await memberAs(f, mid(P, ORG))));
+      expect(await read('users', P.uid)).toMatchObject({ orgId: ORG, role: 'finance' });
+    });
+
+    it('[LOGIN-3] a two-company finance briefly suspended in its main company is moved by the app to its other company and stays pinned there (lower role) after re-activation: nobody can move it back', async () => {
+      const P = u('Susp1');
+      await provision(ADMIN, 'org_admin', ORG, P, 'finance', 'Susp');
+      await createMemberInOrgs(store(OWNER), actor(OWNER, 'super_admin'),
+        { userId: P.uid, userName: 'Susp', userEmail: P.email, role: 'employee', department: 'D', jobTitle: 'J', active: true } as any, [OTHER], key());
+      expect((await appSignIn(P, false)).orgId).toBe(ORG);
+      await appUpdateMember(ADMIN, 'org_admin', ORG, mid(P), { active: false });
+      const during = await appSignIn(P, false); // the relink effect moves the profile to OTHER
+      await appUpdateMember(ADMIN, 'org_admin', ORG, mid(P), { active: true });
+      const after = await appSignIn(P, false);
+      // AppContext.companyChoices (switchableMemberships) -> Header switcher -> switchOwnCompany (linkOwnProfile)
+      const choices = switchableMemberships(after.memberships, { uid: P.uid, email: P.email, emailVerified: false });
+      const observed = {
+        during: { orgId: during.orgId, role: during.role },
+        after: { orgId: after.orgId, role: after.role },
+        choices: choices.map(m => [m.orgId, m.role]),
+        rulesStillGrantOrgFinance: await allows(getDoc(doc(db(P, false), 'paymentAccounts', `acc-${ORG}`))),
+        ownerOnlySwitcher: can('finance', 'manageCompanies'),
+      };
+      console.log('[LOGIN-3] observed', JSON.stringify(observed));
+      expect(observed.rulesStillGrantOrgFinance).toBe(true);
+      // the member's own switcher offers both companies; switching back is accepted and stays
+      expect(observed.choices).toEqual([[ORG, 'finance'], [OTHER, 'employee']]);
+      await assertSucceeds(linkOwnProfile(db(P, false), P, false, choices[0]));
+      const back = await appSignIn(P, false);
+      expect({ refused: back.refused, orgId: back.orgId, role: back.role, current: back.state.current }).toEqual({ refused: [], orgId: ORG, role: 'finance', current: true });
+      // a member of one company gets no switcher (a single choice)
+      expect(switchableMemberships((await appSignIn(ADMIN, true)).memberships, { uid: ADMIN.uid, email: ADMIN.email, emailVerified: true })).toHaveLength(1);
+    });
+
+    it('suspended then re-activated (single company): suspended screen, then access and a clean relink', async () => {
+      const P = u('Susp2');
+      await provision(ADMIN, 'org_admin', ORG, P, 'data_entry');
+      await appSignIn(P, false);
+      await appUpdateMember(ADMIN, 'org_admin', ORG, mid(P), { active: false });
+      const s = await appSignIn(P, false);
+      expect({ refused: s.refused, suspended: s.suspended, opens: await canOpen(P, ORG, false) }).toEqual({ refused: [], suspended: true, opens: false });
+      await appUpdateMember(ADMIN, 'org_admin', ORG, mid(P), { active: true, userName: 'Back' });
+      const s2 = await appSignIn(P, false);
+      expect({ refused: s2.refused, suspended: s2.suspended, orgId: s2.orgId, opens: await canOpen(P, ORG, false) }).toEqual({ refused: [], suspended: false, orgId: ORG, opens: true });
+    });
+
+    it('legacy profile WITHOUT memberId (uid membership): stays current, the relink adds memberId and is accepted (verified and unverified)', async () => {
+      for (const [tag, verified] of [['LegA', false], ['LegB', true]] as const) {
+        const L = u(tag);
+        await seed(async f => {
+          await setDoc(doc(f, 'users', L.uid), { orgId: ORG, role: 'finance', active: true });
+          await putMember(f, mid(L), { orgId: ORG, userId: L.uid, userEmail: L.email, role: 'finance', userName: tag });
+        });
+        const s = await appSignIn(L, verified);
+        expect({ refused: s.refused, orgId: s.orgId, role: s.role }).toEqual({ refused: [], orgId: ORG, role: 'finance' });
+        expect((await read('users', L.uid))?.memberId).toBe(mid(L));
+      }
+    });
+
+    it('[LOGIN-4] legacy member id (temp_ / usr- / pending-) linked by an older app to an UNVERIFIED password account: the rules still grant the company, but the app shows "awaiting assignment"', async () => {
+      const results: Record<string, unknown> = {};
+      for (const [tag, legacyUid, withMemberId] of [
+        ['LegT', 'temp_1690000000000', true],
+        ['LegU', 'usr-8d3f2a9c', false],
+        ['LegP', 'pending-legacy', true],
+      ] as const) {
+        const L = u(tag);
+        const id = `${legacyUid}_${ORG}`;
+        await seed(async f => {
+          await setDoc(doc(f, 'users', L.uid), { orgId: ORG, role: 'finance', active: true, email: L.email, name: tag, ...(withMemberId ? { memberId: id } : {}) });
+          await putMember(f, id, { orgId: ORG, userId: legacyUid, userEmail: L.email, role: 'finance', userName: tag });
+        });
+        const s = await appSignIn(L, false);
+        const v = await appSignIn(L, true);
+        results[tag] = {
+          rulesGrant: await allows(getDoc(doc(db(L, false), 'paymentAccounts', `acc-${ORG}`))),
+          unverified: { orgId: s.orgId, role: s.role, current: s.state.current, verifyPrompt: s.verifyPrompt },
+          verified: { orgId: v.orgId, refused: v.refused },
+        };
+      }
+      console.log('[LOGIN-4] observed', JSON.stringify(results));
+      for (const r of Object.values(results) as any[]) {
+        expect(r.rulesGrant).toBe(true);
+        expect(r.verified.orgId).toBe(ORG);
+        // the app must resolve the company the rules grant (or at least ask for verification)
+        expect(r.unverified.orgId === ORG || r.unverified.verifyPrompt).toBe(true);
+      }
+    });
+
+    it('[LOGIN-5] a legacy profile linked to a placeholder membership (no email on the profile) is suspended with it, and stays suspended after the admin re-activates the membership', async () => {
+      const L = u('LegS');
+      const id = `temp_1690000000001_${ORG}`;
+      await seed(async f => {
+        await setDoc(doc(f, 'users', L.uid), { orgId: ORG, role: 'employee', active: true, memberId: id, name: 'Leg S' });
+        await putMember(f, id, { orgId: ORG, userId: 'temp_1690000000001', userEmail: L.email, role: 'employee', userName: 'Leg S' });
+      });
+      expect(await canOpen(L, ORG, false)).toBe(true);
+      await appUpdateMember(ADMIN, 'org_admin', ORG, id, { active: false });
+      const suspendedProfile = await read('users', L.uid);
+      await appUpdateMember(ADMIN, 'org_admin', ORG, id, { active: true });
+      const s = await appSignIn(L, true); // even after verifying and signing in
+      const observed = {
+        suspendedProfileActive: suspendedProfile?.active,
+        membershipActive: (await read('members', id))?.active,
+        profileActiveAfterReactivation: (await read('users', L.uid))?.active,
+        appSuspendedScreen: s.suspended,
+        opens: await canOpen(L, ORG),
+        denial: await denial(getDoc(doc(db(L), 'organizations', ORG))),
+      };
+      console.log('[LOGIN-5] observed', JSON.stringify(observed));
+      expect(observed.suspendedProfileActive).toBe(false);
+      expect(observed.membershipActive).toBe(true);
+      expect(observed.opens).toBe(true);
+    });
+  });
+
+  // =============================================================================
+  describe('admin edits (own record, other members, company moves)', () => {
+    it('org admin edits its own name / phone / job title (profile with memberId, legacy profile without memberId, multi-company admin)', async () => {
+      await appUpdateMember(ADMIN, 'org_admin', ORG, mid(ADMIN), { userName: 'Boss', phone: '0123', jobTitle: 'CEO' });
+      expect(await read('users', ADMIN.uid)).toMatchObject({ name: 'Boss', phone: '0123', role: 'org_admin', orgId: ORG, active: true });
+      expect((await appSignIn(ADMIN, true)).refused).toEqual([]);
+      // legacy admin profile without memberId (unverified password account)
+      const LA = u('LegAdm');
+      await seed(async f => {
+        await setDoc(doc(f, 'users', LA.uid), { orgId: ORG, role: 'org_admin', active: true, email: LA.email });
+        await putMember(f, mid(LA), { orgId: ORG, userId: LA.uid, userEmail: LA.email, role: 'org_admin', userName: 'LA' });
+      });
+      await appUpdateMember(LA, 'org_admin', ORG, mid(LA), { userName: 'LA2', phone: '1', jobTitle: 'Mgr' }, false);
+      expect(await read('users', LA.uid)).toMatchObject({ name: 'LA2', memberId: mid(LA), role: 'org_admin' });
+      // multi-company admin: profile elsewhere (employee), org admin member of ORG
+      const MA = u('MultAdm');
+      await seed(async f => {
+        await setDoc(doc(f, 'users', MA.uid), { orgId: OTHER, role: 'employee', active: true, email: MA.email, memberId: mid(MA, OTHER) });
+        await putMember(f, mid(MA, OTHER), { orgId: OTHER, userId: MA.uid, userEmail: MA.email, role: 'employee', userName: 'MA' });
+        await putMember(f, mid(MA, ORG), { orgId: ORG, userId: MA.uid, userEmail: MA.email, role: 'org_admin', userName: 'MA' });
+      });
+      await appUpdateMember(MA, 'org_admin', ORG, mid(MA, ORG), { userName: 'MA2', jobTitle: 'X' }, false);
+      expect(await read('users', MA.uid)).toMatchObject({ orgId: OTHER, role: 'employee' });
+      expect((await read('members', mid(MA, ORG)))?.userName).toBe('MA2');
+      // own profile tab save + membership copy
+      await assertSucceeds(setDoc(doc(db(ADMIN), 'users', ADMIN.uid), { uid: ADMIN.uid, name: 'Boss 2', phone: '9', iban: 'EG00', updatedAt: 'x' }, { merge: true }));
+      await syncOwnMembership(store(ADMIN), actor(ADMIN, 'org_admin', ORG), mid(ADMIN), { userName: 'Boss 2', phone: '9' });
+    });
+
+    it('org admin edits its own record when it is a legacy placeholder membership (usr-) linked to its profile (verified and unverified admin)', async () => {
+      for (const [tag, verified] of [['PhA', false], ['PhB', true]] as const) {
+        const A = u(tag);
+        const legacyUid = `usr-${tag.toLowerCase()}000`;
+        const id = `${legacyUid}_${ORG}`;
+        await seed(async f => {
+          await setDoc(doc(f, 'users', A.uid), { orgId: ORG, role: 'org_admin', active: true, email: A.email, memberId: id });
+          await putMember(f, id, { orgId: ORG, userId: legacyUid, userEmail: A.email, role: 'org_admin', userName: tag });
+        });
+        let err = '';
+        try { await appUpdateMember(A, 'org_admin', ORG, id, { userName: `${tag} renamed`, phone: '5' }, verified); } catch (e) { err = errText(e); }
+        expect({ tag, err }).toEqual({ tag, err: '' });
+      }
+    });
+
+    it('org admin changes another member\'s role and status; owner changes role of an org admin', async () => {
+      const P = u('Role1');
+      await provision(ADMIN, 'org_admin', ORG, P, 'employee');
+      await appUpdateMember(ADMIN, 'org_admin', ORG, mid(P), { role: 'finance' });
+      expect(await read('users', P.uid)).toMatchObject({ role: 'finance' });
+      expect((await appSignIn(P, false)).role).toBe('finance');
+      await appUpdateMember(ADMIN, 'org_admin', ORG, mid(P), { role: 'org_admin', active: false });
+      expect(await canOpen(P, ORG, false)).toBe(false);
+      await appUpdateMember(ADMIN, 'org_admin', ORG, mid(P), { active: true });
+      const s = await appSignIn(P, false);
+      expect({ refused: s.refused, role: s.role, opens: await canOpen(P, ORG, false) }).toEqual({ refused: [], role: 'org_admin', opens: true });
+      await appUpdateMember(OWNER, 'super_admin', undefined, mid(P), { role: 'employee' });
+      expect((await appSignIn(P, false)).role).toBe('employee');
+    });
+
+    it('membership with a real UID but no profile yet (multi-company add / profile never written): first unverified sign-in creates the profile by self-link', async () => {
+      const P = u('NoProf');
+      await createMemberInOrgs(store(OWNER), actor(OWNER, 'super_admin'),
+        { userId: P.uid, userName: 'NP', userEmail: P.email, role: 'data_entry', department: 'D', jobTitle: 'J', active: true } as any, [ORG, OTHER], key());
+      const s = await appSignIn(P, false);
+      expect({ refused: s.refused, orgId: s.orgId, role: s.role }).toEqual({ refused: [], orgId: ORG, role: 'data_entry' });
+      expect([await canOpen(P, ORG, false), await canOpen(P, OTHER, false)]).toEqual([true, true]);
+    });
+
+    it('org admin edits its own legacy placeholder record whose stored email has capitals (verified admin)', async () => {
+      const A = u('PhC');
+      const id = `usr-phc000_${ORG}`;
+      await seed(async f => {
+        await setDoc(doc(f, 'users', A.uid), { orgId: ORG, role: 'org_admin', active: true, email: A.email, memberId: id });
+        await putMember(f, id, { orgId: ORG, userId: 'usr-phc000', userEmail: 'PhC@People.test', role: 'org_admin', userName: 'PhC' });
+      });
+      await appUpdateMember(A, 'org_admin', ORG, id, { userName: 'PhC 2', jobTitle: 'Mgr' });
+      expect((await appSignIn(A, true)).refused).toEqual([]);
+      expect(await canOpen(A, ORG)).toBe(true);
+    });
+
+    it('owner moves a single-company member to another company: the profile follows, the person works there', async () => {
+      const P = u('Move1');
+      await provision(ADMIN, 'org_admin', ORG, P, 'finance');
+      await appUpdateMember(OWNER, 'super_admin', undefined, mid(P), { orgId: THIRD });
+      const s = await appSignIn(P, false);
+      expect({ refused: s.refused, orgId: s.orgId, opens: await canOpen(P, THIRD, false) }).toEqual({ refused: [], orgId: THIRD, opens: true });
+    });
+
+    it('[LOGIN-6] owner moves the SECOND membership of a two-company member to a third company (edit form "company"): the person gets nothing there, and can no longer be added back to the old company', async () => {
+      const P = u('Move2');
+      await provision(ADMIN, 'org_admin', ORG, P, 'employee');
+      await createMemberInOrgs(store(OWNER), actor(OWNER, 'super_admin'),
+        { userId: P.uid, userName: 'Move2', userEmail: P.email, role: 'finance', department: 'D', jobTitle: 'J', active: true } as any, [OTHER], key());
+      await appSignIn(P, true); // a verified login (records verifiedEmail): the owner's later re-add re-uses its UID
+      await appUpdateMember(OWNER, 'super_admin', undefined, mid(P, OTHER), { orgId: THIRD });
+      const moved = await read('members', mid(P, OTHER));
+      const s = await appSignIn(P, false);
+      const backToOther = await appAddMemberToOrgs(OWNER, 'super_admin', undefined, P, 'finance', [OTHER]);
+      const observed = {
+        movedDoc: { id: mid(P, OTHER), orgId: moved?.orgId, role: moved?.role },
+        opensThird: await canOpen(P, THIRD, false),
+        readsThirdTreasury: await allows(getDoc(doc(db(P, false), 'paymentAccounts', `acc-${THIRD}`))),
+        app: { orgId: s.orgId, refused: s.refused },
+        reAddToOther: backToOther,
+        denial: await denial(getDoc(doc(db(P, false), 'paymentAccounts', `acc-${THIRD}`))),
+      };
+      console.log('[LOGIN-6] observed', JSON.stringify(observed));
+      expect(observed.opensThird).toBe(true);
+      expect(observed.readsThirdTreasury).toBe(true);
+      expect(backToOther.added).toEqual([OTHER]);
     });
   });
 });

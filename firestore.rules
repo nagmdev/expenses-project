@@ -205,6 +205,34 @@ service cloud.firestore {
       );
     }
 
+    // An org admin's write of SOMEONE ELSE's profile. The profile alone grants its company and
+    // role (inOrgViaProfile), and the company's member list is the only place people are seen,
+    // so what it grants (role / orgId / active / memberId) may only: stay as it is; be taken
+    // away (detach: no company, employee; or a suspension); or be exactly what that person's
+    // membership named in memberId grants after the commit (createMember with the profile,
+    // updateMemberRecord's sync, both in the same transaction as the membership).
+    // `before` is {} on create.
+    function adminProfileGrantOk(userId, before) {
+      let after = request.resource.data;
+      return (sameField(after, before, 'role', null) && sameField(after, before, 'orgId', null) &&
+          sameField(after, before, 'memberId', null) && (sameField(after, before, 'active', true) || after.get('active', true) == false)) ||
+        (after.get('orgId', null) in [null, ''] && after.get('role', 'employee') == 'employee' &&
+          (sameField(after, before, 'memberId', null) || after.get('memberId', null) == null)) ||
+        (after.get('memberId', null) is string && after.memberId.matches('[^/]+') &&
+          membershipBacks(getAfter(/databases/$(database)/documents/members/$(after.memberId)), userId, after));
+    }
+
+    // m (members/{after.memberId} after the commit) is that person's: by UID, or an invitation
+    // addressed to the address the account proved itself (verifiedEmail), and grants exactly
+    // the profile's company and role (a suspended one only a suspended profile).
+    function membershipBacks(m, userId, after) {
+      return m != null && m.data.get('orgId', null) == after.get('orgId', null) && m.data.get('role', null) == after.get('role', null) &&
+        (after.get('active', true) == false || m.data.get('active', true) != false) && (
+          m.data.get('userId', null) == userId ||
+          (after.get('verifiedEmail', null) is string && after.verifiedEmail != '' && m.data.get('userEmail', null) == after.verifiedEmail)
+        );
+    }
+
     // Idempotent creates read the target document inside a transaction first
     // ("does this operation already exist?"). Reading a document that does not
     // exist reveals nothing, so a single-document GET of a missing doc is allowed.
@@ -412,7 +440,7 @@ service cloud.firestore {
         isSuperAdmin() ||
         isOwnProfileWrite(userId, {}) ||
         (userId != request.auth.uid && isOrgAdmin(request.resource.data.orgId) && request.resource.data.role != 'super_admin' &&
-          !request.resource.data.keys().hasAny(['verifiedEmail']))
+          !request.resource.data.keys().hasAny(['verifiedEmail']) && adminProfileGrantOk(userId, {}))
       );
       // Org admins manage profiles in their org, and may detach one from it (member
       // removed: org cleared, role reset), but never move a profile to another org.
@@ -423,7 +451,7 @@ service cloud.firestore {
         !request.resource.data.diff(resource.data).affectedKeys().hasAny(['verifiedEmail']) && (
           request.resource.data.orgId == resource.data.orgId ||
           (request.resource.data.get('orgId', null) in [null, ''] && request.resource.data.get('role', 'employee') == 'employee')
-        )
+        ) && adminProfileGrantOk(userId, resource.data)
       ) || isOwnProfileWrite(userId, resource.data);
       allow delete: if isSuperAdmin();
     }
@@ -432,7 +460,10 @@ service cloud.firestore {
     // 3. ORGANIZATIONS (Tenant Isolation)
     // =========================================================================
     match /organizations/{orgId} {
-      allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(orgId));
+      // No exception for a missing document: "allowed when missing, refused when it exists" would
+      // tell anyone which company codes exist (ids are org-<code>). Only its members and the
+      // platform owner (createOrganization) read one, existing or not.
+      allow get: if isAuthenticated() && (isSuperAdmin() || isOrgMember(orgId));
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(orgId));
       allow create: if isSuperAdmin();
       // An org admin keeps the recipient list (membership changes) and the descriptive
@@ -456,8 +487,13 @@ service cloud.firestore {
         return hasVerifiedEmail() &&
           (m.get('userEmail', '') == request.auth.token.email || m.get('userEmail', '') == verifiedEmail());
       }
+      // A missing membership is readable only where an existing one would be: by the account
+      // whose UID it names, or by the members of the company its id names (<userId>_<orgId>,
+      // org ids hold no '_'), e.g. the domain's idempotent tx.get before a create. Otherwise
+      // "allowed when missing, refused when it exists" tells anyone who is invited where
+      // (invitation ids are deterministic: pending-<email>_<org>), like uniqueKeys would.
       allow get: if isAuthenticated() && (
-        isMissing() ||
+        (isMissing() && (memberId.matches(request.auth.uid + '_.*') || isOrgMember(memberId.replace('^.*_', '')))) ||
         isSuperAdmin() ||
         resource.data.userId == request.auth.uid ||
         isInviteeOf(resource.data) ||
@@ -470,10 +506,14 @@ service cloud.firestore {
         isOrgMember(resource.data.orgId)
       );
       // The id is always <userId>_<orgId> (the rules look memberships up by that id).
+      // Never a membership addressed to the caller (UID or verified email) or to the platform owner:
+      // an org admin would mint itself a second record, link its profile to it and keep its role
+      // after its own membership is removed or suspended.
       allow create: if isSuperAdmin() || (isOrgAdmin(request.resource.data.orgId) &&
         request.resource.data.role != 'super_admin' &&
         memberId == request.resource.data.userId + '_' + request.resource.data.orgId &&
-        !request.resource.data.keys().hasAny(payoutKeys()));
+        !request.resource.data.keys().hasAny(payoutKeys()) &&
+        !isProtectedMembership(request.resource.data));
       // Who a membership belongs to changes only from a placeholder (a member invited by
       // email who never had a login: pending-<email>, temp_…, usr-…) to the account whose own
       // profile links to this membership in the same commit (directory.ts → updateMemberRecord).
@@ -490,11 +530,15 @@ service cloud.firestore {
         request.resource.data.role != 'super_admin' &&
         request.resource.data.orgId == resource.data.orgId &&
         noPayoutAddedOrChanged() &&
-        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['userId']) || userIdChangeOk()) &&
+        // ... and never in the write that changes whom the placeholder is addressed to (userEmail):
+        // a profile that linked under the old address is not the new addressee.
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['userId']) ||
+          (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['userEmail']) && userIdChangeOk())) &&
         (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['userEmail']) ||
           keyLeftWithRecord('member_email', 'userEmail', memberId)) &&
         // The owner's and the admin's own membership: name / contact only, never role or status.
-        (!isProtectedMembership(resource.data) ||
+        // (Before or after the write: nor may a record be re-addressed to the caller.)
+        (!(isProtectedMembership(resource.data) || isProtectedMembership(request.resource.data)) ||
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(grantFields()))
       ) || (
         // Self-service edits of contact details only. Who the membership belongs to
@@ -504,7 +548,19 @@ service cloud.firestore {
         !request.resource.data.diff(resource.data).affectedKeys().hasAny(grantFields()) &&
         noPayoutAddedOrChanged()
       );
-      allow delete: if isSuperAdmin() || (isOrgAdmin(resource.data.orgId) && !isProtectedMembership(resource.data));
+      // The member's own profile no longer grants the company through this record after the
+      // commit (removeMember detaches it in the same transaction): deleting the record alone would
+      // leave an account with the company's access that no member list shows.
+      function ownProfileLetGo() {
+        let uid = resource.data.get('userId', '');
+        return !(uid is string && uid.matches('[A-Za-z0-9]{20,40}')) ||
+          profileLetGo(getAfter(/databases/$(database)/documents/users/$(uid)));
+      }
+      function profileLetGo(p) {
+        return p == null || p.data.get('orgId', null) != resource.data.get('orgId', null) ||
+          (p.data.get('memberId', null) != null && p.data.get('memberId', null) != memberId);
+      }
+      allow delete: if isSuperAdmin() || (isOrgAdmin(resource.data.orgId) && !isProtectedMembership(resource.data) && ownProfileLetGo());
     }
 
     // =========================================================================

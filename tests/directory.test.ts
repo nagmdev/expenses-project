@@ -103,7 +103,9 @@ describe('profileMembershipState — a profile never outlives the membership it 
   it('a suspended or missing membership never keeps the profile current', () => {
     const m = member({ id: `${UID}_${ORG}`, userId: UID, active: false });
     expect(profileMembershipState(profileOf(m), [m], unverified).current).toBe(false);
-    expect(profileMembershipState(profileOf(m), [], unverified)).toEqual({ current: false, relinkTo: null, awaitingVerification: false });
+    // nothing of its own in sight for an unverified account: an email invitation is what can be waiting
+    expect(profileMembershipState(profileOf(m), [], unverified)).toEqual({ current: false, relinkTo: null, awaitingVerification: true });
+    expect(profileMembershipState(profileOf(m), [], verified)).toEqual({ current: false, relinkTo: null, awaitingVerification: false });
   });
 
   it('a legacy profile without memberId stays current while the user still belongs to that company, and gains the link', () => {

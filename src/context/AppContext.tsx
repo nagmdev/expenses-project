@@ -116,6 +116,7 @@ import {
   migrateLegacyUniqueKeys,
   normalizeOrgIds,
   profileMembershipState,
+  switchableMemberships,
   reusableProvisionedAccount,
   type MultiOrgSkip,
   removeMember as removeMemberOp,
@@ -414,6 +415,13 @@ interface AppContextType {
    * so the rules do not let their account take that membership yet (see profileMembershipState).
    */
   membershipNeedsVerification: boolean;
+  /**
+   * A member of several companies (not the platform owner): the companies it may work in, and
+   * the switch (its own profile re-linked to that company's membership, a self-write the rules
+   * accept: grantsMembership). Empty / unused for a member of one company.
+   */
+  companyChoices: Array<{ orgId: string; name: string; role: Role }>;
+  switchOwnCompany: (orgId: string) => Promise<void>;
   /** email_verified of the current ID token (what the security rules see). */
   emailVerified: boolean;
   sendSuperAdminVerificationEmail: () => Promise<{ success: boolean; message: string }>;
@@ -646,7 +654,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Raw states: populated ONLY by real-time Firestore listeners (one per collection).
   const [rawOrganizations, setRawOrganizations] = useState<Organization[]>([]);
   const [rawMembers, setRawMembers] = useState<OrganizationMember[]>([]);
-  const [myMemberships, setMyMemberships] = useState<OrganizationMember[]>([]);
+  const [queriedMemberships, setMyMemberships] = useState<OrganizationMember[]>([]);
+  // Records of the user's email in its profile's company (see the profile-company listener below).
+  const [profileCompanyMemberships, setProfileCompanyMemberships] = useState<OrganizationMember[]>([]);
+  const myMemberships = useMemo(
+    () => (profileCompanyMemberships.length > 0 ? uniqueById([...queriedMemberships, ...profileCompanyMemberships]) : queriedMemberships),
+    [queriedMemberships, profileCompanyMemberships],
+  );
   const [rawServices, setRawServices] = useState<ServiceCategory[]>([]);
   const [rawProviders, setRawProviders] = useState<ServiceProvider[]>([]);
   const [rawRequests, setRawRequests] = useState<ExpenseRequest[]>([]);
@@ -796,6 +810,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const toMembers = (docs: Array<{ id: string; data: () => DocumentData }>) =>
     docs.map(d => ({ ...d.data(), id: d.id } as OrganizationMember)).filter(m => !DUMMY_IDS.has(m.id));
 
+  // An UNVERIFIED account loads its memberships by UID only. A profile an older version linked
+  // to a placeholder record of its email (temp_… / usr-… / pending-…) still grants that company
+  // under the rules (inOrgViaProfile), but the record would never be loaded and the profile would
+  // look stale ("awaiting assignment"). The records of its email in the profile's company are
+  // readable through that very profile (members list: isOrgMember), so they are loaded too.
+  // Nothing new is granted: an unverified account still cannot self-link by email.
+  const profileCompanyQuery = (db: ReturnType<typeof getDb>, user: FirebaseUser, profileOrgId: unknown) => {
+    const orgId = typeof profileOrgId === 'string' ? profileOrgId.trim() : '';
+    const email = normalizeEmail(user.email);
+    return !user.emailVerified && orgId && email
+      ? query(collection(db!, 'members'), where('orgId', '==', orgId), where('userEmail', '==', email))
+      : null;
+  };
+
   // Manual status check ("check my access now") — a one-shot read, no writes except the
   // user's own profile document.
   const forceRefreshUserState = useCallback(async (): Promise<boolean> => {
@@ -838,6 +866,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const offline = results.some(r => (r.status === 'rejected' ? isConnectivityError(r.reason) : cachedEmpty(r.value)));
         if (!answered && offline) throw unreachable();
         found = uniqueById(results.flatMap(r => (r.status === 'fulfilled' ? toMembers(r.value.docs) : [])));
+      }
+      const companyQuery = profileCompanyQuery(db, firebaseUser, profileData?.orgId);
+      if (companyQuery) {
+        try {
+          found = uniqueById([...found, ...toMembers((await getDocs(companyQuery)).docs)]);
+        } catch (e) {
+          console.warn('[forceRefresh] profile company records:', e);
+        }
       }
       setMyMemberships(found);
       setMembershipsLoaded(true);
@@ -976,6 +1012,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   }, [firebaseUser]);
 
+  // The records of the user's email in its profile's company, for an unverified account (see
+  // profileCompanyQuery).
+  const profileOrgId = typeof userDocProfile?.orgId === 'string' ? userDocProfile.orgId.trim() : '';
+  useEffect(() => {
+    setProfileCompanyMemberships([]);
+    if (!firebaseUser || !isFirebaseConfigured()) return;
+    const { db } = initFirebase();
+    const q = db ? profileCompanyQuery(db, firebaseUser, profileOrgId) : null;
+    if (!q) return;
+    return onSnapshot(q, snap => setProfileCompanyMemberships(toMembers(snap.docs)), () => setProfileCompanyMemberships([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firebaseUser, profileOrgId]);
+
   // =========================================================================
   // RBAC & ROLE RESOLUTION
   // =========================================================================
@@ -1098,6 +1147,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (activeOrgId && myMemberships.some(m => m.orgId === activeOrgId)) return activeOrgId;
     return '';
   }, [isSuperAdmin, activeOrgId, trustedProfile, userMemberRecord, myMemberships, rawOrganizations]);
+
+  // A member of several companies picks the one it works in: its own profile is re-linked to that
+  // company's membership (linkOwnProfile, the self-link the rules accept). Otherwise the profile's
+  // company always wins (effectiveOrgId), e.g. after a suspension moved it to another company.
+  const switchChoices = useMemo(
+    () => (firebaseUser && !isSuperAdmin ? switchableMemberships(myMemberships, { uid: firebaseUser.uid, email: firebaseUser.email, emailVerified }) : []),
+    [firebaseUser, isSuperAdmin, myMemberships, emailVerified],
+  );
+  const [companyNames, setCompanyNames] = useState<Record<string, string>>({});
+  const switchOrgIds = switchChoices.length > 1 ? switchChoices.map(m => m.orgId).join('|') : '';
+  useEffect(() => {
+    const db = switchOrgIds ? getDb() : null;
+    if (!db) return;
+    let cancelled = false;
+    // Readable through each membership (organizations get: isOrgMember).
+    void Promise.all(switchOrgIds.split('|').map(id =>
+      getDoc(doc(db, 'organizations', id)).then(snap => [id, String(snap.data()?.name || id)] as const, () => [id, id] as const),
+    )).then(entries => {
+      if (!cancelled) setCompanyNames(Object.fromEntries(entries));
+    });
+    return () => { cancelled = true; };
+  }, [switchOrgIds]);
+  const companyChoices = useMemo(
+    () => (switchChoices.length > 1 ? switchChoices.map(m => ({ orgId: m.orgId, name: companyNames[m.orgId] || m.orgId, role: m.role })) : []),
+    [switchChoices, companyNames],
+  );
+  const switchOwnCompany = async (orgId: string) => {
+    const target = switchChoices.find(m => m.orgId === orgId);
+    const db = getDb();
+    if (!firebaseUser || !db || !target) throw new DomainError('forbidden', 'لا توجد لك عضوية نشطة في هذه الشركة.');
+    await linkOwnProfile(db, firebaseUser, target);
+    setActiveOrgId(orgId);
+  };
 
   useEffect(() => {
     if (!isSuperAdmin && effectiveOrgId && effectiveOrgId !== activeOrgId) {
@@ -2087,10 +2169,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const knownUidForEmail = async (email: string): Promise<string> => {
     const db = getDb();
     if (!email || !db) return '';
+    // The platform owner may also find the login by its proof (users where verifiedEmail ==
+    // email): a person whose only link is a self-linked email invitation (placeholder userId).
+    const findProvenLogins = isSuperAdmin
+      ? async (target: string) => {
+          const snap = await getDocs(query(collection(db, 'users'), where('verifiedEmail', '==', target), limit(2)));
+          return snap.docs.length === 1 ? [snap.docs[0].id] : [];
+        }
+      : undefined;
     return verifiedLoginUidOf(rawMembers, email, async uid => {
       const snap = await getDoc(doc(db, 'users', uid));
       return snap.exists() ? String(snap.data()?.verifiedEmail || '') : null;
-    });
+    }, findProvenLogins);
   };
 
   const addMember = async (memberData: Omit<OrganizationMember, 'id' | 'joinedAt'>, opts?: MutationOptions) => {
@@ -3073,6 +3163,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isAccountSuspended,
         superAdminNeedsVerification,
         membershipNeedsVerification,
+        companyChoices,
+        switchOwnCompany,
         emailVerified,
         sendSuperAdminVerificationEmail,
         recheckSuperAdminVerification,

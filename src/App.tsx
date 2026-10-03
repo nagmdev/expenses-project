@@ -358,8 +358,9 @@ const MainApp: React.FC = () => {
               </div>
               <h2 className="text-lg font-bold text-slate-900">تفعيل البريد لإكمال ربط حسابك بالشركة</h2>
               <p className="text-xs text-slate-600 mt-3 leading-relaxed">
-                تمت إضافتك إلى الشركة ببريدك <strong dir="ltr">{currentUser.email}</strong>، لكن البريد غير مُفعَّل بعد.
-                لحماية الحسابات، لا يُربط الحساب بصلاحياته الجديدة إلا بعد تفعيل البريد.
+                لم يُربط حسابك بأي شركة بعد، وبريدك <strong dir="ltr">{currentUser.email}</strong> غير مُفعَّل.
+                إذا أضافك مدير الشركة ببريدك، فلن يُربط الحساب بالشركة إلا بعد تفعيل البريد (لحماية الحسابات).
+                إن لم يُضِفك أحد بعد، تواصل مع مدير شركتك.
               </p>
               <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-3">
                 <button

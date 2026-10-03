@@ -349,7 +349,9 @@ describe("policy 4 — an org admin never removes, suspends or re-roles the owne
     await expect(updateMemberRecord(store, admin, DE_MEM, { orgId: ORG_B }, [], key(), now)).rejects.toMatchObject({ code: 'forbidden' });
     expect(store.read('members', DE_MEM)!.orgId).toBe(ORG);
     await updateMemberRecord(store, owner, DE_MEM, { orgId: ORG_B }, [], key(), now);
-    expect(store.read('members', DE_MEM)!.orgId).toBe(ORG_B);
+    // moved to the id the rules look it up by (<userId>_<orgId>)
+    expect(store.read('members', DE_MEM)).toBeNull();
+    expect(store.read('members', `${dataEntry.id}_${ORG_B}`)).toMatchObject({ orgId: ORG_B, userId: dataEntry.id, role: 'data_entry' });
   });
 
   it('an empty name is refused on edit and on create', async () => {

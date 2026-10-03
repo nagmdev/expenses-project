@@ -819,10 +819,16 @@ export async function verifiedLoginUidOf(
   memberships: Array<Pick<OrganizationMember, 'userId' | 'userEmail'>>,
   email: string,
   readVerifiedEmail: (uid: string) => Promise<string | null | undefined>,
+  // Logins found by their proof itself (the platform owner: users where verifiedEmail == email).
+  // Needed when the person's only link is an email invitation its profile self-linked: that
+  // record keeps its placeholder userId, so no membership names the login.
+  findProvenLogins?: (email: string) => Promise<string[]>,
 ): Promise<string> {
   const target = normalizeEmail(email);
   if (!target) return '';
   const uids = Array.from(new Set(memberships.filter(m => isRealUid(m.userId) && normalizeEmail(m.userEmail) === target).map(m => m.userId)));
+  const found = findProvenLogins ? await findProvenLogins(target).catch(() => [] as string[]) : [];
+  for (const uid of found) if (isRealUid(uid) && !uids.includes(uid)) uids.push(uid);
   for (const uid of uids) {
     const proven = await readVerifiedEmail(uid).catch(() => null);
     if (normalizeEmail(proven) === target) return uid;
@@ -858,6 +864,18 @@ export function pickMembershipToLink(
   memberships: OrganizationMember[],
   identity: { uid: string; email?: string | null; emailVerified: boolean },
 ): OrganizationMember | null {
+  return switchableMemberships(memberships, identity)[0] ?? null;
+}
+
+/**
+ * The companies a member of several may work in (the company switcher of a non-owner): each
+ * one's best membership the profile may be linked to (pickMembershipToLink's rule, i.e. the
+ * rules' grantsMembership), highest role first. Switching is that same self-link.
+ */
+export function switchableMemberships(
+  memberships: OrganizationMember[],
+  identity: { uid: string; email?: string | null; emailVerified: boolean },
+): OrganizationMember[] {
   const email = normalizeEmail(identity.email);
   const eligible = memberships.filter(m =>
     Boolean(m.orgId?.trim()) &&
@@ -866,7 +884,7 @@ export function pickMembershipToLink(
     (m.userId === identity.uid || (identity.emailVerified && Boolean(email) && normalizeEmail(m.userEmail) === email)),
   );
   eligible.sort((a, b) => (LINKABLE_ROLE_PRIORITY[b.role] ?? 0) - (LINKABLE_ROLE_PRIORITY[a.role] ?? 0));
-  return eligible[0] ?? null;
+  return eligible.filter((m, i) => eligible.findIndex(o => o.orgId === m.orgId) === i);
 }
 
 /** The identity fields of a user's own users/{uid} profile. */
@@ -918,14 +936,19 @@ export function profileMembershipState(
 
   let relinkTo: OrganizationMember | null = null;
   if (current && backing) {
-    // Still the same membership: only resync a changed name, or a legacy profile's missing memberId.
-    if (linkable(backing) && ((backing.userName && backing.userName !== profile?.name) || !profile?.memberId)) relinkTo = backing;
+    // Still the same membership: only resync a changed name, a legacy profile's missing memberId, or a
+    // profile still suspended although its membership is active again (one the admin's re-activation
+    // could not find: a legacy profile linked to a placeholder record).
+    if (linkable(backing) && ((backing.userName && backing.userName !== profile?.name) || !profile?.memberId || profile?.active === false)) relinkTo = backing;
   } else {
     // Prefer the same company, then the highest role — never a membership the rules would refuse.
     const candidates = live.filter(linkable).sort(byRole);
     relinkTo = candidates.find(m => m.orgId === orgId) ?? candidates[0] ?? null;
   }
-  const awaitingVerification = !current && !relinkTo && !identity.emailVerified && live.some(m => m.userId !== identity.uid);
+  // An unverified account sees only memberships by its UID (the rules hide email invitations from it):
+  // with none of its own in sight, an invitation by email is the one thing that can be waiting.
+  const awaitingVerification = !current && !relinkTo && !identity.emailVerified &&
+    (live.some(m => m.userId !== identity.uid) || !memberships.some(mine));
   return { current, relinkTo, awaitingVerification };
 }
 
@@ -959,9 +982,16 @@ export async function updateMemberRecord(
     const after = { ...mem, ...clean } as OrganizationMember;
     const emailChanged = clean.userEmail !== undefined && clean.userEmail !== normalizeEmail(mem.userEmail);
     const orgChanged = clean.orgId !== undefined && clean.orgId !== mem.orgId;
+    // Moved to another company (platform owner): the record moves to the id the rules look a
+    // membership up by (<userId>_<orgId>, firestore.rules → inOrgViaMember). Kept under the old
+    // company's id it would grant neither company, and block adding the person back there.
+    const targetId = orgChanged && memberId === `${mem.userId}_${mem.orgId}` ? `${mem.userId}_${after.orgId}` : memberId;
+    if (targetId !== memberId && (await tx.get<OrganizationMember>(COL.members, targetId))) {
+      throw new DomainError('duplicate', 'هذا الشخص عضو بالفعل في الشركة المختارة.');
+    }
     let oldKey = (emailChanged || orgChanged) && mem.userEmail ? await readUniqueKey(tx, 'member_email', mem.orgId, mem.userEmail) : null;
     let newKey = (emailChanged || orgChanged) && after.userEmail ? await readUniqueKey(tx, 'member_email', after.orgId, after.userEmail) : null;
-    if (newKey && isKeyTakenByOther(newKey, memberId)) {
+    if (newKey && isKeyTakenByOther(newKey, memberId) && isKeyTakenByOther(newKey, targetId)) {
       throw new DomainError('duplicate', `البريد الإلكتروني (${after.userEmail}) مسجل لموظف آخر في هذه المؤسسة.`);
     }
     if (oldKey && newKey && oldKey.docId === newKey.docId) {
@@ -974,23 +1004,34 @@ export async function updateMemberRecord(
     // Suspending: a profile that merely names this record (not the person's: nothing is synced
     // onto it) is suspended too, so naming a record never keeps what it grants.
     const suspendUids: string[] = [];
+    // A changed address (e.g. a mistyped invitation corrected): the record is addressed to someone
+    // else now. A profile that carried it under the old address is detached, never synced.
+    const detachUids: string[] = [];
+    const addressee = { ...mem, userEmail: after.userEmail };
     for (const uid of realUids) {
       const profile = await tx.get<Record<string, any>>(COL.users, uid);
-      if (profile ? await profileCarriesMembership(tx, uid, profile, mem) : uid === mem.userId) syncUids.push(uid);
+      if (profile ? await profileCarriesMembership(tx, uid, profile, addressee) : uid === mem.userId) syncUids.push(uid);
+      else if (emailChanged && uid !== actor.id && profile && profile.orgId === mem.orgId && profile.memberId === memberId) detachUids.push(uid);
       else if (after.active === false && uid !== actor.id && profile && profile.orgId === mem.orgId && profile.memberId === memberId) suspendUids.push(uid);
     }
     // A placeholder member (invited by email) is re-pointed at the real account — not on a
-    // membership this actor may not re-assign (their own / the platform owner's, see rules).
-    if (!isRealUid(mem.userId) && syncUids[0] && !membershipProtection(actor, mem)) clean.userId = syncUids[0];
+    // membership this actor may not re-assign (their own / the platform owner's, see rules), and
+    // not in the write that changes whom it is addressed to (nor in a move: its id names its userId).
+    if (!isRealUid(mem.userId) && !emailChanged && targetId === memberId && syncUids[0] && !membershipProtection(actor, mem)) clean.userId = syncUids[0];
 
     const recipientEdits: RecipientEdits = new Map();
     editRecipients(recipientEdits, mem.orgId, mem, null);
     editRecipients(recipientEdits, after.orgId, null, after);
     const recipientUpdates = await readRecipientUpdates(tx, recipientEdits);
 
-    tx.update(COL.members, memberId, { ...clean, updatedAt: nowIso });
+    if (targetId !== memberId) {
+      tx.set(COL.members, targetId, { ...mem, ...clean, id: targetId, updatedAt: nowIso });
+      tx.delete(COL.members, memberId);
+    } else {
+      tx.update(COL.members, memberId, { ...clean, updatedAt: nowIso });
+    }
     if (oldKey) releaseUniqueKey(tx, oldKey, memberId);
-    if (newKey) claimUniqueKey(tx, newKey, { collection: COL.members, id: memberId }, nowIso);
+    if (newKey) claimUniqueKey(tx, newKey, { collection: COL.members, id: targetId }, nowIso);
     writeRecipientUpdates(tx, recipientUpdates, nowIso);
     for (const uid of syncUids) {
       tx.set(
@@ -999,7 +1040,7 @@ export async function updateMemberRecord(
         {
           orgId: after.orgId,
           role: after.role,
-          memberId,
+          memberId: targetId,
           name: after.userName,
           userName: after.userName,
           phone: after.phone || '',
@@ -1013,6 +1054,7 @@ export async function updateMemberRecord(
       );
     }
     for (const uid of suspendUids) tx.update(COL.users, uid, { active: false, updatedAt: nowIso });
+    for (const uid of detachUids) tx.update(COL.users, uid, { orgId: '', role: 'employee', memberId: null, updatedAt: nowIso });
 
     const roleChanged = clean.role !== undefined && clean.role !== mem.role;
     const statusChanged = clean.active !== undefined && clean.active !== mem.active;
@@ -1029,7 +1071,7 @@ export async function updateMemberRecord(
       {
         actionType: statusChanged ? 'status_toggle' : roleChanged ? 'role_change' : nameChanged ? 'rename' : 'update',
         entityType: 'member',
-        entityId: memberId,
+        entityId: targetId,
         entityName: after.userName,
         orgId: after.orgId,
         details,
@@ -1037,7 +1079,7 @@ export async function updateMemberRecord(
       auditIdFor(operationKey),
       nowIso,
     );
-    return { value: { ...after, ...clean } as OrganizationMember, changed: true };
+    return { value: { ...after, ...clean, id: targetId } as OrganizationMember, changed: true };
   });
 }
 

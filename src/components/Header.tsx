@@ -34,6 +34,9 @@ export const Header: React.FC<HeaderProps> = ({
     setActiveOrgId,
     currentRole,
     logoutUser,
+    companyChoices,
+    switchOwnCompany,
+    effectiveOrgId,
   } = useApp();
 
   const [isAuthProcessing, setIsAuthProcessing] = useState(false);
@@ -45,8 +48,19 @@ export const Header: React.FC<HeaderProps> = ({
   const notificationsFeed = useAppNotifications();
   const unreadCount = notificationsFeed.unreadCount;
 
-  // Only the platform owner works across companies; everyone else is bound to their company.
+  // The platform owner works across companies. Anyone else who belongs to several companies
+  // picks the one it works in (its own profile follows: AppContext.switchOwnCompany).
   const canSwitchCompany = can(currentRole, 'manageCompanies');
+  const canSwitchOwnCompany = !canSwitchCompany && companyChoices.length > 1;
+  const [switchError, setSwitchError] = useState('');
+  const handleSwitchOwnCompany = (orgId: string) => {
+    if (orgId === effectiveOrgId) return;
+    setSwitchError('');
+    switchOwnCompany(orgId).catch(err => {
+      console.warn('[Company switch]', err?.message || err);
+      setSwitchError('تعذر التبديل إلى هذه الشركة. أعد المحاولة.');
+    });
+  };
   const companyLabel = activeOrgId === 'all' ? 'جميع المؤسسات' : (activeOrg?.name || 'لم يتم تحميل الشركة');
 
   const handleLogout = async () => {
@@ -66,11 +80,12 @@ export const Header: React.FC<HeaderProps> = ({
         <span className="block font-bold text-xs text-slate-900 leading-tight truncate">
           {companyLabel}
         </span>
-        {canSwitchCompany && (
+        {(canSwitchCompany || canSwitchOwnCompany) && (
           <span className="hidden sm:block text-[10px] text-slate-400 font-medium leading-none mt-0.5">
             اضغط لتبديل المؤسسة
           </span>
         )}
+        {switchError && <span className="block text-[10px] text-rose-600 font-bold leading-none mt-0.5">{switchError}</span>}
       </div>
       <div className="hidden sm:flex h-7 w-7 rounded-lg bg-emerald-50 text-emerald-600 items-center justify-center shrink-0">
         <Building2 className="h-4 w-4" />
@@ -98,7 +113,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="flex items-center justify-center min-w-0 flex-1">
             <div className="relative min-w-0 max-w-full">
               <div className="flex items-center bg-white border border-slate-200 rounded-2xl p-1 shadow-2xs hover:border-slate-300 transition min-w-0">
-                {canSwitchCompany ? (
+                {canSwitchCompany || canSwitchOwnCompany ? (
                   <button
                     type="button"
                     onClick={() => setShowOrgDropdown(!showOrgDropdown)}
@@ -132,6 +147,34 @@ export const Header: React.FC<HeaderProps> = ({
                   </>
                 )}
               </div>
+
+              {/* A member's own companies */}
+              {showOrgDropdown && canSwitchOwnCompany && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setShowOrgDropdown(false)} />
+                  <div
+                    className="absolute right-0 mt-2 w-64 max-w-[calc(100vw-1.5rem)] bg-white rounded-2xl shadow-xl border border-slate-100 py-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150 text-right max-h-[70vh] overflow-y-auto"
+                    onClick={() => setShowOrgDropdown(false)}
+                  >
+                    <div className="px-3 py-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                      شركاتك
+                    </div>
+                    {companyChoices.map(choice => (
+                      <button
+                        key={choice.orgId}
+                        type="button"
+                        onClick={() => handleSwitchOwnCompany(choice.orgId)}
+                        className={`w-full text-right px-3 py-2 text-xs flex items-center justify-between hover:bg-slate-50 cursor-pointer ${
+                          effectiveOrgId === choice.orgId ? 'text-emerald-600 font-bold bg-emerald-50/50' : 'text-slate-700'
+                        }`}
+                      >
+                        <span className="font-bold text-slate-800 truncate">{choice.name}</span>
+                        {effectiveOrgId === choice.orgId && <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0"></span>}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
 
               {/* Organization Dropdown Popup (platform owner only) */}
               {showOrgDropdown && canSwitchCompany && (
