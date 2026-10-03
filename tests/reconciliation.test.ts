@@ -198,6 +198,38 @@ describe('payment accounts', () => {
     expect(detach[0]).toMatchObject({ kind: 'account_negative_balance', severity: 'warning' });
   });
 
+  it('a deposit after the detached-wallet correction that leaves the bank below zero → still only a warning', () => {
+    const data: ConsistencyData = {
+      paymentAccounts: [{ id: 'a', orgId: ORG, name: 'A', initialBalance: 100, currentBalance: -30, balance: -30, lastLedgerId: 'l2' }],
+      accountTransactions: [
+        { id: 'l1', operationLedgerId: 'l1', accountId: 'a', orgId: ORG, type: 'out', amount: 150, balanceBefore: 100, balanceAfter: -50, referenceType: 'manual_adjustment', referenceId: 'wallet-1', createdAt: '2026-10-01T00:00:00.000Z' },
+        { id: 'l2', operationLedgerId: 'l2', accountId: 'a', orgId: ORG, type: 'in', amount: 20, balanceBefore: -50, balanceAfter: -30, referenceType: 'manual_adjustment', createdAt: '2026-10-02T00:00:00.000Z' },
+      ],
+    };
+    const { issues } = checkFinancialConsistency(data, now);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ kind: 'account_negative_balance', severity: 'warning', actual: -30 });
+  });
+
+  it('balance / currentBalance disagreeing: a warning on a legacy account never moved since, a violation once the domain moved it', () => {
+    const legacyLine = { id: 'tx-1727000000000', accountId: 'old', orgId: ORG, type: 'in' as const, amount: 700, balanceBefore: 0, balanceAfter: 700, referenceType: 'manual_adjustment' as const, createdAt: '2026-09-01T00:00:00.000Z' };
+    // An older version wrote one field only; the account has an opening balance field but no domain movement since.
+    const untouched = checkFinancialConsistency({
+      paymentAccounts: [{ id: 'old', orgId: ORG, name: 'Old', initialBalance: 0, currentBalance: 700, balance: 650 }],
+      accountTransactions: [legacyLine],
+    }, now).issues;
+    expect(ofKind(untouched, 'account_balance_fields')).toMatchObject([{ severity: 'warning' }]);
+    // The domain moved it since (both fields written together), then one field was edited: violation.
+    const moved = checkFinancialConsistency({
+      paymentAccounts: [{ id: 'old', orgId: ORG, name: 'Old', currentBalance: 800, balance: 750, lastLedgerId: 'tx-new' }],
+      accountTransactions: [
+        legacyLine,
+        { id: 'tx-new', operationLedgerId: 'tx-new', accountId: 'old', orgId: ORG, type: 'in', amount: 100, balanceBefore: 700, balanceAfter: 800, referenceType: 'manual_adjustment', createdAt: '2026-10-01T00:00:00.000Z' },
+      ],
+    }, now).issues;
+    expect(ofKind(moved, 'account_balance_fields')).toMatchObject([{ severity: 'violation', expected: 800, actual: 750 }]);
+  });
+
   describe('legacy accounts (written before the ledger) → warnings only', () => {
     it('no initialBalance field and no lines', () => {
       const data: ConsistencyData = {
@@ -515,6 +547,7 @@ describe('CSV export', () => {
       detail: 'a "quoted" detail',
     };
     const csv = consistencyIssuesToCsv([issue], id => (id === ORG ? 'أكمي' : id));
+    expect(csv.charCodeAt(0)).toBe(0xfeff);
     expect(csv.startsWith('﻿"الخطورة"')).toBe(true);
     const row = csv.split('\r\n')[1];
     expect(row).toContain('"مخالفة"');

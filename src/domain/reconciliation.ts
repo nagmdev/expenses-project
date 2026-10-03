@@ -275,18 +275,22 @@ export function checkFinancialConsistency(data: ConsistencyData, now: Date = new
       ? `للحساب ${legacyLines.length} حركة مسجلة بإصدار قديم قبل دفتر الحركات الحالي`
       : 'حساب قديم بدون حركات في دفتر الحركات';
 
-    // 1. currentBalance and its legacy alias balance are always written together.
+    // 1. currentBalance and its legacy alias balance are always written together. Once the
+    // domain moved the account (lastLedgerId), or when everything about it is the domain's,
+    // a difference was written afterwards outside the operations; on a legacy account never
+    // moved since, it is what an older version left.
     if (runs('account_balance_fields')) {
       examined('account_balance_fields');
       if (account.currentBalance != null && account.balance != null && moneyDiffers(account.currentBalance, account.balance)) {
+        const bound = Boolean(lastId) || !legacy;
         report({
           ...base,
-          severity: hasOpening ? 'violation' : 'warning',
+          severity: bound ? 'violation' : 'warning',
           kind: 'account_balance_fields',
           label: 'حقل الرصيد الحالي لا يطابق حقل الرصيد القديم',
           expected: toMoney(account.currentBalance),
           actual: toMoney(account.balance),
-          detail: hasOpening
+          detail: bound
             ? 'كل حركة تكتب الحقلين معاً (currentBalance و balance)؛ اختلافهما يعني تعديلاً خارج العمليات المعتمدة.'
             : `${legacyWhy}: فرق تاريخي.`,
         });
@@ -413,12 +417,13 @@ export function checkFinancialConsistency(data: ConsistencyData, now: Date = new
     }
 
     // 5. no operation takes an account below zero (only the owner-confirmed bank correction
-    // of a detached legacy wallet may: a manual_adjustment that names the wallet).
+    // of a detached legacy wallet may: a manual_adjustment that names the wallet). Deposits
+    // made after that correction need not bring the bank back above zero, so the correction
+    // is looked for in the account's whole history, not only as its last line.
     if (runs('account_negative_balance')) {
       examined('account_negative_balance');
       if (toMoney(balance) < 0) {
-        const lastMove = lastLine || own[own.length - 1];
-        const detachCorrection = Boolean(lastMove && lastMove.referenceType === 'manual_adjustment' && lastMove.referenceId);
+        const detachCorrection = own.some(l => l.referenceType === 'manual_adjustment' && Boolean(l.referenceId) && l.type === 'out');
         report({
           ...base,
           severity: legacy || detachCorrection ? 'warning' : 'violation',
@@ -832,5 +837,5 @@ export function consistencyIssuesToCsv(issues: ConsistencyIssue[], orgName: (org
       .map(csvCell)
       .join(','),
   );
-  return '﻿' + [headers.map(csvCell).join(','), ...rows].join('\r\n');
+  return '\uFEFF' + [headers.map(csvCell).join(','), ...rows].join('\r\n');
 }
