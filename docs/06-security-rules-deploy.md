@@ -238,10 +238,11 @@ Derived from what the built app loads and connects to (`dist/`, `src/lib/firebas
   attributes and Recharts set inline styles; the IBM Plex Sans Arabic stylesheet comes from
   Google Fonts.
 - `font-src 'self' https://fonts.gstatic.com`.
-- `img-src 'self' data: blob: https://firebasestorage.googleapis.com https://storage.googleapis.com`:
+- `img-src 'self' data: blob: https://firebasestorage.googleapis.com https://storage.googleapis.com https://www.google.com/images/cleardot.gif`:
   `blob:` for attachment previews (`fsattach://` files become object URLs), `data:` for the
-  payment QR code, image compression and older records that stored `data:` URLs, and the
-  Storage hosts for https links of records uploaded by older versions.
+  payment QR code, image compression and older records that stored `data:` URLs, the
+  Storage hosts for https links of records uploaded by older versions, and the one image the
+  Firestore SDK's WebChannel loads to test the network after a connection error.
 - `connect-src 'self' blob: https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firebasestorage.googleapis.com https://storage.googleapis.com https://www.google.com/recaptcha/`:
   `'self'` is `/api/send-email`; Firestore; Firebase Auth (sign-in, token refresh); legacy
   Storage downloads; `blob:` because `useAttachmentPreview` reads a loaded file's type from its
@@ -257,6 +258,12 @@ Derived from what the built app loads and connects to (`dist/`, `src/lib/firebas
   worker POSTs from the browser (`src/services/emailService.ts`) to the URL the owner typed
   in Settings. It cannot be known in advance, so it is not in `connect-src`; each delivery is
   reported. Before enforcing the policy, add that URL's origin to `connect-src`.
+- **Receipt links typed by hand.** The custody settlement form accepts any `https://` link
+  instead of an uploaded file (`src/components/CustodyManagement.tsx`), and older records may
+  hold https links on other hosts. Opening one in the viewer loads it from that host
+  (`<img>` / `<iframe>`, or `fetch` when its type is unknown), so it is reported under
+  `img-src` / `frame-src` / `connect-src`. Enforcing the policy would stop those previews
+  (the link itself stays in the record); allow the hosts you need, or keep using uploads.
 - **A different Firebase project.** If `VITE_FIREBASE_AUTH_DOMAIN` on Vercel, or a custom
   connection saved in the in-app Firebase settings, points to another project, replace
   `https://expenses-project-ce1f9.firebaseapp.com` in `frame-src` with that `authDomain`.
@@ -267,6 +274,9 @@ Derived from what the built app loads and connects to (`dist/`, `src/lib/firebas
 
 **Enforcing it later:** open the production site with DevTools, sign in with email and with
 Google, open requests with image and PDF attachments, upload a file, and let an email /
-webhook notification go out. When the console shows no `[Report Only]` CSP messages, rename
+webhook notification go out. Check PDF previews in Chrome in particular: a `blob:` / `data:`
+PDF frame inherits this policy, and Chrome's built-in PDF viewer is a plugin, so a report
+under `object-src 'none'` there means `object-src` needs `blob: data:` before enforcing.
+When the console shows no `[Report Only]` CSP messages, rename
 the header key to `Content-Security-Policy` (same value) and test sign-in again on a preview
 deployment before merging to `main`.
