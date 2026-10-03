@@ -33,6 +33,11 @@ test('double click on submit creates ONE request; double click on disburse pays 
   expect(await fsWhere('accountTransactions', 'referenceId', request.id)).toHaveLength(1);
   await expect(fin.page.getByRole('main').getByRole('button', { name: '💸 تنفيذ الصرف والتحويل المالي الآن' })).toHaveCount(0);
   expect(await fsBalance(TANTA_BANK)).toBeCloseTo(bankBefore - amount, 2);
+  // Checked again at the end: a second write from the double click would have landed by now
+  // (the polls above stop at the first matching value).
+  expect(await fsWhere('requests', 'title', title)).toHaveLength(1);
+  expect(await fsWhere('accountTransactions', 'referenceId', request.id)).toHaveLength(1);
+  await expect(emp.page.getByRole('main').getByRole('heading', { level: 4, name: title, exact: true })).toHaveCount(1);
 
   await Promise.all([emp.context.close(), admin.context.close(), fin.context.close()]);
 });

@@ -27,21 +27,36 @@ test.describe('role gating', () => {
     await expect(emp2.page.getByRole('dialog')).toHaveCount(0);
     await expect.poll(async () => (await fsWhere('requests', 'title', cairoTitle))[0]?.orgId).toBe('org-hcai');
 
+    // Control: the Tanta admin finds each seeded Tanta request with the same search (so an empty
+    // result for Cairo below means "not visible", not "the search is broken"), and not Cairo's.
+    const admin = await signIn(browser, 'admin');
+    await openTab(admin.page, /^طلبات الصرف/);
+    const tantaMain = admin.page.getByRole('main');
+    const tantaSearch = tantaMain.getByPlaceholder('بحث برقم الطلب، الموظف، المورد، أو العنوان...');
+    for (const title of TANTA_SEEDED_TITLES) {
+      await tantaSearch.fill(title);
+      await expect(tantaMain.getByRole('heading', { level: 4, name: title, exact: true })).toBeVisible();
+    }
+    await tantaSearch.fill(cairoTitle);
+    await expect(tantaMain.getByRole('heading', { level: 4 })).toHaveCount(0);
+
     const admin2 = await signIn(browser, 'admin2');
     await expect(admin2.page.getByRole('banner').getByText('Home-Cairo')).toBeVisible();
     await openTab(admin2.page, /^طلبات الصرف/);
     const main = admin2.page.getByRole('main');
     await expect(main.getByRole('heading', { level: 4, name: cairoTitle, exact: true })).toBeVisible();
-    for (const title of TANTA_SEEDED_TITLES) {
-      await expect(main.getByText(title)).toHaveCount(0);
-    }
-    // Searching for them does not find them either
+    // The list renders only the newest 35: search for each Tanta title instead of scanning the page.
     const search = main.getByPlaceholder('بحث برقم الطلب، الموظف، المورد، أو العنوان...');
+    for (const title of TANTA_SEEDED_TITLES) {
+      await search.fill(title);
+      await expect(main.getByRole('heading', { level: 4 })).toHaveCount(0);
+    }
     await search.fill('إنترنت');
     await expect(main.getByRole('heading', { level: 4 })).toHaveCount(0);
+    // The same search still finds Cairo's own request.
     await search.fill(cairoTitle);
     await expect(main.getByRole('heading', { level: 4, name: cairoTitle, exact: true })).toBeVisible();
 
-    await Promise.all([emp2.context.close(), admin2.context.close()]);
+    await Promise.all([emp2.context.close(), admin.context.close(), admin2.context.close()]);
   });
 });
