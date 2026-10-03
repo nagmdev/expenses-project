@@ -13,6 +13,8 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: 'tests-browser',
+  // Refuses to run against anything but the e2e build + running, seeded emulators.
+  globalSetup: './tests-browser/global-setup.ts',
   // One worker: the tests share one seeded emulator (money moves, balances are compared).
   workers: 1,
   fullyParallel: false,
