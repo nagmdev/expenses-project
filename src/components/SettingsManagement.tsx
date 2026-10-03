@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useApp, type OrphanProfileRow } from '../context/AppContext';
 import { openLegacyRecovery } from './LegacyDataRecovery';
 import { EmailVerificationCard } from './EmailVerificationCard';
+import { BackupExportCard } from './BackupExportCard';
 import { 
   Bell, 
   Mail, 
@@ -1052,6 +1053,9 @@ export const SettingsManagement: React.FC = () => {
               </div>
             )}
           </div>
+
+          {/* Backup export (Spark plan: no managed backups). Read-only; restore: docs/06 → Backups */}
+          <BackupExportCard />
         </div>
       )}
 

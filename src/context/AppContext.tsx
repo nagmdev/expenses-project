@@ -63,6 +63,8 @@ import { User as FirebaseUser } from 'firebase/auth';
 import type { Query, DocumentData } from 'firebase/firestore';
 import { arrayRemove, arrayUnion, updateDoc } from 'firebase/firestore';
 import { createFirestoreStore } from '../domain/firestoreStore';
+import { exportBackup as readBackup, type BackupStep } from '../lib/backupExport';
+import type { BackupFile } from '../utils/backupFormat';
 import type { DataStore } from '../domain/store';
 import { COL, DomainError, PAYOUT_FIELDS, formatAmount, isDomainError, normalizeEmail, normalizeKeyValue, timelineTimestamp, type Actor } from '../domain/common';
 import {
@@ -639,6 +641,14 @@ interface AppContextType {
   findOrphanProfiles: () => Promise<OrphanProfileRow[]>;
   /** Platform owner: detaches the given orphan profiles (after the owner reviewed the list). */
   detachOrphans: (rows: OrphanProfileRow[]) => Promise<number>;
+  /**
+   * Platform owner: reads every collection the rules let the owner list, fresh from the server,
+   * into a backup file (src/lib/backupExport.ts). Never writes.
+   */
+  exportBackup: (
+    opts: { includeAttachments: boolean; includeSecrets: boolean; signal?: AbortSignal },
+    onProgress?: (step: BackupStep) => void,
+  ) => Promise<BackupFile>;
   /** The last migration of this session (running / result / error): kept here so leaving Settings mid-run does not lose it. */
   keyMigration: KeyMigrationState | null;
 
@@ -3079,6 +3089,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return mutate('detachOrphanProfiles', 'all', store => detachOrphanProfiles(store, actor, rows));
   };
 
+  const exportBackup: AppContextType['exportBackup'] = async (opts, onProgress) => {
+    if (!isSuperAdmin) throw new DomainError('forbidden', 'هذا الإجراء متاح للمشرف العام للمنصة فقط.');
+    const db = getDb();
+    if (!db) throw new DomainError('offline', 'قاعدة البيانات غير متصلة.');
+    return readBackup(db, { ...opts, exportedBy: currentUser.email }, onProgress);
+  };
+
   // =========================================================================
   // AUTH & PROFILE
   // =========================================================================
@@ -3330,6 +3347,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         migrateUniqueKeys,
         findOrphanProfiles,
         detachOrphans,
+        exportBackup,
         keyMigration,
         refreshData,
         resetToSampleData,
