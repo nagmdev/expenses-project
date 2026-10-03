@@ -17,8 +17,8 @@ Vercel from `main`.
   `tests-rules/attacks.test.ts`.
 - **`localStorage` is not a database:** it only keeps UI preferences (active company / page,
   notification read state), an optional custom Firebase connection, and the old version's data,
-  which only the legacy-data recovery screen reads. Firestore's own IndexedDB cache is the
-  offline cache.
+  which only the legacy-data recovery screen reads (except the old email settings, copied once
+  into Firestore in a super-admin session). Firestore's own IndexedDB cache is the offline cache.
 - **Data integrity, idempotency & deployment steps:** see
   [docs/05-data-integrity-and-idempotency.md](docs/05-data-integrity-and-idempotency.md) — only
   `firestore.rules` is deployed (`firebase deploy --only firestore:rules`), by hand.
