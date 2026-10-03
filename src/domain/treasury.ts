@@ -417,7 +417,7 @@ export async function updatePaymentAccount(
       }
     }
     const newIdentifier = typeof clean.accountIdentifier === 'string' ? clean.accountIdentifier.trim() : undefined;
-    const identifierChanged = newIdentifier !== undefined && normalizeKeyValue(newIdentifier) !== normalizeKeyValue(account.accountIdentifier);
+    const identifierChanged = newIdentifier !== undefined && normalizeKeyValue(newIdentifier, 'account_identifier') !== normalizeKeyValue(account.accountIdentifier, 'account_identifier');
     let oldKey = null as Awaited<ReturnType<typeof readUniqueKey>> | null;
     let newKey = null as Awaited<ReturnType<typeof readUniqueKey>> | null;
     if (identifierChanged) {

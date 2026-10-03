@@ -108,7 +108,9 @@ export const SettingsManagement: React.FC = () => {
   const profileGuard = useSubmitGuard();
 
   // Email verification. Being added to another company by email (an invite) opens only for
-  // a verified address (firestore.rules -> isInviteeOf / users.verifiedEmail).
+  // a verified address (firestore.rules -> isInviteeOf / users.verifiedEmail). An invitation
+  // grants through the profile, which stays in a company the person already works in: there
+  // the platform owner re-adds the now-proven login (directory.ts -> invitationReplacedBy).
   const verifyGuard = useSubmitGuard();
   const [verifyFeedback, setVerifyFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const handleSendVerification = () => {
@@ -123,7 +125,7 @@ export const SettingsManagement: React.FC = () => {
       setVerifyFeedback(res.error
         ? { ok: false, text: res.error }
         : res.verified
-        ? { ok: true, text: 'تم تفعيل البريد بنجاح. ستظهر لك أي شركة أُضفت إليها ببريدك خلال لحظات.' }
+        ? { ok: true, text: 'تم تفعيل البريد بنجاح. ستظهر لك خلال لحظات أي شركة أُضفت إليها ببريدك. إن كنت تعمل بالفعل في شركة أخرى، اطلب من المشرف العام إعادة إضافتك إلى الشركة الجديدة لتظهر لك.' }
         : { ok: false, text: 'البريد لم يُفعَّل بعد. افتح رابط التفعيل في بريدك أولاً ثم اضغط "تحقق الآن".' });
     });
   };
@@ -1022,7 +1024,7 @@ export const SettingsManagement: React.FC = () => {
               ) : (
                 <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-xl space-y-2">
                   <p className="text-[11px] text-amber-900 leading-relaxed">
-                    البريد غير مُفعَّل. فعّله حتى تظهر لك أي شركة يضيفك إليها المدير ببريدك.
+                    البريد غير مُفعَّل. فعّله حتى تظهر لك أي شركة يضيفك إليها المدير ببريدك (إن كنت تعمل بالفعل في شركة أخرى، يعيد المشرف العام إضافتك بعد التفعيل).
                   </p>
                   <div className="flex flex-wrap gap-2">
                     <button

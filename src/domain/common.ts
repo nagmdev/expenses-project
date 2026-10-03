@@ -53,20 +53,46 @@ export const isDomainError = (e: unknown): e is DomainError => e instanceof Doma
 export const normalizeEmail = (email?: string | null) => (email || '').trim().toLowerCase();
 
 /**
- * The characters a unique value ignores: JavaScript's \s (every whitespace and line
- * terminator, U+FEFF included) plus '-', '_' and '.'. Spelled out because firestore.rules
- * (uniqueKeys → keyNorm) must strip EXACTLY the same set: keep the two lists identical.
+ * The characters every unique value ignores: JavaScript's \s (every whitespace and line
+ * terminator, U+FEFF included), invisible format characters (soft hyphen U+00AD, U+034F,
+ * U+061C, U+180E, zero-width and direction marks U+200B-U+200F, word joiner U+2060) and the
+ * Arabic tatweel (U+0640) and harakat (U+064B-U+065F, U+0670). Spelled out because
+ * firestore.rules (keyBase) must strip EXACTLY the same set: keep the two lists identical.
  */
-const KEY_IGNORED = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\-_.]+/g;
+const KEY_INVISIBLE = /[\t\n\v\f\r \u00a0\u00ad\u034f\u061c\u0640\u064b-\u065f\u0670\u1680\u180e\u2000-\u200f\u2028\u2029\u202f\u205f\u2060\u3000\ufeff]+/g;
+/** Ignored too, except where they tell two values apart (see keepsSeparators). */
+const KEY_SEPARATORS = /[\-_.]+/g;
+/** What app versions before 2026-10 ignored (normalizeKeyValueV1). */
+const KEY_IGNORED_V1 = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\-_.]+/g;
+
+const asciiLower = (v: string) => v.replace(/[A-Z]+/g, s => s.toLowerCase());
+/** Arabic-Indic (U+0660-U+0669) and extended / Persian (U+06F0-U+06F9) digits as ASCII digits. */
+const foldDigits = (v: string) =>
+  v.replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660)).replace(/[\u06f0-\u06f9]/g, d => String(d.charCodeAt(0) - 0x06f0));
+
+/**
+ * '-', '_' and '.' tell two values apart in an email (ahmed.ali@ and ahmedali@ are two people)
+ * and in an account identifier that is an address (InstaPay ali.m@instapay). Same as
+ * firestore.rules → keepsSeparators.
+ */
+const keepsSeparators = (scope: UniqueScope | undefined, value: string) =>
+  scope === 'member_email' || (scope === 'account_identifier' && value.includes('@'));
 
 /**
  * The value a uniqueness key holds. Only A-Z are lower-cased: the rules can reproduce that
  * exactly (their lower() is not guaranteed to follow JavaScript's full Unicode case
  * mapping), so the database and the app always agree on whether two values are the same
  * key. A name with non-ASCII capitals (É, Ö, Cyrillic, Greek) is therefore case-sensitive.
+ * `scope` decides whether '-', '_', '.' count (see keepsSeparators); without it they never do.
  */
-export const normalizeKeyValue = (value?: string | null) =>
-  (value || '').replace(/[A-Z]+/g, s => s.toLowerCase()).replace(KEY_IGNORED, '');
+export const normalizeKeyValue = (value?: string | null, scope?: UniqueScope) => {
+  const raw = value || '';
+  const base = foldDigits(asciiLower(raw)).replace(KEY_INVISIBLE, '');
+  return keepsSeparators(scope, raw) ? base : base.replace(KEY_SEPARATORS, '');
+};
+
+/** normalizeKeyValue of app versions before 2026-10: the value their keys hold. */
+export const normalizeKeyValueV1 = (value?: string | null) => asciiLower(value || '').replace(KEY_IGNORED_V1, '');
 
 export function timelineTimestamp(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
@@ -191,6 +217,8 @@ export interface UniqueKeyRead {
   orgId: string;
   value: string;
   owner: { collection: string; id: string } | null;
+  /** The owner's key is one written before 2026-10, under this id (uniqueKeyDocIdV1). */
+  legacyDocId?: string;
 }
 
 /**
@@ -200,46 +228,96 @@ export interface UniqueKeyRead {
  * and nobody can probe whether an email, provider or account number exists in another company.
  */
 export function uniqueKeyDocId(scope: UniqueScope, orgId: string, value: string) {
-  return `${scope}__${orgId || '-'}__${encodeKeyPart(normalizeKeyValue(value))}`;
+  return `${scope}__${orgId || '-'}__${encodeKeyPart(normalizeKeyValue(value, scope))}`;
+}
+
+/** The id app versions before 2026-10 gave the same key (normalizeKeyValueV1). */
+export function uniqueKeyDocIdV1(scope: UniqueScope, orgId: string, value: string) {
+  return `${scope}__${orgId || '-'}__${encodeKeyPart(normalizeKeyValueV1(value))}`;
 }
 
 /**
  * The id format before 2026-10: company id base64url-encoded, which the rules cannot check.
  * Only the platform owner reads these, to move them (directory.ts → migrateLegacyUniqueKeys).
+ * Written by app versions that normalized with normalizeKeyValueV1.
  */
 export function legacyUniqueKeyDocId(scope: UniqueScope, orgId: string, value: string) {
-  return `${scope}__${encodeKeyPart(orgId || '-')}__${encodeKeyPart(normalizeKeyValue(value))}`;
+  return `${scope}__${encodeKeyPart(orgId || '-')}__${encodeKeyPart(normalizeKeyValueV1(value))}`;
+}
+
+/** The record (collection, key field) a company key names (firestore.rules → keyCollection / keyField). */
+const KEY_RECORDS: Partial<Record<UniqueScope, { collection: string; field: string }>> = {
+  account_identifier: { collection: COL.paymentAccounts, field: 'accountIdentifier' },
+  service_code: { collection: COL.services, field: 'code' },
+  provider_name: { collection: COL.providers, field: 'name' },
+  department_name: { collection: COL.departments, field: 'name' },
+  member_email: { collection: COL.members, field: 'userEmail' },
+};
+
+type KeyDoc = { entityCollection: string; entityId: string };
+
+/**
+ * Whether the record a key names still holds `normalized` in this company. A key left behind
+ * by a record deleted or renamed without it (older app versions) holds nothing: the value is
+ * free, and the rules let a new claim take that key over (uniqueKeys → takenOver). A record
+ * this user cannot read counts as holding it (never take over what cannot be checked).
+ */
+async function keyOwnerHolds(tx: TxContext, scope: UniqueScope, orgId: string, key: KeyDoc, normalized: string): Promise<boolean> {
+  const spec = KEY_RECORDS[scope];
+  if (!spec || key.entityCollection !== spec.collection || !key.entityId) return true;
+  let rec: Record<string, any> | null;
+  try {
+    rec = await tx.get<Record<string, any>>(spec.collection, key.entityId);
+  } catch {
+    return true;
+  }
+  return Boolean(rec && rec.orgId === orgId && normalizeKeyValue(String(rec[spec.field] ?? ''), scope) === normalized);
 }
 
 export async function readUniqueKey(tx: TxContext, scope: UniqueScope, orgId: string, value: string): Promise<UniqueKeyRead> {
   const docId = uniqueKeyDocId(scope, orgId, value);
+  const normalized = normalizeKeyValue(value, scope);
+  const free: UniqueKeyRead = { docId, scope, orgId, value, owner: null };
   // A value that normalizes to nothing ("-", "...", "_") has no key: it would make every such
   // record a duplicate of every other, and the rules refuse claiming it (uniqueKeys → claimedByRecord).
-  if (normalizeKeyValue(value) === '') return { docId, scope, orgId, value, owner: null };
-  const snap = await tx.get<{ entityCollection: string; entityId: string }>(COL.uniqueKeys, docId);
-  return {
-    docId,
-    scope,
-    orgId,
-    value,
-    owner: snap ? { collection: snap.entityCollection, id: snap.entityId } : null,
-  };
+  if (normalized === '') return free;
+  const snap = await tx.get<KeyDoc>(COL.uniqueKeys, docId);
+  if (snap) {
+    return (await keyOwnerHolds(tx, scope, orgId, snap, normalized))
+      ? { ...free, owner: { collection: snap.entityCollection, id: snap.entityId } }
+      : free;
+  }
+  // A key claimed before 2026-10 for the same value sits under its old id (an email's
+  // separators folded, tatweel / Arabic digits kept): it still names its record when that
+  // record holds exactly this value (ahmed.ali@ and ahmedali@ shared one old key: the other
+  // address is free).
+  const v1Id = uniqueKeyDocIdV1(scope, orgId, value);
+  if (v1Id !== docId && KEY_RECORDS[scope]) {
+    const old = await tx.get<KeyDoc>(COL.uniqueKeys, v1Id);
+    if (old && (await keyOwnerHolds(tx, scope, orgId, old, normalized))) {
+      return { ...free, owner: { collection: old.entityCollection, id: old.entityId }, legacyDocId: v1Id };
+    }
+  }
+  return free;
 }
 
 export function claimUniqueKey(tx: TxContext, key: UniqueKeyRead, entity: { collection: string; id: string }, nowIso: string) {
-  if (normalizeKeyValue(key.value) === '') return; // no key for an empty value (see readUniqueKey)
+  if (normalizeKeyValue(key.value, key.scope) === '') return; // no key for an empty value (see readUniqueKey)
+  // Already this record's key: nothing to write (the rules never let a held key be rewritten).
+  if (!key.legacyDocId && key.owner && key.owner.id === entity.id && key.owner.collection === entity.collection) return;
   tx.set(COL.uniqueKeys, key.docId, {
     scope: key.scope,
     orgId: key.orgId,
-    value: normalizeKeyValue(key.value),
+    value: normalizeKeyValue(key.value, key.scope),
     entityCollection: entity.collection,
     entityId: entity.id,
     createdAt: nowIso,
   });
 }
 
+/** Deletes the key when `entityId` owns it (the one under its old id, for a key written before 2026-10). */
 export function releaseUniqueKey(tx: TxContext, key: UniqueKeyRead, entityId: string) {
-  if (key.owner && key.owner.id === entityId) tx.delete(COL.uniqueKeys, key.docId);
+  if (key.owner && key.owner.id === entityId) tx.delete(COL.uniqueKeys, key.legacyDocId || key.docId);
 }
 
 export const isKeyTakenByOther = (key: UniqueKeyRead, entityId: string) => Boolean(key.owner && key.owner.id !== entityId);

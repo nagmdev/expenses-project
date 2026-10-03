@@ -4,7 +4,8 @@
  * base64-encoded) are moved once by the platform owner.
  */
 import { describe, expect, it } from 'vitest';
-import { legacyUniqueKeyDocId, normalizeKeyValue, readUniqueKey, uniqueKeyDocId, type Actor } from '../src/domain/common';
+import { legacyUniqueKeyDocId, normalizeKeyValue, normalizeKeyValueV1, readUniqueKey, uniqueKeyDocId, uniqueKeyDocIdV1, type Actor } from '../src/domain/common';
+import { encodeKeyPart } from '../src/utils/ids';
 import { createEntity, migrateLegacyUniqueKeys, uniqueKeyOwnersOf, type UniqueKeyOwner } from '../src/domain/directory';
 import type { ServiceProvider } from '../src/types';
 import { ORG, admin, freshStore, key } from './helpers';
@@ -20,7 +21,9 @@ const seedLegacy = (store: ReturnType<typeof freshStore>, o: UniqueKeyOwner, ent
 
 describe('uniqueness key ids', () => {
   it('name the company in clear (the rules read it from the id) and keep the value encoded', () => {
-    expect(uniqueKeyDocId('member_email', ORG, 'A.B@Acme.test')).toBe(`member_email__${ORG}__${legacyUniqueKeyDocId('member_email', ORG, 'A.B@Acme.test').split('__')[2]}`);
+    expect(uniqueKeyDocId('member_email', ORG, 'A.B@Acme.test')).toBe(`member_email__${ORG}__${encodeKeyPart('a.b@acme.test')}`);
+    // keys written before 2026-10 folded an email's separators (old id format and V1 current format)
+    expect(uniqueKeyDocIdV1('member_email', ORG, 'A.B@Acme.test')).toBe(`member_email__${ORG}__${legacyUniqueKeyDocId('member_email', ORG, 'A.B@Acme.test').split('__')[2]}`);
     expect(uniqueKeyDocId('org_code', '-', 'ACME').split('__')[1]).toBe('-');
     expect(legacyUniqueKeyDocId('member_email', ORG, 'x@acme.test')).not.toBe(uniqueKeyDocId('member_email', ORG, 'x@acme.test'));
   });
@@ -53,6 +56,7 @@ describe('migrateLegacyUniqueKeys (platform owner, once after the rules update)'
     const store = freshStore();
     const o = providerKey('prov-1');
     seedLegacy(store, o);
+    store.seed('providers', 'prov-1', { id: 'prov-1', orgId: ORG, name: 'Vodafone', totalPaid: 0, active: true }); // the record the key names
     await migrateLegacyUniqueKeys(store, owner, [o], now);
     const build = (id: string) => ({ id, orgId: ORG, name: 'vodafone', active: true, totalPaid: 0 } as unknown as ServiceProvider);
     await expect(createEntity(store, admin, 'provider', build, () => 'x', key(), now)).rejects.toMatchObject({ code: 'duplicate' });
@@ -134,18 +138,28 @@ describe('migrateLegacyUniqueKeys (platform owner, once after the rules update)'
 });
 
 describe('normalizeKeyValue (must match firestore.rules → uniqueKeys keyNorm character for character)', () => {
-  it('lower-cases A-Z only and drops exactly the JavaScript whitespace plus - _ .', () => {
+  it('lower-cases A-Z only, folds Arabic-Indic digits, drops the JavaScript whitespace, invisible marks, tatweel, harakat and - _ . (kept in an email / @ address)', () => {
     expect(normalizeKeyValue(' Vodafone-EG_1.0 ')).toBe('vodafoneeg10');
     expect(normalizeKeyValue('ko\u3000DAK\u00A0\uFEFF\u2028\u000B')).toBe('kodak');
     // non-ASCII capitals are kept (the rules' lower() need not map them like JavaScript)
     expect(normalizeKeyValue('SOCIÉTÉ')).toBe('sociÉtÉ');
     expect(normalizeKeyValue('\u212Aodak')).toBe('\u212Aodak');
-    // not JavaScript whitespace: kept
-    expect(normalizeKeyValue('a\u180Eb\u200Bc')).toBe('a\u180Eb\u200Bc');
+    // invisible format characters, tatweel and harakat: dropped; Arabic-Indic / Persian digits: ASCII
+    expect(normalizeKeyValue('a\u180Eb\u200Bc\u00AD')).toBe('abc');
+    expect(normalizeKeyValue('شَرِكَة الأمـــل')).toBe(normalizeKeyValue('شركة الأمل'));
+    expect(normalizeKeyValue('\u0660\u0661\u0662\u06F3\u06F9')).toBe('01239');
+    // separators tell emails and InstaPay addresses apart; elsewhere they are dropped
+    expect(normalizeKeyValue('Ahmed.Ali@Acme.test', 'member_email')).toBe('ahmed.ali@acme.test');
+    expect(normalizeKeyValue('ali.m@instapay', 'account_identifier')).toBe('ali.m@instapay');
+    expect(normalizeKeyValue('EG-001.2', 'account_identifier')).toBe('eg0012');
+    // the value app versions before 2026-10 computed
+    expect(normalizeKeyValueV1('Ahmed.Ali@Acme.test')).toBe('ahmedali@acmetest');
+    expect(normalizeKeyValueV1('a\u200Bb')).toBe('a\u200Bb');
+    const dropped = /[\s\u00ad\u034f\u061c\u0640\u064b-\u065f\u0670\u180e\u200b-\u200f\u2060]/;
     for (let c = 0; c < 0x10000; c++) {
       const ch = String.fromCharCode(c);
-      if (/[A-Z\-_.]/.test(ch)) continue;
-      expect(normalizeKeyValue(`x${ch}y`) === 'xy').toBe(/\s/.test(ch));
+      if (/[A-Z\-_.\u0660-\u0669\u06f0-\u06f9]/.test(ch)) continue;
+      expect(normalizeKeyValue(`x${ch}y`) === 'xy').toBe(dropped.test(ch));
     }
   });
 

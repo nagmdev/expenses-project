@@ -209,6 +209,13 @@ export function restoreBlock(ctx: RestoreContext, rec: LegacyRecord): BlockReaso
   if (counter !== undefined && counter !== null && (typeof counter !== 'number' || toMoney(counter) !== 0)) {
     return 'needs_owner';
   }
+  // A service the old app shared with other companies: sharing is the platform owner's call
+  // (firestore.rules → services create, sharingOwnOnly: no list, or exactly [its company]).
+  if (rec.store.collection === COL.services && 'orgIds' in rec.data) {
+    const sharing = rec.data.orgIds;
+    const ownOnly = Array.isArray(sharing) && (sharing.length === 0 || (sharing.length === 1 && sharing[0] === rec.data.orgId));
+    if (!ownOnly) return 'needs_owner';
+  }
   return actor.role === 'org_admin' ? null : 'no_permission';
 }
 

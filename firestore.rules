@@ -182,6 +182,11 @@ service cloud.firestore {
     //    profiles up by email, so nobody may claim someone else's address.
     //  - verifiedEmail: unchanged, or the caller's own verified address. It is the account's
     //    proof of its address (see /users): nobody else may write it.
+    //  - memberId: a grant field too. It names the membership the profile carries: the app syncs
+    //    that membership's role / company onto every profile naming it (directory.ts →
+    //    updateMemberRecord) and re-points a placeholder's userId to it (members →
+    //    userIdChangeOk). It changes only with the self-link (granted membership), or is
+    //    cleared on a profile without a company.
     // `before` is {} on create.
     function isOwnProfileWrite(userId, before) {
       let after = request.resource.data;
@@ -192,8 +197,10 @@ service cloud.firestore {
         sameField(after, before, 'verifiedEmail', null) ||
         (hasVerifiedEmail() && after.get('verifiedEmail', null) == verifiedEmail())
       ) && (
-        (sameField(after, before, 'role', null) && sameField(after, before, 'orgId', null) && sameField(after, before, 'active', true)) ||
-        (after.get('orgId', null) in [null, ''] && after.get('role', 'employee') == 'employee') ||
+        (sameField(after, before, 'role', null) && sameField(after, before, 'orgId', null) && sameField(after, before, 'active', true) &&
+          sameField(after, before, 'memberId', null)) ||
+        (after.get('orgId', null) in [null, ''] && after.get('role', 'employee') == 'employee' &&
+          (sameField(after, before, 'memberId', null) || after.get('memberId', null) == null)) ||
         (after.get('active', true) == true && grantsMembership(after.get('memberId', null), after.get('orgId', null), after.get('role', null)))
       );
     }
@@ -220,6 +227,14 @@ service cloud.firestore {
     // -------------------------------------------------------------------------
     function near(a, b) {
       return math.abs(a - b) < 0.0051;
+    }
+
+    // A value the domain wrote (toMoney: whole cents). Every new balance / remainder / amount is
+    // one: then a delta that is near() its line or invoice is exactly that amount, and no
+    // operation can move a total by a fraction of a cent more or less than it explains.
+    // (1e-4 of a cent absorbs the binary representation of large amounts.)
+    function isCents(v) {
+      return v is number && math.abs(v * 100 - math.round(v * 100)) < 0.0001;
     }
 
     // A numeric field, 0 when missing, null or not a number (legacy documents).
@@ -293,6 +308,73 @@ service cloud.firestore {
         (inOrgViaProfile(c.orgId) || inOrgViaMember(c.orgId));
     }
 
+    // -------------------------------------------------------------------------
+    // Uniqueness keys (see 14. uniqueKeys): the value a key holds, exactly as the domain
+    // computes it (src/domain/common.ts → normalizeKeyValue): keep the two in step.
+    // -------------------------------------------------------------------------
+    // Only A-Z are lower-cased (lower() only on an ASCII-only value, see keyBase: whether it maps
+    // non-ASCII capitals, and how, need not match JavaScript's toLowerCase).
+    function asciiLower(v) {
+      return v.replace('A', 'a').replace('B', 'b').replace('C', 'c').replace('D', 'd').replace('E', 'e')
+        .replace('F', 'f').replace('G', 'g').replace('H', 'h').replace('I', 'i').replace('J', 'j')
+        .replace('K', 'k').replace('L', 'l').replace('M', 'm').replace('N', 'n').replace('O', 'o')
+        .replace('P', 'p').replace('Q', 'q').replace('R', 'r').replace('S', 's').replace('T', 't')
+        .replace('U', 'u').replace('V', 'v').replace('W', 'w').replace('X', 'x').replace('Y', 'y')
+        .replace('Z', 'z');
+    }
+    // Arabic-Indic and extended (Persian) digits read as the ASCII digit.
+    function foldDigits(v) {
+      return v.replace('[\\x{0660}\\x{06F0}]', '0').replace('[\\x{0661}\\x{06F1}]', '1').replace('[\\x{0662}\\x{06F2}]', '2')
+        .replace('[\\x{0663}\\x{06F3}]', '3').replace('[\\x{0664}\\x{06F4}]', '4').replace('[\\x{0665}\\x{06F5}]', '5')
+        .replace('[\\x{0666}\\x{06F6}]', '6').replace('[\\x{0667}\\x{06F7}]', '7').replace('[\\x{0668}\\x{06F8}]', '8')
+        .replace('[\\x{0669}\\x{06F9}]', '9');
+    }
+    // Dropped from every value: JavaScript's \s (listed: RE2's \s is ASCII only, \p{Z} differs
+    // from it), invisible format characters (soft hyphen, zero-width, direction marks, word
+    // joiner), Arabic tatweel and harakat. Keep KEY_INVISIBLE identical.
+    // (Each step only when the value has something to change: two matches() instead of 36 replace() calls.)
+    function keyBase(v) {
+      // (an ASCII-only value: lower() maps exactly A-Z there)
+      let lowered = !v.matches('(?s).*[A-Z].*') ? v : v.matches('[\\x{0000}-\\x{007F}]*') ? v.lower() : asciiLower(v);
+      let digits = lowered.matches('(?s).*[\\x{0660}-\\x{0669}\\x{06F0}-\\x{06F9}].*') ? foldDigits(lowered) : lowered;
+      return digits.replace(
+        '[\\t\\n\\x{000B}\\f\\r \\x{00A0}\\x{00AD}\\x{034F}\\x{061C}\\x{0640}\\x{064B}-\\x{065F}\\x{0670}\\x{1680}\\x{180E}\\x{2000}-\\x{200F}\\x{2028}\\x{2029}\\x{202F}\\x{205F}\\x{2060}\\x{3000}\\x{FEFF}]+', '');
+    }
+    // '-', '_' and '.' are dropped too, except where they tell two values apart: an email
+    // (ahmed.ali@ / ahmedali@ are two people), an account identifier that is an address
+    // (InstaPay ali.m@instapay). Keep keepsSeparators identical.
+    function keepsSeparators(scope, v) {
+      return scope == 'member_email' || (scope == 'account_identifier' && v.matches('(?s).*@.*'));
+    }
+    function keyNorm(v, scope) {
+      return !(v is string) ? ''
+        : keepsSeparators(scope, v) ? keyBase(v)
+        : keyBase(v).replace('[\\-_.]+', '');
+    }
+    // The value as app versions before 2026-10 computed it (normalizeKeyValueV1): keys they
+    // claim stay valid while their tabs are open.
+    function keyNormV1(v) {
+      return v is string
+        ? asciiLower(v).replace('[\\t\\n\\x{000B}\\f\\r \\x{00A0}\\x{1680}\\x{2000}-\\x{200A}\\x{2028}\\x{2029}\\x{202F}\\x{205F}\\x{3000}\\x{FEFF}\\-_.]+', '')
+        : '';
+    }
+    // encodeKeyPart (src/utils/ids.ts): base64url of the UTF-8 bytes, without padding.
+    function keyPart(v) {
+      return v.toUtf8().toBase64().replace('\\+', '-').replace('/', '_').replace('=+$', '');
+    }
+    // A record whose unique value changes (key field `field` of uniqueness scope `scope`) gives
+    // up the key of its old value in the same commit when it owns it (domain: releaseUniqueKey).
+    // Otherwise the key would keep naming a record that no longer holds its value, and nobody
+    // could add or take that value again. Only evaluated when the field changes.
+    function keyLeftWithRecord(scope, field, docId) {
+      let v = keyNorm(resource.data.get(field, ''), scope);
+      return v == '' || keyNorm(request.resource.data.get(field, ''), scope) == v ||
+        oldKeyNotOwned(/databases/$(database)/documents/uniqueKeys/$(scope + '__' + resource.data.get('orgId', '') + '__' + keyPart(v)), docId);
+    }
+    function oldKeyNotOwned(keyPath, docId) {
+      return !existsAfter(keyPath) || getAfter(keyPath).data.get('entityId', '') != docId;
+    }
+
     // Default deny for unhandled collections
     match /{document=**} {
       allow read, write: if false;
@@ -324,15 +406,18 @@ service cloud.firestore {
       // email in another company only on that proof (directory.ts → verifiedLoginUidOf): a
       // membership's (userId, userEmail) pair is only what some company's admin wrote.
       // Self-writes never grant a role or org the caller was not given (isOwnProfileWrite).
+      // An org admin's OWN profile is a self-write like anyone else's (isOwnProfileWrite): the
+      // admin branch would let it re-point its memberId or keep a role after its removal.
       allow create: if isAuthenticated() && (
         isSuperAdmin() ||
         isOwnProfileWrite(userId, {}) ||
-        (isOrgAdmin(request.resource.data.orgId) && request.resource.data.role != 'super_admin' &&
+        (userId != request.auth.uid && isOrgAdmin(request.resource.data.orgId) && request.resource.data.role != 'super_admin' &&
           !request.resource.data.keys().hasAny(['verifiedEmail']))
       );
       // Org admins manage profiles in their org, and may detach one from it (member
       // removed: org cleared, role reset), but never move a profile to another org.
       allow update: if isSuperAdmin() || (
+        userId != request.auth.uid &&
         isOrgAdmin(resource.data.orgId) &&
         request.resource.data.role != 'super_admin' &&
         !request.resource.data.diff(resource.data).affectedKeys().hasAny(['verifiedEmail']) && (
@@ -406,6 +491,8 @@ service cloud.firestore {
         request.resource.data.orgId == resource.data.orgId &&
         noPayoutAddedOrChanged() &&
         (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['userId']) || userIdChangeOk()) &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['userEmail']) ||
+          keyLeftWithRecord('member_email', 'userEmail', memberId)) &&
         // The owner's and the admin's own membership: name / contact only, never role or status.
         (!isProtectedMembership(resource.data) ||
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(grantFields()))
@@ -441,6 +528,7 @@ service cloud.firestore {
              paidByRequest(serviceId, 'serviceCategoryId', 'spentAmount', resource.data.get('orgIds', [])))
           // Profile edit / deactivation by the owning company: spending untouched.
           : (!keys.hasAny(['orgId']) && sharingUnchangedOrOwn() &&
+             (!keys.hasAny(['code']) || keyLeftWithRecord('service_code', 'code', serviceId)) &&
              hasOrgRole(resource.data.orgId, ['finance', 'org_admin']));
       }
 
@@ -477,7 +565,9 @@ service cloud.firestore {
         return keys.hasAny(['totalPaid', 'lastDisbursedRequestId'])
           ? (keys.hasOnly(['totalPaid', 'updatedAt', 'lastDisbursedRequestId']) &&
              paidByRequest(providerId, 'providerId', 'totalPaid', []))
-          : (!keys.hasAny(['orgId']) && hasOrgRole(resource.data.orgId, ['finance', 'org_admin']));
+          : (!keys.hasAny(['orgId']) &&
+             (!keys.hasAny(['name']) || keyLeftWithRecord('provider_name', 'name', providerId)) &&
+             hasOrgRole(resource.data.orgId, ['finance', 'org_admin']));
       }
 
       allow get: if isAuthenticated() && (isMissing() || isSuperAdmin() || isOrgMember(resource.data.orgId));
@@ -497,7 +587,10 @@ service cloud.firestore {
       allow list: if isAuthenticated() && (isSuperAdmin() || isOrgMember(resource.data.orgId));
       // (create previously evaluated resource.data on a missing doc → only super admins could create)
       allow create: if isSuperAdmin() || isOrgAdmin(request.resource.data.orgId) || isDataEntry(request.resource.data.orgId);
-      allow update: if isSuperAdmin() || (isOrgAdmin(resource.data.orgId) && orgUnchanged());
+      allow update: if isSuperAdmin() || (orgUnchanged() &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['name']) ||
+          keyLeftWithRecord('department_name', 'name', deptId)) &&
+        isOrgAdmin(resource.data.orgId));
       allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
     }
 
@@ -722,7 +815,7 @@ service cloud.firestore {
         let before = balanceOf(b);
         let signed = l.type == 'in' ? l.amount : -l.amount;   // +amount for 'in', -amount for 'out'
         return l.accountId == accountId && l.type in ['in', 'out'] &&
-          l.amount is number && l.amount >= 0.01 &&
+          l.amount is number && l.amount >= 0.01 && isCents(l.amount) && isCents(a.currentBalance) &&
           near(l.get('balanceBefore', null), before) &&
           near(l.get('balanceAfter', null), a.currentBalance) &&
           near(a.currentBalance - before, signed) &&
@@ -746,15 +839,25 @@ service cloud.firestore {
       function mirrorOk(parent, plid, l) {
         return parent == null || (
           parent.data.get('lastLedgerId', '') == plid && !exists(ledgerPath(plid)) &&
-          getAfter(ledgerPath(plid)).data.type == l.type && near(getAfter(ledgerPath(plid)).data.amount, l.amount)
+          mirrorLineOk(getAfter(ledgerPath(plid)).data, l)
         );
+      }
+      // The bank's line mirrors THIS movement: same direction, amount and operation (the domain's
+      // parentLedger is a copy of the channel's line). A mirror naming another operation would
+      // let one bank movement also be the line of a second payment / custody issue / return.
+      function mirrorLineOk(pl, l) {
+        return pl.type == l.type && near(pl.amount, l.amount) &&
+          pl.get('referenceType', '') == l.get('referenceType', '') &&
+          pl.get('referenceId', '') == l.get('referenceId', '');
       }
 
       // detachLegacyWallet: the owner-confirmed correction booked on the bank, in the same
-      // transaction that unlinks the wallet (which only an org admin may do, see linkOk).
+      // transaction that unlinks the wallet (which only an org admin may do, see linkOk). Only a
+      // legacy WALLET: finance may unlink an InstaPay too, which must not open an overdraft.
       function detachCorrection(l) {
         return l.get('referenceType', '') == 'manual_adjustment' &&
           l.get('referenceId', '') is string && l.get('referenceId', '') != '' && l.referenceId != accountId &&
+          get(accountPath(l.referenceId)).data.get('type', '') == 'wallet' &&
           get(accountPath(l.referenceId)).data.get('parentAccountId', '') == accountId &&
           getAfter(accountPath(l.referenceId)).data.get('parentAccountId', '') == '';
       }
@@ -764,6 +867,7 @@ service cloud.firestore {
             'active', 'updatedAt', 'parentAccountId', 'parentAccountName']) &&
           // The currency of an account with history is fixed (a missing one reads as EGP).
           (!keys.hasAny(['currency']) || a.get('currency', 'EGP') == b.get('currency', 'EGP') || hasNoHistory()) &&
+          (!keys.hasAny(['accountIdentifier']) || keyLeftWithRecord('account_identifier', 'accountIdentifier', accountId)) &&
           linkOk(b, a, keys) &&
           hasOrgRole(b.orgId, ['finance', 'org_admin']);
       }
@@ -884,6 +988,7 @@ service cloud.firestore {
         return keys.hasOnly(['remainingAmount', 'settledAmount', 'status', 'settledAt', 'updatedAt', 'lastSettlementId']) &&
           sid is string && sid != '' && d > 0 &&
           a.get('remainingAmount', null) is number && a.remainingAmount >= 0 &&
+          isCents(a.remainingAmount) && isCents(num(a, 'settledAmount')) &&
           num(b, 'remainingAmount') - a.remainingAmount > 0 &&
           a.get('status', null) == (a.remainingAmount == 0 ? 'settled' : b.get('status', null)) &&
           !exists(/databases/$(database)/documents/custodySettlements/$(sid)) &&
@@ -892,7 +997,7 @@ service cloud.firestore {
       }
       function settlementOk(s, d, r) {
         return s != null && s.data.get('custodyId', '') == custodyId &&
-          s.data.get('amount', null) is number && s.data.amount >= 0.01 &&
+          s.data.get('amount', null) is number && s.data.amount >= 0.01 && isCents(s.data.amount) &&
           near(s.data.amount, d) && near(s.data.amount, r);
       }
 
@@ -1045,27 +1150,6 @@ service cloud.firestore {
           : scope == 'department_name' ? 'departments'
           : 'members';
       }
-      // normalizeKeyValue (src/domain/common.ts), character for character: only A-Z are
-      // lower-cased (lower() is not used: whether it maps non-ASCII capitals, and how, need not
-      // match JavaScript's toLowerCase), and exactly JavaScript's \s (listed: RE2's \s is ASCII
-      // only, \p{Z} differs from it) plus '-', '_', '.' are dropped. Keep KEY_IGNORED identical.
-      function asciiLower(v) {
-        return v.replace('A', 'a').replace('B', 'b').replace('C', 'c').replace('D', 'd').replace('E', 'e')
-          .replace('F', 'f').replace('G', 'g').replace('H', 'h').replace('I', 'i').replace('J', 'j')
-          .replace('K', 'k').replace('L', 'l').replace('M', 'm').replace('N', 'n').replace('O', 'o')
-          .replace('P', 'p').replace('Q', 'q').replace('R', 'r').replace('S', 's').replace('T', 't')
-          .replace('U', 'u').replace('V', 'v').replace('W', 'w').replace('X', 'x').replace('Y', 'y')
-          .replace('Z', 'z');
-      }
-      function keyNorm(v) {
-        return v is string
-          ? asciiLower(v).replace('[\\t\\n\\x{000B}\\f\\r \\x{00A0}\\x{1680}\\x{2000}-\\x{200A}\\x{2028}\\x{2029}\\x{202F}\\x{205F}\\x{3000}\\x{FEFF}\\-_.]+', '')
-          : '';
-      }
-      // encodeKeyPart (src/utils/ids.ts): base64url of the UTF-8 bytes, without padding.
-      function keyPart(v) {
-        return v.toUtf8().toBase64().replace('\\+', '-').replace('/', '_').replace('=+$', '');
-      }
       // A key is claimed for the record it names (domain: claimUniqueKey always writes the
       // record in the same transaction): its id is <scope>__<company>__<encoded value>, and
       // that record, after the commit, is of the key's company and holds that value. So a
@@ -1082,8 +1166,14 @@ service cloud.firestore {
           k.entityId != '' &&
           recordHoldsKey(getAfter(/databases/$(database)/documents/$(keyCollection(scope))/$(k.entityId)), keyField(scope), k);
       }
+      // (keyNormV1: a key claimed by an app version before 2026-10, still open in a tab.)
       function recordHoldsKey(after, f, k) {
-        return after != null && after.data.get('orgId', '') == k.orgId && keyNorm(after.data.get(f, '')) == k.value;
+        return after != null && after.data.get('orgId', '') == k.orgId && (
+          keyNorm(after.data.get(f, ''), k.get('scope', '')) == k.value || keyNormV1(after.data.get(f, '')) == k.value);
+      }
+      // The current normalization only (a take-over claims a current-format value).
+      function recordHoldsKeyNow(d, f, k) {
+        return d != null && d.data.get('orgId', '') == k.orgId && keyNorm(d.data.get(f, ''), k.get('scope', '')) == k.value;
       }
       // A record changes the value its key holds (account number, provider name, service
       // code, department name, member email): the old key is released in the same
@@ -1103,7 +1193,23 @@ service cloud.firestore {
       function valueLeftRecord(before, after, f, k) {
         return before != null && after != null &&
           before.data.get(f, null) != after.data.get(f, null) &&
-          (keyNorm(after.data.get(f, '')) != k.get('value', '') || after.data.get('orgId', '') != k.orgId);
+          (keyNorm(after.data.get(f, ''), k.get('scope', '')) != k.get('value', '') || after.data.get('orgId', '') != k.orgId);
+      }
+      // A key whose record no longer holds its value (released in this very commit, or left
+      // stale: a record deleted or renamed without it by an older app version) is taken over by
+      // the record that claims the value now (domain: readUniqueKey treats it as free and
+      // claimUniqueKey overwrites it). The current record holds it before AND after: never.
+      function takenOver() {
+        let k = resource.data;
+        let scope = k.get('scope', '');
+        return request.resource.data.get('scope', '') == scope &&
+          k.get('entityCollection', '') == keyCollection(scope) &&
+          k.get('entityId', '') is string && k.get('entityId', '') != '' &&
+          (k.entityId == request.resource.data.entityId
+            // the record takes its own key back (it holds the value after: claimedByRecord): only one it did not hold
+            ? !recordHoldsKeyNow(get(/databases/$(database)/documents/$(keyCollection(scope))/$(k.entityId)), keyField(scope), k)
+            // another record: the one named now no longer holds the value after this commit
+            : !recordHoldsKeyNow(getAfter(/databases/$(database)/documents/$(keyCollection(scope))/$(k.entityId)), keyField(scope), k));
       }
 
       // A key names a record of its company (e.g. a member's email and id). Readable by that
@@ -1117,7 +1223,10 @@ service cloud.firestore {
           claimedByRecord() && inKeyCompany()) ||
         isSuperAdmin()
       );
-      allow update: if false;
+      allow update: if isAuthenticated() && request.resource.data.entityId is string &&
+        request.resource.data.orgId != '-' && request.resource.data.orgId == keyOrgId() &&
+        request.resource.data.orgId == resource.data.get('orgId', '-') &&
+        claimedByRecord() && takenOver() && inKeyCompany();
       allow delete: if isAuthenticated() && (
         releasedByChange() ||
         (
@@ -1314,7 +1423,9 @@ service cloud.firestore {
           getAfter(restoredRecordPath()) != null &&
           getAfter(restoredRecordPath()).data.get('orgId', '') == m.orgId;
       }
-      allow get: if isAuthenticated();
+      // A marker tells which record of which company was restored, by whom: its company only
+      // (a missing marker reads as missing for everyone: restoreRecord checks it first).
+      allow get: if isAuthenticated() && (isMissing() || isOrgMember(resource.data.get('orgId', '')));
       allow create: if isAuthenticated() && request.resource.data.restoredBy == request.auth.uid &&
         (isSuperAdmin() || (request.resource.data.get('orgId', '') is string && request.resource.data.get('orgId', '') != '' &&
           marksRestoreInCommit() && isOrgMember(request.resource.data.orgId)));

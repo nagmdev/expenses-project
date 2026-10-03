@@ -11,6 +11,7 @@ import {
   claimUniqueKey,
   isKeyTakenByOther,
   legacyUniqueKeyDocId,
+  uniqueKeyDocIdV1,
   normalizeEmail,
   normalizeKeyValue,
   readUniqueKey,
@@ -402,7 +403,7 @@ export async function updateEntity<T extends { id: string; orgId: string; name?:
     const newValue = spec.keyOf(after);
     // Compared as keys (normalizeKeyValue, as the rules do): toLowerCase would also fold
     // non-ASCII capitals, which the key keeps.
-    const changedKey = normalizeKeyValue(newValue) !== normalizeKeyValue(oldValue);
+    const changedKey = normalizeKeyValue(newValue, spec.scope) !== normalizeKeyValue(oldValue, spec.scope);
     let oldKey = changedKey ? await readKeyIfAny(tx, spec.scope, current.orgId, oldValue) : null;
     let newKey = changedKey ? await readKeyIfAny(tx, spec.scope, current.orgId, newValue) : null;
     if (newKey && isKeyTakenByOther(newKey, id)) throw new DomainError('duplicate', spec.duplicateMessage(newValue));
@@ -561,12 +562,36 @@ export async function ensureOrgNotificationRecipients(
 }
 
 /**
- * users/{uid} profiles that carry this membership's access: in the membership's org
- * and linked to it (memberId) or to no membership in particular (admin-provisioned).
- * A profile whose primary org is elsewhere is left alone.
+ * A membership is addressed to the account `uid`: by its UID, or (an email invitation that was
+ * never re-pointed to a login) by the address that account proved (verifiedEmail) or was given
+ * (email: only ever its own verified address or what its company's admin wrote, see rules).
  */
-const profileCarriesMembership = (profile: Record<string, any> | null, mem: Pick<OrganizationMember, 'id' | 'orgId'>) =>
-  Boolean(profile && profile.orgId === mem.orgId && (!profile.memberId || profile.memberId === mem.id));
+const membershipAddressedTo = (mem: Pick<OrganizationMember, 'userId' | 'userEmail'>, uid: string, profile: Record<string, any>) =>
+  mem.userId === uid ||
+  (!isRealUid(mem.userId) && Boolean(normalizeEmail(mem.userEmail)) &&
+    [profile.verifiedEmail, profile.email].some(e => normalizeEmail(e) === normalizeEmail(mem.userEmail)));
+
+/**
+ * Whether the users/{uid} profile carries this membership's access: in the membership's org,
+ * linked to it (memberId) or to no membership in particular (admin-provisioned), and the
+ * membership is that person's. A profile's memberId alone is the profile's own claim: it never
+ * pulls someone else's role onto it. Conversely the person's own membership (mem.userId) is
+ * carried by their profile unless the profile names another live record of theirs in the
+ * same company (a legacy duplicate): naming someone else's record never shields it from a
+ * suspension, a role change or the removal. A profile whose primary org is elsewhere is left alone.
+ */
+async function profileCarriesMembership(
+  tx: TxContext,
+  uid: string,
+  profile: Record<string, any> | null,
+  mem: Pick<OrganizationMember, 'id' | 'orgId' | 'userId' | 'userEmail'>,
+): Promise<boolean> {
+  if (!profile || profile.orgId !== mem.orgId) return false;
+  if (!profile.memberId || profile.memberId === mem.id) return membershipAddressedTo(mem, uid, profile);
+  if (uid !== mem.userId) return false;
+  const linked = await tx.get<OrganizationMember>(COL.members, String(profile.memberId));
+  return !(linked && linked.orgId === mem.orgId && membershipAddressedTo(linked, uid, profile));
+}
 
 // ---------------------------------------------------------------------------
 // Protected memberships. An org admin can never delete, suspend or change the role of
@@ -653,6 +678,38 @@ export function assertMemberUpdatable(actor: Actor, mem: MemberIdentity, changes
   if (changes.userName !== undefined && !String(changes.userName).trim()) {
     throw new DomainError('invalid_input', 'يرجى إدخال اسم الموظف؛ لا يمكن حفظ الاسم فارغاً.');
   }
+}
+
+/**
+ * The email invitation (members/pending-<email>_<org>) that holds `email`'s key in this company,
+ * when `userId` is a real login for that address (addMemberToOrgs: the platform owner / admin
+ * found it PROVEN by verifiedLoginUidOf, or just created it). Adding that login to the company
+ * replaces the invitation by the login's own membership (<uid>_<org>) in the same transaction: an
+ * invitation grants only through the invitee's profile, which a person who already works in
+ * another company keeps there, so the invitation alone would never open this company for them.
+ */
+async function invitationReplacedBy(
+  tx: TxContext,
+  key: UniqueKeyRead | null,
+  email: string,
+  userId: string,
+  orgId: string,
+): Promise<OrganizationMember | null> {
+  if (!key?.owner || !email || !isRealUid(userId) || key.owner.collection !== COL.members) return null;
+  if (key.owner.id !== `${pendingUserIdForEmail(email)}_${orgId}`) return null;
+  const invitation = await tx.get<OrganizationMember>(COL.members, key.owner.id);
+  if (!invitation || invitation.orgId !== orgId || normalizeEmail(invitation.userEmail) !== email) return null;
+  // Already taken by another login (its profile linked it): not this one's to replace.
+  if (isRealUid(invitation.userId) && invitation.userId !== userId) return null;
+  return invitation;
+}
+
+/** Write phase of invitationReplacedBy: the invitation goes, its key now names `memberId`. */
+function replaceInvitation(tx: TxContext, invitation: OrganizationMember, key: UniqueKeyRead, memberId: string, nowIso: string) {
+  tx.delete(COL.members, invitation.id);
+  // A key written before 2026-10 sits under its old id: removed, and claimed under the current one.
+  if (key.legacyDocId) releaseUniqueKey(tx, key, invitation.id);
+  claimUniqueKey(tx, key, { collection: COL.members, id: memberId }, nowIso);
 }
 
 const requireMemberName = (name?: string | null) => {
@@ -914,9 +971,13 @@ export async function updateMemberRecord(
 
     const realUids = Array.from(new Set(linkedUserIds.filter(isRealUid)));
     const syncUids: string[] = [];
+    // Suspending: a profile that merely names this record (not the person's: nothing is synced
+    // onto it) is suspended too, so naming a record never keeps what it grants.
+    const suspendUids: string[] = [];
     for (const uid of realUids) {
-      const profile = await tx.get(COL.users, uid);
-      if (profile ? profileCarriesMembership(profile, mem) : uid === mem.userId) syncUids.push(uid);
+      const profile = await tx.get<Record<string, any>>(COL.users, uid);
+      if (profile ? await profileCarriesMembership(tx, uid, profile, mem) : uid === mem.userId) syncUids.push(uid);
+      else if (after.active === false && uid !== actor.id && profile && profile.orgId === mem.orgId && profile.memberId === memberId) suspendUids.push(uid);
     }
     // A placeholder member (invited by email) is re-pointed at the real account — not on a
     // membership this actor may not re-assign (their own / the platform owner's, see rules).
@@ -951,6 +1012,7 @@ export async function updateMemberRecord(
         { merge: true },
       );
     }
+    for (const uid of suspendUids) tx.update(COL.users, uid, { active: false, updatedAt: nowIso });
 
     const roleChanged = clean.role !== undefined && clean.role !== mem.role;
     const statusChanged = clean.active !== undefined && clean.active !== mem.active;
@@ -1003,7 +1065,8 @@ export async function removeMember(
     const detachUids: string[] = [];
     for (const uid of new Set(linkedUserIds.filter(isRealUid))) {
       const profile = await tx.get<Record<string, any>>(COL.users, uid);
-      if (profileCarriesMembership(profile, mem)) {
+      // Revoking: also a profile that merely names this record (memberId), whoever's it is.
+      if ((await profileCarriesMembership(tx, uid, profile, mem)) || (profile && profile.orgId === mem.orgId && profile.memberId === memberId)) {
         detachUids.push(uid);
       } else if (
         profile && profile.orgId === mem.orgId && profile.memberId && profile.memberId !== memberId &&
@@ -1180,6 +1243,8 @@ const inOrderOf = <T extends { orgId: string }>(targets: string[], list: T[]) =>
  * key completes the companies an interrupted run did not reach.
  */
 export const ORGS_PER_TRANSACTION = 15;
+/** Invitations a multi-company add replaces per transaction (createMemberInOrgs → invitationReplacedBy). */
+export const INVITATIONS_PER_TRANSACTION = 5;
 
 interface OrgChunkResult<T> {
   created: T[];
@@ -1244,11 +1309,16 @@ export async function createMemberInOrgs(
   const nowIso = now.toISOString();
   type Stored = OrganizationMember & { operationKey?: string };
 
-  const runChunk = (chunk: string[]) => store.runTransaction(async (tx): Promise<OrgChunkResult<Stored>> => {
+  // `replacing`: this transaction replaces invitations (and nothing else). Otherwise companies whose
+  // invitation the login replaces are deferred to transactions of their own: each replacement
+  // reads the invitation on top of the caller's membership (rules), INVITATIONS_PER_TRANSACTION
+  // of them stay within the per-commit read budget.
+  const runChunk = (chunk: string[], replacing: boolean) => store.runTransaction(async (tx): Promise<OrgChunkResult<Stored> & { deferred: string[] }> => {
     // Read phase for every company (a transaction allows no read after its first write).
     const replayed: Stored[] = [];
     const skipped: MultiOrgSkip[] = [];
-    const toCreate: Array<{ org: Organization; member: Stored & { operationKey: string }; key: UniqueKeyRead | null }> = [];
+    const deferred: string[] = [];
+    const toCreate: Array<{ org: Organization; member: Stored & { operationKey: string }; key: UniqueKeyRead | null; invitation: OrganizationMember | null }> = [];
     for (const orgId of chunk) {
       const org = await readTargetOrg(tx, orgId);
       const id = `${userId}_${orgId}`;
@@ -1259,7 +1329,12 @@ export async function createMemberInOrgs(
         continue;
       }
       const key = email ? await readUniqueKey(tx, 'member_email', orgId, email) : null;
-      if (key?.owner && isKeyTakenByOther(key, id)) {
+      const invitation = await invitationReplacedBy(tx, key, email, userId, orgId);
+      if (invitation && !replacing) {
+        deferred.push(orgId);
+        continue;
+      }
+      if (key?.owner && isKeyTakenByOther(key, id) && !invitation) {
         const holder = key.owner.collection === COL.members ? await tx.get<Stored>(COL.members, key.owner.id) : null;
         // Created by this very operation under another id (the real UID became known between attempts).
         if (holder && holder.operationKey === operationKey) replayed.push(holder);
@@ -1269,19 +1344,26 @@ export async function createMemberInOrgs(
       toCreate.push({
         org,
         key,
+        invitation,
         member: { ...input, id, orgId, userId, userEmail: email, joinedAt: localDate(now), active: input.active !== false, operationKey },
       });
     }
 
-    if (toCreate.length === 0) return { created: [], replayed, skipped };
+    if (toCreate.length === 0) return { created: [], replayed, skipped, deferred };
 
     const recipientUpdates = toCreate
-      .map(({ org, member }) => recipientUpdateFor(member.orgId, org, [], isNotificationRecipient(member) ? [member.userEmail] : []))
+      .map(({ org, member, invitation }) => recipientUpdateFor(
+        member.orgId,
+        org,
+        invitation && isNotificationRecipient(invitation) ? [normalizeEmail(invitation.userEmail)] : [],
+        isNotificationRecipient(member) ? [member.userEmail] : [],
+      ))
       .filter((u): u is NonNullable<typeof u> => u !== null);
 
-    for (const { member, key } of toCreate) {
+    for (const { member, key, invitation } of toCreate) {
       tx.set(COL.members, member.id, member);
-      if (key) claimUniqueKey(tx, key, { collection: COL.members, id: member.id }, nowIso);
+      if (key && invitation) replaceInvitation(tx, invitation, key, member.id, nowIso);
+      else if (key) claimUniqueKey(tx, key, { collection: COL.members, id: member.id }, nowIso);
     }
     writeRecipientUpdates(tx, recipientUpdates, nowIso);
     for (const { org, member } of toCreate) {
@@ -1301,10 +1383,20 @@ export async function createMemberInOrgs(
         nowIso,
       );
     }
-    return { created: toCreate.map(c => c.member), replayed, skipped };
+    return { created: toCreate.map(c => c.member), replayed, skipped, deferred };
   });
+  const runWithReplacements = async (chunk: string[]): Promise<OrgChunkResult<Stored>> => {
+    const { deferred, ...first } = await runChunk(chunk, false);
+    for (let i = 0; i < deferred.length; i += INVITATIONS_PER_TRANSACTION) {
+      const part = await runChunk(deferred.slice(i, i + INVITATIONS_PER_TRANSACTION), true);
+      first.created.push(...part.created);
+      first.replayed.push(...part.replayed);
+      first.skipped.push(...part.skipped);
+    }
+    return first;
+  };
 
-  return runInOrgChunks(store, targets, runChunk, skipped => {
+  return runInOrgChunks(store, targets, runWithReplacements, skipped => {
     const name = skipped[0]?.existingName;
     return new DomainError(
       'duplicate',
@@ -1450,16 +1542,20 @@ export async function migrateLegacyUniqueKeys(
 ): Promise<UniqueKeyMigration> {
   assertRole(actor, ['super_admin'], 'ترحيل مفاتيح منع التكرار متاح للمشرف العام للمنصة فقط.');
   const nowIso = now.toISOString();
-  // One entry per old-format key, with every record that holds its value.
-  const groups = new Map<string, { legacyId: string; currentId: string; owners: UniqueKeyOwner[] }>();
+  // One entry per old key, with every record that holds its value: the old id format, and the
+  // current format under the value app versions before 2026-10 computed (normalizeKeyValueV1:
+  // ahmed.ali@ / ahmedali@ shared one key, tatweel / Arabic digits counted).
+  const groups = new Map<string, { legacyId: string; owners: UniqueKeyOwner[] }>();
   for (const o of owners) {
-    const legacyId = legacyUniqueKeyDocId(o.scope, o.orgId, o.value);
     const currentId = uniqueKeyDocId(o.scope, o.orgId, o.value);
-    if (legacyId === currentId) continue;
-    const group = groups.get(legacyId) || { legacyId, currentId, owners: [] };
-    group.owners.push(o);
-    groups.set(legacyId, group);
+    for (const legacyId of new Set([legacyUniqueKeyDocId(o.scope, o.orgId, o.value), uniqueKeyDocIdV1(o.scope, o.orgId, o.value)])) {
+      if (legacyId === currentId) continue;
+      const group = groups.get(legacyId) || { legacyId, owners: [] };
+      group.owners.push(o);
+      groups.set(legacyId, group);
+    }
   }
+  const currentIdOf = (o: UniqueKeyOwner) => uniqueKeyDocId(o.scope, o.orgId, o.value);
   const work = [...groups.values()];
 
   const total: UniqueKeyMigration = { moved: 0, replaced: 0, skipped: 0 };
@@ -1472,15 +1568,21 @@ export async function migrateLegacyUniqueKeys(
       // is read only where an old key exists: with nothing left to move, the transaction holds
       // no document another user's save is waiting for.
       const legacyKeys = await Promise.all(chunk.map(g => tx.get<KeyDoc>(COL.uniqueKeys, g.legacyId)));
+      // The record the old key names, and the key it should have now (records that shared an
+      // old key may have different current ones).
+      const ownersOf = chunk.map((g, n) => g.owners.find(o => o.id === legacyKeys[n]?.entityId));
       const currentKeys = await Promise.all(
-        chunk.map((g, n) => (legacyKeys[n] ? tx.get<KeyDoc>(COL.uniqueKeys, g.currentId) : Promise.resolve(null))),
+        chunk.map((g, n) => {
+          const owner = ownersOf[n];
+          return legacyKeys[n] && owner ? tx.get<KeyDoc>(COL.uniqueKeys, currentIdOf(owner)) : Promise.resolve(null);
+        }),
       );
       const counts: UniqueKeyMigration = { moved: 0, replaced: 0, skipped: 0 };
       chunk.forEach((g, n) => {
         const legacy = legacyKeys[n];
         const current = currentKeys[n];
         if (!legacy) return;
-        const owner = g.owners.find(o => o.id === legacy.entityId);
+        const owner = ownersOf[n];
         if (!owner || (current && current.entityId !== owner.id)) {
           counts.skipped += 1;
           return;
@@ -1490,10 +1592,10 @@ export async function migrateLegacyUniqueKeys(
           counts.replaced += 1;
           return;
         }
-        tx.set(COL.uniqueKeys, g.currentId, {
+        tx.set(COL.uniqueKeys, currentIdOf(owner), {
           scope: owner.scope,
           orgId: owner.orgId,
-          value: normalizeKeyValue(owner.value),
+          value: normalizeKeyValue(owner.value, owner.scope),
           entityCollection: legacy.entityCollection || owner.collection,
           entityId: owner.id,
           createdAt: legacy.createdAt || nowIso,

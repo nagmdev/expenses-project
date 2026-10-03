@@ -31,7 +31,7 @@ import {
   formatAmount,
 } from './common';
 import { buildOutboxEvent, enqueueOutbox, outboxEventId } from './outbox';
-import type { DataStore } from './store';
+import type { DataStore, TxContext } from './store';
 import { applyMovement, readAccountWithParent } from './treasury';
 import { isSupportedCurrency, normalizeCurrency } from './analytics';
 
@@ -465,6 +465,16 @@ export interface DisburseInput extends Omit<DisbursementDetails, 'disbursedAt' |
   batchId?: string;
 }
 
+/** A service read that the rules refuse (not shared with this company any more) reads as absent. */
+async function readRequestService(tx: TxContext, serviceId: string): Promise<ServiceCategory | null> {
+  try {
+    return await tx.get<ServiceCategory>(COL.services, serviceId);
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === 'permission-denied') return null;
+    throw err;
+  }
+}
+
 export async function disburseExpenseRequest(
   store: DataStore,
   actor: Actor,
@@ -507,7 +517,12 @@ export async function disburseExpenseRequest(
       throw new DomainError('currency_mismatch', `تعارض في العملات: عملة الطلب (${reqCurrency}) لا تطابق عملة الحساب (${accCurrency}).`);
     }
 
-    const service = req.serviceCategoryId ? await tx.get<ServiceCategory>(COL.services, req.serviceCategoryId) : null;
+    // The request's service may no longer be readable here: e.g. the owner stopped sharing it
+    // with the request's company after the request was filed. The payment does not depend on
+    // it: its budget counter is then left alone (the rules let only a company the service
+    // names raise it, firestore.rules → services, paidByRequestDoc).
+    const service = req.serviceCategoryId ? await readRequestService(tx, req.serviceCategoryId) : null;
+    const countsService = Boolean(service && (service.orgId === req.orgId || (Array.isArray(service.orgIds) && service.orgIds.includes(req.orgId))));
     const provider = req.providerId ? await tx.get<ServiceProvider>(COL.providers, req.providerId) : null;
 
     // ---------- compute ----------
@@ -562,7 +577,7 @@ export async function disburseExpenseRequest(
     const patch = { status: 'disbursed' as const, disbursement, timeline, updatedAt: nowIso };
     tx.update(COL.requests, requestId, patch);
     movement.write(tx);
-    if (service && !isIncome) {
+    if (service && countsService && !isIncome) {
       // lastDisbursedRequestId: the payment that justifies the increment (firestore.rules → services)
       tx.update(COL.services, service.id, { spentAmount: toMoney(Number(service.spentAmount || 0) + amount), updatedAt: nowIso, lastDisbursedRequestId: requestId });
     }

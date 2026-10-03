@@ -125,6 +125,7 @@ import {
   updateOrganization as updateOrganizationOp,
   uniqueKeyOwnersOf,
   verifiedLoginUidOf,
+  pendingUserIdForEmail,
   type UniqueKeyMigration,
 } from '../domain/directory';
 import {
@@ -2154,11 +2155,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const email = normalizeEmail(memberData.userEmail);
     const key = opts?.idempotencyKey;
     const knownUid = isRealUid(memberData.userId) ? '' : await knownUidForEmail(email);
+    const loginUid = isRealUid(memberData.userId) ? memberData.userId : knownUid;
     const opKey = key || newOperationKey();
+    // An email invitation of that login's address is not "taken": adding the login replaces it
+    // (directory.ts → invitationReplacedBy), the only way it opens for a person who already
+    // works in another company.
+    const replaceableInvitation = (m: OrganizationMember) =>
+      Boolean(loginUid) && m.id === `${pendingUserIdForEmail(email)}_${m.orgId}` && (!isRealUid(m.userId) || m.userId === loginUid);
     return runMultiOrgAdd<OrganizationMember & { operationKey?: string }>({
       targets,
       reason: 'already_member',
-      holderIn: orgId => (email ? rawMembers.find(m => m.orgId === orgId && normalizeEmail(m.userEmail) === email) : undefined),
+      holderIn: orgId => {
+        const holder = email ? rawMembers.find(m => m.orgId === orgId && normalizeEmail(m.userEmail) === email) : undefined;
+        return holder && replaceableInvitation(holder) ? undefined : holder;
+      },
       isThisOperation: holder => Boolean(key && holder.operationKey === key),
       holderName: holder => holder.userName,
       singleTakenMessage: name => `البريد الإلكتروني (${email}) مسجل بالفعل في هذه المؤسسة باسم "${name}".`,
@@ -2427,8 +2437,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // PAYMENT ACCOUNTS / VAULTS ("cards")
   // =========================================================================
   const addPaymentAccount = async (accountData: Omit<PaymentAccount, 'id' | 'createdAt'>, opts?: MutationOptions) => {
-    const identifier = normalizeKeyValue(accountData.accountIdentifier);
-    const dup = rawPaymentAccounts.find(a => a.orgId === accountData.orgId && identifier && normalizeKeyValue(a.accountIdentifier) === identifier);
+    const identifier = normalizeKeyValue(accountData.accountIdentifier, 'account_identifier');
+    const dup = rawPaymentAccounts.find(a => a.orgId === accountData.orgId && identifier && normalizeKeyValue(a.accountIdentifier, 'account_identifier') === identifier);
     if (dup && !isSameOperation(dup, 'vault', opts?.idempotencyKey)) throw new Error(`يوجد حساب مسجل بالفعل بنفس الرقم / المعرف ("${dup.name}").`);
     const opKey = opts?.idempotencyKey || newOperationKey();
     await mutate('addPaymentAccount', opts?.idempotencyKey || fingerprint(accountData.orgId, identifier), store =>
