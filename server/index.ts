@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 4000;
 const dbPath = process.env.DB_PATH || path.resolve(__dirname, '../database.sqlite');
 
-if (process.env.NODE_ENV === 'production' && process.env.ALLOW_PROD_STANDALONE_SERVER !== 'true') {
+if (process.env.NODE_ENV === 'production') {
   console.error('[SECURITY CRITICAL] Standalone Express/SQLite API is strictly prohibited in production. Cloud Firestore is the sole production source of truth.');
   process.exit(1);
 }

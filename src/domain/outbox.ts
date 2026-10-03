@@ -118,8 +118,8 @@ export function buildOutboxEvent(input: BuildOutboxInput): OutboxEvent | null {
     message: { subject, html, text, snippet },
     meta: {
       senderName: s.senderName || 'نظام مصروفي',
-      senderEmail: s.senderEmail || 'awadhsaudi2030@gmail.com',
-      replyTo: s.replyToEmail || s.senderEmail || 'awadhsaudi2030@gmail.com',
+      senderEmail: s.senderEmail || 'no-reply@expenses.app',
+      replyTo: s.replyToEmail || s.senderEmail || 'no-reply@expenses.app',
       provider: s.directProvider || 'auto',
       webhookUrl: s.deliveryMethod === 'webhook' ? s.webhookUrl : undefined,
       requestNumber: req?.requestNumber,

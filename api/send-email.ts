@@ -21,6 +21,28 @@ function rememberDelivery(key: string | undefined, body: any) {
   recentDeliveries.set(key, { at: now, body });
 }
 
+// In-memory sliding window rate limiter per client IP
+const rateLimits = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const MAX_REQUESTS_PER_WINDOW = 60;
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  for (const [k, v] of rateLimits) {
+    if (now > v.resetAt) rateLimits.delete(k);
+  }
+  const current = rateLimits.get(ip);
+  if (!current || now > current.resetAt) {
+    rateLimits.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return true;
+  }
+  if (current.count >= MAX_REQUESTS_PER_WINDOW) {
+    return false;
+  }
+  current.count++;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Authorization. This endpoint is NOT a generic mailer: it delivers one recipient of
 // an outbox/{eventId} notification. The event is read from Firestore with the
@@ -144,6 +166,11 @@ export default async function handler(req: any, res: any) {
     return res.status(405).json({ error: 'Method not allowed. Only POST is accepted.' });
   }
 
+  const clientIp = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').toString().split(',')[0].trim();
+  if (!checkRateLimit(clientIp)) {
+    return res.status(429).json({ success: false, error: 'rate_limit_exceeded', message: 'Too many requests. Please try again later.' });
+  }
+
   try {
     const parsedBody = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
     const idToken = bearerToken(req.headers.authorization);
@@ -182,8 +209,9 @@ export default async function handler(req: any, res: any) {
     const subject: string = rawSubject.replace(/[\r\n]+/g, ' ').trim();
     const html: string = message.html;
     const text: string = message.text || '';
+    const defaultSender = process.env.EMAIL_FROM || process.env.SENDER_EMAIL || 'no-reply@expenses.app';
     const senderName: string = (meta.senderName || 'مصروفي').replace(/[\r\n]+/g, ' ').trim();
-    const senderEmail: string = (meta.senderEmail || 'awadhsaudi2030@gmail.com').replace(/[\r\n]+/g, '').trim();
+    const senderEmail: string = (meta.senderEmail || defaultSender).replace(/[\r\n]+/g, '').trim();
     const replyTo: string = (meta.replyTo || senderEmail).replace(/[\r\n]+/g, '').trim();
     const provider: string = meta.provider || 'auto';
     if (!subject || !html) {
@@ -221,8 +249,10 @@ export default async function handler(req: any, res: any) {
       else targetProvider = 'gmail';
     }
 
+    const defaultFallbackSender = process.env.EMAIL_FROM || process.env.SENDER_EMAIL || 'no-reply@expenses.app';
+
     // -------------------------------------------------------------
-    // Provider 0: Official Gmail SMTP (Direct from awadhsaudi2030@gmail.com)
+    // Provider 0: Official Gmail SMTP
     // -------------------------------------------------------------
     if (targetProvider === 'gmail') {
       const passToUse = activeGmailAppPass;
@@ -238,7 +268,7 @@ export default async function handler(req: any, res: any) {
 
       try {
         const nodemailer = await import('nodemailer');
-        const effectiveSender = senderEmail || 'awadhsaudi2030@gmail.com';
+        const effectiveSender = senderEmail || defaultFallbackSender;
         const cleanPassword = String(passToUse).replace(/\s+/g, '');
 
         const transporter = nodemailer.createTransport({
@@ -297,8 +327,8 @@ export default async function handler(req: any, res: any) {
         });
       }
 
-      // Resend: Show official identity awadhsaudi2030@gmail.com and route replies directly to it
-      const effectiveSender = senderEmail || 'awadhsaudi2030@gmail.com';
+      // Resend: Show official identity and route replies directly to it
+      const effectiveSender = senderEmail || defaultFallbackSender;
       const effectiveReplyTo = replyTo || effectiveSender;
       const fromAddress = `${senderName} (${effectiveSender}) <onboarding@resend.dev>`;
 
@@ -361,7 +391,7 @@ export default async function handler(req: any, res: any) {
         });
       }
 
-      const effectiveSender = senderEmail || 'awadhsaudi2030@gmail.com';
+      const effectiveSender = senderEmail || defaultFallbackSender;
       const effectiveReplyTo = replyTo || effectiveSender;
 
       const brevoRes = await fetchWithTimeout('https://api.brevo.com/v3/smtp/email', {

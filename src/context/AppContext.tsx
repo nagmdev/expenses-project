@@ -1821,9 +1821,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         const filters = [where('status', 'in', ['pending', 'failed', 'sending'])];
         if (scopeOrg) filters.push(where('orgId', '==', scopeOrg));
-        const snap = await getDocs(query(collection(db, 'outbox'), ...filters, limit(20)));
+        const snap = await getDocs(query(collection(db, 'outbox'), ...filters, limit(50)));
         const now = new Date();
-        const due = snap.docs.map(d => ({ ...d.data(), id: d.id } as OutboxEvent)).filter(ev => isDue(ev, now));
+        const due = snap.docs
+          .map(d => ({ ...d.data(), id: d.id } as OutboxEvent))
+          .filter(ev => isDue(ev, now))
+          .sort((a, b) => {
+            const timeA = a.nextAttemptAt ? new Date(a.nextAttemptAt).getTime() : 0;
+            const timeB = b.nextAttemptAt ? new Date(b.nextAttemptAt).getTime() : 0;
+            return timeA - timeB;
+          });
         if (due.length === 0) return;
         const { store, transport } = getDispatcher();
         for (const ev of due) {

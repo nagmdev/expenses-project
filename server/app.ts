@@ -91,7 +91,7 @@ export function createApp(db: Database) {
 
   app.use(cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) callback(null, true);
+      if (!origin || allowedOrigins.includes(origin) || /^https:\/\/expenses-project(?:-[a-z0-9-]+)?\.vercel\.app$/.test(origin)) callback(null, true);
       else callback(new Error('Blocked by CORS policy'));
     },
     credentials: true,

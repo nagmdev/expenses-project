@@ -2299,6 +2299,64 @@ describe('legitimate operations (real domain, every role, legacy data)', () => {
       await deleteVisaRequest(store(ADMIN), actor(ADMIN, 'org_admin', ORG), v2.value.id, key());
       expect((await read('visaRequests', v.value.id))!.status).toBe('paid');
     });
+
+    it('prevents direct-write bypass on visa requests (create, update transitions, delete)', async () => {
+      // 1. Create attacks
+      // Cannot create with non-pending status
+      await assertFails(setDoc(doc(db(EMP), 'visaRequests', 'v-atk-1'), { orgId: ORG, status: 'approved', requesterId: EMP.uid, totalAmount: 100, remainingBalance: 100, payments: [] }));
+      // Cannot create with paidAmount > 0
+      await assertFails(setDoc(doc(db(EMP), 'visaRequests', 'v-atk-2'), { orgId: ORG, status: 'pending', requesterId: EMP.uid, totalAmount: 100, paidAmount: 50, remainingBalance: 50, payments: [] }));
+      // Cannot create with totalAmount <= 0
+      await assertFails(setDoc(doc(db(EMP), 'visaRequests', 'v-atk-3'), { orgId: ORG, status: 'pending', requesterId: EMP.uid, totalAmount: 0, remainingBalance: 0, payments: [] }));
+      // Cannot create with remainingBalance != totalAmount
+      await assertFails(setDoc(doc(db(EMP), 'visaRequests', 'v-atk-4'), { orgId: ORG, status: 'pending', requesterId: EMP.uid, totalAmount: 100, remainingBalance: 50, payments: [] }));
+      // Cannot create with non-empty payments
+      await assertFails(setDoc(doc(db(EMP), 'visaRequests', 'v-atk-5'), { orgId: ORG, status: 'pending', requesterId: EMP.uid, totalAmount: 100, remainingBalance: 100, payments: [{ amount: 50 }] }));
+
+      // 2. Direct-write bypass on pending visa
+      await seed(f => setDoc(doc(f, 'visaRequests', 'v-target'), {
+        orgId: ORG, requestNumber: 'V-TGT', status: 'pending', totalAmount: 500, paidAmount: 0, remainingBalance: 500, payments: [], currency: 'EGP', travelerName: 'Target', requesterId: EMP.uid,
+      }));
+      // Finance directly mutating paidAmount or remainingBalance without payment record is refused
+      await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), { paidAmount: 500, remainingBalance: 0, status: 'paid' }));
+      // Finance directly jumping status to 'paid' or 'partially_paid' from pending without payment is refused
+      await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), { status: 'paid' }));
+      // Finance directly mutating core fields during decision is refused
+      await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), { status: 'approved', totalAmount: 1000 }));
+      await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), { status: 'approved', requesterId: FIN.uid }));
+
+      // 3. Legitimate approval
+      await assertSucceeds(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), {
+        status: 'approved', approvedBy: FIN.uid, approvedByName: 'Finance', approvedAt: '2026-10-01T00:00:00Z', rejectionReason: null, updatedAt: '2026-10-01T00:00:00Z',
+      }));
+
+      // 4. Payment attacks on approved visa
+      // Inconsistent remainingBalance on payment is refused
+      await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), {
+        paidAmount: 200, remainingBalance: 400, status: 'partially_paid', updatedAt: '2026-10-01T00:00:00Z',
+        payments: [{ id: 'p1', amount: 200, recordedBy: FIN.uid }],
+      }));
+      // Overpayment is refused
+      await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), {
+        paidAmount: 600, remainingBalance: 0, status: 'paid', updatedAt: '2026-10-01T00:00:00Z',
+        payments: [{ id: 'p1', amount: 600, recordedBy: FIN.uid }],
+      }));
+      // Forging status as paid when remainingBalance > 0 is refused
+      await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), {
+        paidAmount: 200, remainingBalance: 300, status: 'paid', updatedAt: '2026-10-01T00:00:00Z',
+        payments: [{ id: 'p1', amount: 200, recordedBy: FIN.uid }],
+      }));
+
+      // 5. Delete protection
+      // Record a valid partial payment via domain
+      await addVisaPayment(store(FIN), actor(FIN, 'finance', ORG), 'v-target', { amount: 200, method: 'cash' } as any, key());
+      // Rejection after payment is refused
+      await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), { status: 'rejected', rejectionReason: 'cancelled' }));
+      // Org admin delete is locked once paidAmount > 0
+      await assertFails(deleteDoc(doc(db(ADMIN), 'visaRequests', 'v-target')));
+      // Super admin can still delete
+      await assertSucceeds(deleteDoc(doc(db(OWNER), 'visaRequests', 'v-target')));
+    });
   });
 
   // ===========================================================================

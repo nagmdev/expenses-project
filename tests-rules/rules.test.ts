@@ -345,8 +345,8 @@ describe('real domain operations pass the rules', () => {
 
 describe('tenant isolation hardening', () => {
   it("a visa request cannot be created in someone else's name by a regular member", async () => {
-    await assertSucceeds(setDoc(doc(db(EMP), 'visaRequests', 'v-own'), { orgId: ORG, status: 'pending', requesterId: EMP.uid }));
-    await assertFails(setDoc(doc(db(EMP), 'visaRequests', 'v-forged'), { orgId: ORG, status: 'pending', requesterId: ADMIN.uid }));
+    await assertSucceeds(setDoc(doc(db(EMP), 'visaRequests', 'v-own'), { orgId: ORG, status: 'pending', requesterId: EMP.uid, totalAmount: 100, remainingBalance: 100 }));
+    await assertFails(setDoc(doc(db(EMP), 'visaRequests', 'v-forged'), { orgId: ORG, status: 'pending', requesterId: ADMIN.uid, totalAmount: 100, remainingBalance: 100 }));
   });
 
   it('a membership id must be <userId>_<orgId>', async () => {

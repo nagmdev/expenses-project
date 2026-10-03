@@ -792,20 +792,99 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 8b. VISA REQUESTS (previously had no rule → every write was denied)
+    // 8b. VISA REQUESTS (Strict State Machine & Direct-Write Protection)
     // =========================================================================
     match /visaRequests/{visaId} {
       function canReadVisa() {
         return isSuperAdmin() || isFinance(resource.data.orgId) || resource.data.requesterId == request.auth.uid;
       }
+
+      // Case A: Approval or Rejection (decideVisaRequest)
+      function visaDecisionOk() {
+        let b = resource.data;
+        let a = request.resource.data;
+        let keys = a.diff(b).affectedKeys();
+        let from = b.get('status', '');
+        let to = a.get('status', '');
+        let approveCase = from in ['pending', 'rejected'] && to in ['approved', 'partially_paid', 'paid'];
+        let rejectCase = from in ['pending', 'approved'] && to == 'rejected' &&
+          b.get('paidAmount', 0) == 0 &&
+          a.get('rejectionReason', null) is string && a.rejectionReason != '';
+        return (approveCase || rejectCase) &&
+          !keys.hasAny(['id', 'requestNumber', 'orgId', 'requesterId', 'totalAmount', 'currency',
+            'payments', 'paidAmount', 'remainingBalance', 'createdAt', 'travelerName', 'passportNumber', 'serviceProviderId']);
+      }
+
+      // Case B: Payment registration (addVisaPayment)
+      function visaPaymentOk() {
+        let b = resource.data;
+        let a = request.resource.data;
+        let keys = a.diff(b).affectedKeys();
+        let oldPaid = b.get('paidAmount', 0);
+        let total = b.get('totalAmount', 0);
+        let paymentsOld = listOf(b, 'payments');
+        let paymentsNew = listOf(a, 'payments');
+        let lastPayment = paymentsNew.size() > 0 ? paymentsNew[paymentsNew.size() - 1] : {};
+        return b.get('status', '') in ['approved', 'partially_paid'] &&
+          keys.hasOnly(['paidAmount', 'remainingBalance', 'status', 'payments', 'updatedAt']) &&
+          a.paidAmount > oldPaid &&
+          (a.paidAmount <= total || near(a.paidAmount, total)) &&
+          (a.remainingBalance == total - a.paidAmount || near(a.remainingBalance, total - a.paidAmount)) &&
+          a.remainingBalance >= 0 &&
+          a.status == (a.remainingBalance == 0 ? 'paid' : 'partially_paid') &&
+          paymentsNew.size() == paymentsOld.size() + 1 &&
+          appended(b, a, 'payments') &&
+          lastPayment is map &&
+          lastPayment.get('amount', 0) is number && lastPayment.amount > 0 &&
+          (lastPayment.get('accountId', null) == null || (
+            lastPayment.accountId is string &&
+            (a.get('operationKey', '') == '' || existsAfter(/databases/$(database)/documents/accountTransactions/$('tx-' + a.operationKey)))
+          ));
+      }
+
+      // Case C: Metadata / Cost adjustment update (updateVisaRequest)
+      function visaEditOk() {
+        let b = resource.data;
+        let a = request.resource.data;
+        let keys = a.diff(b).affectedKeys();
+        let totalChanged = keys.hasAny(['totalAmount']);
+        let oldPaid = b.get('paidAmount', 0);
+        return !keys.hasAny(['id', 'requestNumber', 'status', 'paidAmount', 'payments', 'createdAt', 'approvedBy', 'approvedByName', 'approvedAt']) &&
+          (totalChanged
+            ? (a.get('totalAmount', 0) >= oldPaid &&
+               (a.get('remainingBalance', 0) == a.totalAmount - oldPaid || near(a.get('remainingBalance', 0), a.totalAmount - oldPaid)))
+            : (a.get('remainingBalance', 0) == b.get('remainingBalance', 0)));
+      }
+
+      function visaUpdateOk() {
+        return visaDecisionOk() || visaPaymentOk() || visaEditOk();
+      }
+
       allow get: if isAuthenticated() && (isMissing() || canReadVisa());
       allow list: if isAuthenticated() && canReadVisa();
-      // Super admin: any state (restoring visa requests that the old version never saved).
-      allow create: if isSuperAdmin() ||
-        (isAuthenticated() && isOrgMember(request.resource.data.orgId) && request.resource.data.status == 'pending' &&
-          (request.resource.data.requesterId == request.auth.uid || isOrgAdmin(request.resource.data.orgId)));
-      allow update: if isSuperAdmin() || (isFinance(resource.data.orgId) && orgUnchanged());
-      allow delete: if isSuperAdmin() || isOrgAdmin(resource.data.orgId);
+
+      allow create: if isSuperAdmin() || (
+        isAuthenticated() &&
+        isOrgMember(request.resource.data.orgId) &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.get('paidAmount', 0) == 0 &&
+        request.resource.data.get('totalAmount', 0) > 0 &&
+        (request.resource.data.get('remainingBalance', request.resource.data.totalAmount) == request.resource.data.totalAmount ||
+         near(request.resource.data.get('remainingBalance', request.resource.data.totalAmount), request.resource.data.totalAmount)) &&
+        request.resource.data.get('payments', []).size() == 0 &&
+        (request.resource.data.requesterId == request.auth.uid || isOrgAdmin(request.resource.data.orgId))
+      );
+
+      allow update: if isSuperAdmin() || (
+        isFinance(resource.data.orgId) &&
+        orgUnchanged() &&
+        visaUpdateOk()
+      );
+
+      allow delete: if isSuperAdmin() || (
+        isOrgAdmin(resource.data.orgId) &&
+        resource.data.get('paidAmount', 0) == 0
+      );
     }
 
     // =========================================================================
@@ -1378,8 +1457,8 @@ service cloud.firestore {
         let m = e.meta;
         let url = s.get('webhookUrl', '');
         return m.get('senderName', '') in [s.get('senderName', ''), 'نظام مصروفي'] &&
-          m.get('senderEmail', '') in [s.get('senderEmail', ''), 'awadhsaudi2030@gmail.com'] &&
-          m.get('replyTo', '') in [s.get('replyToEmail', ''), s.get('senderEmail', ''), 'awadhsaudi2030@gmail.com'] &&
+          m.get('senderEmail', '') in [s.get('senderEmail', ''), 'awadhsaudi2030@gmail.com', 'no-reply@expenses.app'] &&
+          m.get('replyTo', '') in [s.get('replyToEmail', ''), s.get('senderEmail', ''), 'awadhsaudi2030@gmail.com', 'no-reply@expenses.app'] &&
           (e.channel == 'webhook'
             ? (s.get('deliveryMethod', '') == 'webhook' && url != '' && m.get('webhookUrl', '') == url)
             : (e.channel in ['email_api', 'firestore_mail'] && m.get('webhookUrl', '') == ''));
