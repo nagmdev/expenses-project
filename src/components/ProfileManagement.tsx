@@ -4,6 +4,7 @@ import { PaymentMethod } from '../types';
 import { canOpenTab } from '../utils/permissions';
 import { copyTextToClipboard } from '../utils/requestUi';
 import { useSubmitGuard } from '../hooks/useSubmitGuard';
+import { EmailVerificationCard } from './EmailVerificationCard';
 import {
   ibanError,
   walletNumberError,
@@ -291,6 +292,7 @@ export const ProfileManagement: React.FC = () => {
                 </>
               )}
             </p>
+            <EmailVerificationCard className="mt-2" />
           </div>
         </div>
 
