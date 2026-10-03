@@ -7,7 +7,7 @@
 import { readFileSync } from 'fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { assertFails, assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
-import { collection, doc, getDocs, setDoc, type Firestore } from 'firebase/firestore';
+import { collection, doc, getDocs, getDocsFromServer, setDoc, type Firestore } from 'firebase/firestore';
 import { createFirestoreStore } from '../src/domain/firestoreStore';
 import { createExpenseRequest, disburseExpenseRequest, transitionExpenseRequest } from '../src/domain/requests';
 import { adjustAccountBalance, createPaymentAccount, issueCustody, settleCustodyItem } from '../src/domain/treasury';
@@ -33,11 +33,11 @@ let n = 0;
 const key = () => `key-chk${String(++n).padStart(6, '0')}`;
 const seed = (fn: (f: Firestore) => Promise<unknown>) => env.withSecurityRulesDisabled(ctx => fn(ctx.firestore() as unknown as Firestore));
 
-/** What runFinancialConsistencyCheck does: every collection, unfiltered. */
+/** What runFinancialConsistencyCheck does: every collection, unfiltered, from the server. */
 async function readAll(f: Firestore): Promise<ConsistencyData> {
   const data: Record<string, unknown> = {};
   for (const name of CONSISTENCY_COLLECTIONS) {
-    const snap = await getDocs(collection(f, name));
+    const snap = await getDocsFromServer(collection(f, name));
     data[name] = snap.docs.map(d => ({ ...d.data(), id: d.id }));
   }
   return data as ConsistencyData;
@@ -77,7 +77,7 @@ describe('financial consistency check: who may read every collection whole', () 
   it('the platform owner lists every collection the check needs, across companies', async () => {
     const f = db(OWNER);
     for (const name of CONSISTENCY_COLLECTIONS) {
-      const snap = await assertSucceeds(getDocs(collection(f, name)));
+      const snap = await assertSucceeds(getDocsFromServer(collection(f, name)));
       expect(snap.docs.some(d => d.data().orgId === OTHER_ORG), name).toBe(true);
     }
   });

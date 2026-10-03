@@ -61,7 +61,7 @@ import {
 } from '../lib/firebase';
 import { User as FirebaseUser } from 'firebase/auth';
 import type { Query, DocumentData } from 'firebase/firestore';
-import { arrayRemove, arrayUnion, updateDoc } from 'firebase/firestore';
+import { arrayRemove, arrayUnion, getDocsFromServer, updateDoc } from 'firebase/firestore';
 import { createFirestoreStore } from '../domain/firestoreStore';
 import type { DataStore } from '../domain/store';
 import { COL, DomainError, PAYOUT_FIELDS, formatAmount, isDomainError, normalizeEmail, normalizeKeyValue, timelineTimestamp, type Actor } from '../domain/common';
@@ -3108,11 +3108,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return mutate('detachOrphanProfiles', 'all', store => detachOrphanProfiles(store, actor, rows));
   };
 
-  // Financial consistency check (READ-ONLY). Every collection it needs is read fresh with
-  // getDocs — never the live listeners, which are scoped to a company / role and may still be
-  // loading. The platform owner may list each of them (firestore.rules → isSuperAdmin()); one
-  // that cannot be read anyway (offline, rules not yet published) is reported and its checks
-  // are skipped. Nothing is written: fixes go through the normal, audited operations.
+  // Financial consistency check (READ-ONLY). Every collection it needs is read fresh FROM THE
+  // SERVER (getDocsFromServer) — never the live listeners, which are scoped to a company / role
+  // and may still be loading, and never the persistent local cache that getDocs silently falls
+  // back to when offline (an incomplete cache would read as missing ledger lines). The platform
+  // owner may list each of them (firestore.rules → isSuperAdmin()); one that cannot be read
+  // anyway (offline, rules not yet published) is reported and its checks are skipped; when none
+  // can be read the run fails instead of showing an empty report. Nothing is written: fixes go
+  // through the normal, audited operations.
   const runFinancialConsistencyCheck = async (): Promise<FinancialConsistencyRun> => {
     if (!isSuperAdmin) throw new DomainError('forbidden', 'فحص سلامة الحسابات متاح للمشرف العام للمنصة فقط.');
     const db = getDb();
@@ -3126,7 +3129,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await Promise.all(
         CONSISTENCY_COLLECTIONS.map(async name => {
           try {
-            const snap = await getDocs(collection(db, name));
+            const snap = await getDocsFromServer(collection(db, name));
             (data as Record<string, unknown>)[name] = snap.docs.map(d => ({ ...d.data(), id: d.id }));
           } catch (err: any) {
             unreadable.push({
@@ -3139,6 +3142,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         }),
       );
+      if (unreadable.length === total) {
+        throw new DomainError('offline', `تعذرت قراءة البيانات من قاعدة البيانات (${unreadable[0].reason}). تحقق من الاتصال ثم أعد المحاولة.`);
+      }
+      unreadable.sort((a, b) => CONSISTENCY_COLLECTIONS.indexOf(a.collection) - CONSISTENCY_COLLECTIONS.indexOf(b.collection));
       const result: FinancialConsistencyRun = { ...checkFinancialConsistency(data, new Date()), unreadable };
       setConsistencyCheck({ pending: false, result });
       return result;

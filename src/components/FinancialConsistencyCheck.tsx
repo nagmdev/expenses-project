@@ -40,6 +40,8 @@ export const FinancialConsistencyCheck: React.FC = () => {
     () => (report ? report.issues.filter(i => filter === 'all' || i.severity === filter) : []),
     [report, filter],
   );
+  // A check skipped for an unreadable collection is not "matching": never show the all-clear then.
+  const incomplete = Boolean(report && report.unreadable.length > 0);
 
   const handleRun = () => {
     if (consistencyCheck?.pending) return;
@@ -82,6 +84,7 @@ export const FinancialConsistencyCheck: React.FC = () => {
           <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
             يعيد حساب أرصدة الخزائن من دفتر الحركات، ويطابق كل طلب مصروف مع قيده، والمنصرف على البنود والمدفوع للموردين مع الطلبات المصروفة، وأرصدة العهد مع فواتير تسويتها،
             لكل الشركات. الفحص للقراءة فقط ولا يغيّر أي بيانات، ويقرأ كل السجلات من قاعدة البيانات مباشرة (يستهلك قراءات بعدد السجلات).
+            شغّله في وقت لا تُنفَّذ فيه عمليات صرف أو تحويل؛ وإن ظهرت مخالفة لعملية تمت أثناء الفحص فأعد الفحص للتأكد منها قبل أي إجراء.
           </p>
         </div>
         <button
@@ -117,15 +120,23 @@ export const FinancialConsistencyCheck: React.FC = () => {
             className={`p-3 rounded-xl text-xs font-bold flex flex-wrap items-center gap-2 border ${
               report.violations > 0
                 ? 'bg-rose-50 text-rose-800 border-rose-200'
-                : report.warnings > 0
+                : report.warnings > 0 || incomplete
                 ? 'bg-amber-50 text-amber-800 border-amber-200'
                 : 'bg-emerald-50 text-emerald-800 border-emerald-200'
             }`}
           >
-            {report.violations > 0 ? <XCircle className="h-4 w-4 shrink-0" /> : report.warnings > 0 ? <AlertTriangle className="h-4 w-4 shrink-0" /> : <CheckCircle2 className="h-4 w-4 shrink-0" />}
+            {report.violations > 0 ? (
+              <XCircle className="h-4 w-4 shrink-0" />
+            ) : report.warnings > 0 || incomplete ? (
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 shrink-0" />
+            )}
             <span>
               {report.violations > 0
                 ? `${report.violations} مخالفة تحتاج مراجعة`
+                : incomplete
+                ? 'لا توجد مخالفات فيما تم فحصه (بعض الفحوص لم تُنفذ)'
                 : report.warnings > 0
                 ? 'لا توجد مخالفات'
                 : 'كل الأرصدة والعدادات مطابقة لسجلاتها'}
@@ -220,6 +231,13 @@ export const FinancialConsistencyCheck: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
+                    {visible.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="px-2 py-4 text-center text-slate-400">
+                          لا توجد {filter === 'violation' ? 'مخالفات' : 'تحذيرات'} في نتيجة هذا الفحص.
+                        </td>
+                      </tr>
+                    )}
                     {visible.slice(0, MAX_ROWS).map((issue, idx) => (
                       <tr key={`${issue.kind}_${issue.collection}_${issue.id}_${idx}`} className="align-top">
                         <td className="px-2 py-2 whitespace-nowrap">
