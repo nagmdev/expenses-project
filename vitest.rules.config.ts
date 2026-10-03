@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitest/config';
 
-// Security-rules tests run against the Firestore emulator (needs Java 11+):
+// Security-rules tests run against the Firestore emulator (needs Java 21+, as in CI):
 //   npm run test:rules
 export default defineConfig({
   test: {

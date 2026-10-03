@@ -1,7 +1,8 @@
 # 03 - Workflows & Lifecycle (دورة العمل وحالات الطلبات)
 
 > **تصنيف الأدلة البرمجية:**
-> - [VERIFIED]: مستخرج مباشرة من دوال التحكّم في `src/context/AppContext.tsx` (`createRequest`, `approveRequest`, `rejectRequest`, `requestClarification`, `replyClarification`, `disburseRequest`).
+> - [VERIFIED]: مستخرج من `src/domain/requests.ts` (`createExpenseRequest`, `updateExpenseRequest`, `transitionExpenseRequest` وجدول `TRANSITIONS`, `disburseExpenseRequest`)،
+>   ومن دوال السياق التي تستدعيها في `src/context/AppContext.tsx`، ومن قسم `match /requests` في `firestore.rules`.
 
 ---
 
@@ -9,18 +10,29 @@
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: إنشاء الطلب (createRequest)
-    
-    pending --> clarification_requested: طلب استفسار (requestClarification)
-    clarification_requested --> pending: تقديم الرد والمستندات (replyClarification)
-    
-    pending --> approved: اعتماد المدير (approveRequest)
-    pending --> rejected: رفض الطلب مع السبب (rejectRequest)
-    
-    approved --> disbursed: توثيق الصرف الفعلي (disburseRequest)
+    [*] --> pending: إنشاء الطلب (createExpenseRequest)
+
+    pending --> clarification_requested: طلب استيضاح (clarify) — مدير الشركة / المشرف العام
+    clarification_requested --> clarification_requested: استيضاح إضافي
+    clarification_requested --> pending: رد مقدم الطلب (reply)
+
+    pending --> approved: اعتماد (approve) — المالية / مدير الشركة / المشرف العام
+    clarification_requested --> approved: اعتماد
+    approved --> pending: تعديل المبلغ أو العملة يعيد الطلب للمراجعة
+
+    pending --> rejected: رفض مع سبب (reject)
+    clarification_requested --> rejected: رفض
+    approved --> rejected: رفض قبل الصرف
+
+    approved --> disbursed: الصرف (disburseExpenseRequest)
+    pending --> disbursed: طلب توريد (income) فقط
     disbursed --> [*]
     rejected --> [*]
 ```
+
+- `disbursed` حالة نهائية: الطلب المصروف لا يُصرف مرة أخرى أبداً (`already_disbursed`)، ولا يُرفض.
+- تكرار نفس الانتقال (نقرة مزدوجة، إعادة محاولة، مستخدم ثانٍ) لا يُنشئ حدثاً ثانياً في السجل الزمني ولا إشعاراً ثانياً: معرّف الحدث `tl-<مفتاح العملية>`، والانتقال إلى الحالة الحالية نفسها لا يفعل شيئاً (`already_in_state`).
+- القواعد (`firestore.rules` → `requests`) تفرض نفس الانتقالات والأدوار: السجل الزمني والتعليقات تُضاف فقط، والاعتماد لا يغيّر المستفيد ولا يسمّي معتمداً آخر، والحالة `disbursed` لا تُكتب إلا مع قيد الدفتر الخاص بالطلب في نفس الـ commit.
 
 ---
 
@@ -29,52 +41,63 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Emp as الموظف / طالب الصرف
-    participant UI as واجهة النظام (Tracker & Modals)
-    participant State as محرك الحالة (AppContext)
-    actor Mgr as مدير المؤسسة
+    actor Emp as الموظف / مقدم الطلب
+    participant UI as الواجهة (Tracker & Modals)
+    participant Ctx as AppContext
+    participant Dom as Domain (src/domain/requests.ts)
+    participant FS as Firestore + firestore.rules
+    actor Mgr as المدير / المالية
 
     Emp->>UI: إدخال بيانات الطلب ورفع الفاتورة
-    UI->>State: createRequest(title, amount, serviceId, providerId)
-    State-->>UI: إنشاء الطلب بحالة "pending" وتوثيق حدث بالتايم لاين
+    UI->>FS: رفع المرفق مقسَّماً (attachments/{id}/chunks) → fsattach://id
+    UI->>Ctx: createRequest(data) + مفتاح العملية
+    Ctx->>Dom: createExpenseRequest(store, actor, draft, key)
+    Dom->>FS: Transaction: العدّاد + الطلب req-key بحالة pending + outbox (new_request)
+    FS-->>UI: onSnapshot يعرض الطلب
 
-    Note over Mgr,UI: مراجعة المدير للطلب
-    Mgr->>UI: فحص الفاتورة والميزانية
+    Note over Mgr,UI: مراجعة الطلب
 
-    alt خيار 1: طلب استفسار إضافي
-        Mgr->>UI: كتابة سؤال التوضيح
-        UI->>State: requestClarification(reqId, question)
-        State-->>Emp: إشعار وتنبيه بطلب توضيح (حالة clarification_requested)
-        Emp->>UI: كتابة الرد ورفع مستند بديل
-        UI->>State: replyClarification(reqId, reply, attachment)
-        State-->>Mgr: إعادة الطلب إلى قيد المراجعة "pending"
-    else خيار 2: الرفض
-        Mgr->>UI: إدخال سبب الرفض
-        UI->>State: rejectRequest(reqId, reason)
-        State-->>Emp: إشعار بالرفض مع إظهار السبب
-    else خيار 3: الاعتماد المباشر
-        Mgr->>UI: اعتماد الطلب
-        UI->>State: approveRequest(reqId, note)
-        State-->>UI: تحديث الحالة إلى "approved" (معتمد بانتظار الصرف)
+    alt طلب استيضاح (مدير الشركة)
+        Mgr->>Ctx: requestClarification(reqId, question)
+        Ctx->>Dom: transitionExpenseRequest(clarify)
+        Dom->>FS: الحالة clarification_requested + تعليق + حدث + outbox
+        Emp->>Ctx: replyClarification(reqId, reply, attachment)
+        Ctx->>Dom: transitionExpenseRequest(reply)
+        Dom->>FS: العودة إلى pending
+    else الرفض
+        Mgr->>Ctx: rejectRequest(reqId, reason)
+        Ctx->>Dom: transitionExpenseRequest(reject)
+        Dom->>FS: الحالة rejected + السبب + outbox (request_rejected)
+    else الاعتماد
+        Mgr->>Ctx: approveRequest(reqId, note)
+        Ctx->>Dom: transitionExpenseRequest(approve)
+        Dom->>FS: الحالة approved + outbox (request_approved)
     end
 
-    Note over Mgr,UI: مرحلة التنفيذ المالي والصرف
-    Mgr->>UI: إدخال بيانات التحويل (البنك، رقم الحوالة، طريقة الدفع)
-    UI->>State: disburseRequest(reqId, details)
-    State->>State: تحديث spentAmount لبند الخدمة
-    State->>State: تحديث totalPaid لمقدم الخدمة
-    State-->>Emp: إتاحة سند الصرف الرسمي ورقم المرجع في شاشة التتبع
+    Note over Mgr,FS: مرحلة الصرف (المالية / مدير الشركة)
+    Mgr->>Ctx: disburseRequest(reqId, الحساب، طريقة الدفع، رقم المرجع)
+    Ctx->>Dom: disburseExpenseRequest(...)
+    Dom->>FS: Transaction واحدة (القسم 3)
+    FS-->>Emp: سند الصرف ورقم المرجع في شاشة التتبع + إشعار request_paid
 ```
 
 ---
 
 ## 3. العمليات المحاسبية المصاحبة للصرف (Financial Invariants)
 
-عند استدعاء `disburseRequest(requestId, details)`، يتم تنفيذ العمليات الذرية التالية:
-1. **تحديث حالة الطلب:** من `approved` إلى `disbursed`.
-2. **إنشاء كائن سند الصرف (`disbursement`):** يتضمن `paymentMethod`، `referenceNumber`، `bankName`، `disbursedAt`، و `disbursedBy`.
-3. **تحديث استهلاك ميزانية الخدمة:**
+`disburseExpenseRequest` تنفّذ كل ما يلي في **Transaction واحدة** (كلها أو لا شيء):
+1. **التحقق:** الطلب `approved` (أو `pending` لطلب التوريد `income`)، والحساب من نفس الشركة، نشط، وبنفس العملة.
+2. **تحديث حالة الطلب:** إلى `disbursed` مع كائن `disbursement` (`paymentMethod`, `referenceNumber`, `accountId`, `accountName`, `disbursedAt`, `disbursedBy`) وحدث في السجل الزمني.
+3. **حركة الحساب وقيد الدفتر:** قيد بمعرّف حتمي `tx-req-<requestId>` (`out` للصرف، `in` للتوريد)، والرصيد يُحسب من القيمة المقروءة داخل الـ Transaction:
+   $$\text{currentBalance}_{\text{new}} = \text{currentBalance}_{\text{prev}} \mp \text{amount}$$
+   بدون سحب على المكشوف (`insufficient_funds`)، والإنستاباي ينعكس على البنك المرتبط به. الحساب يحمل `lastLedgerId` = القيد.
+4. **تحديث استهلاك ميزانية البند** (للصرف فقط، وإن كان البند يخص شركة الطلب أو مشاركاً معها):
    $$\text{spentAmount}_{\text{new}} = \text{spentAmount}_{\text{prev}} + \text{amount}$$
-4. **تحديث سجل مدفوعات المورد:**
+   مع `lastDisbursedRequestId = requestId`.
+5. **تحديث سجل مدفوعات المورد** (للصرف فقط):
    $$\text{totalPaid}_{\text{new}} = \text{totalPaid}_{\text{prev}} + \text{amount}$$
-5. **إضافة حدث مكتمل في السجل الزمني (`TimelineEvent`):** لتوثيق رقم الحوالة واسم القائم بالعملية للتدقيق المحاسبي اللاحق.
+   مع `lastDisbursedRequestId = requestId`.
+6. **سجل التدقيق** (`audit-<key>-disburse`) و**حدث الإشعار** `request_paid__<requestId>` في `outbox`.
+
+القواعد تتحقق في نفس الـ commit أن كل زيادة في `spentAmount` / `totalPaid` تساوي مبلغ الطلب الذي صُرف فيه، وأن كل تغيير في رصيد الحساب له قيد جديد بنفس المبلغ
+(`tests-rules/binding.test.ts`: `[AGG-B1 DIR-3]`, `[TRE-6]`, `[REQ-3 TRE-7]`).

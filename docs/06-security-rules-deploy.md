@@ -160,6 +160,14 @@
    super admin. The app corrects `system_settings/notification_recipients` to the
    current super admins the next time the owner opens it.
 
+## Checks before a release (CI)
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request:
+`npm run lint`, `npm run build` (type-check + build), `npm test`, and, in a separate job,
+`npm run test:rules` (the `tests-rules/` suites against the Firestore emulator, Java 21).
+A green run does not publish anything: Vercel deploys the frontend from `main`, and
+`firestore.rules` is published by hand (step 3 below).
+
 ## Deploy (order matters)
 
 1. **Deploy the frontend and `api/send-email.ts` (Vercel) first.** They work under
@@ -199,3 +207,76 @@ frontend as well. Publish the rules **first**, then deploy the frontend:
    `attachments/{id}` document with `complete: true` and its `chunks` appear.
 4. Leave `VITE_USE_FIREBASE_STORAGE` unset on Vercel. Set it to `true` only after a
    Blaze upgrade (and after deploying `storage.rules` then).
+
+## Security headers (`vercel.json`)
+
+Vercel sends these on every route (`"source": "/(.*)"`), next to the existing
+`Cache-Control` and `Cross-Origin-Opener-Policy: same-origin-allow-popups` (the latter is
+what lets the Google sign-in popup report back; do not tighten it to `same-origin`).
+
+| Header | Value | Why |
+| :--- | :--- | :--- |
+| `X-Content-Type-Options` | `nosniff` | Scripts and styles are only run with their declared type. |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Other sites (Firebase, Google Fonts, a webhook) see the origin only, never a path. |
+| `X-Frame-Options` | `SAMEORIGIN` | Nothing frames the app (no embed, no iframe of the app anywhere in `src/`), so other sites cannot frame it (clickjacking). `SAMEORIGIN` rather than `DENY` keeps the app's own same-origin frames possible. |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), xr-spatial-tracking=(), browsing-topics=()` | Features the code never uses (no `getUserMedia`, geolocation, Payment Request, WebUSB/Serial/HID/MIDI, sensors, screen capture). Not listed: `clipboard-write`, because the app uses it (copy payment details, `src/utils/requestUi.ts`); other features stay at the browser default. File inputs have no `capture` attribute; picking a photo from the phone's file chooser is not affected by `camera=()`. |
+| `Content-Security-Policy-Report-Only` | see below | **Report-only**: the browser only logs violations in the console, it never blocks anything, so it cannot break sign-in. |
+
+### The CSP allowlist (report-only)
+
+Derived from what the built app loads and connects to (`dist/`, `src/lib/firebase.ts`,
+`src/lib/attachments.ts`, `src/components/InvoiceViewerModal.tsx`, `index.html`):
+
+- `default-src 'self'`; `object-src 'none'`; `base-uri 'self'`; `form-action 'self'`;
+  `manifest-src 'self'`; `worker-src 'self' blob:`; `frame-ancestors 'self'` (same as
+  `X-Frame-Options`).
+- `script-src 'self' https://apis.google.com https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/`:
+  the Vite build has no inline script and no `eval`. `apis.google.com` is the loader Firebase
+  Auth uses for `signInWithPopup`. The reCAPTCHA paths are only used if reCAPTCHA protection
+  is turned on for email/password sign-in in the Firebase console.
+- `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com`: React `style={...}`
+  attributes and Recharts set inline styles; the IBM Plex Sans Arabic stylesheet comes from
+  Google Fonts.
+- `font-src 'self' https://fonts.gstatic.com`.
+- `img-src 'self' data: blob: https://firebasestorage.googleapis.com https://storage.googleapis.com https://www.google.com/images/cleardot.gif`:
+  `blob:` for attachment previews (`fsattach://` files become object URLs), `data:` for the
+  payment QR code, image compression and older records that stored `data:` URLs, the
+  Storage hosts for https links of records uploaded by older versions, and the one image the
+  Firestore SDK's WebChannel loads to test the network after a connection error.
+- `connect-src 'self' blob: https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firebasestorage.googleapis.com https://storage.googleapis.com https://www.google.com/recaptcha/`:
+  `'self'` is `/api/send-email`; Firestore; Firebase Auth (sign-in, token refresh); legacy
+  Storage downloads; `blob:` because `useAttachmentPreview` reads a loaded file's type from its
+  object URL. Email providers (Resend, Brevo, Gmail SMTP) are called by `/api/send-email` on
+  the server, never by the browser.
+- `frame-src blob: data: https://expenses-project-ce1f9.firebaseapp.com https://www.google.com/recaptcha/ https://recaptcha.google.com/recaptcha/`:
+  PDF previews (`blob:`, and inline `data:` PDFs of older records) and the Firebase Auth
+  helper frame on the project's `authDomain`.
+
+**Not covered on purpose (expect reports, not breakage):**
+
+- **Webhook notifications.** When the owner sets the delivery method to Webhook, the outbox
+  worker POSTs from the browser (`src/services/emailService.ts`) to the URL the owner typed
+  in Settings. It cannot be known in advance, so it is not in `connect-src`; each delivery is
+  reported. Before enforcing the policy, add that URL's origin to `connect-src`.
+- **Receipt links typed by hand.** The custody settlement form accepts any `https://` link
+  instead of an uploaded file (`src/components/CustodyManagement.tsx`), and older records may
+  hold https links on other hosts. Opening one in the viewer loads it from that host
+  (`<img>` / `<iframe>`, or `fetch` when its type is unknown), so it is reported under
+  `img-src` / `frame-src` / `connect-src`. Enforcing the policy would stop those previews
+  (the link itself stays in the record); allow the hosts you need, or keep using uploads.
+- **A different Firebase project.** If `VITE_FIREBASE_AUTH_DOMAIN` on Vercel, or a custom
+  connection saved in the in-app Firebase settings, points to another project, replace
+  `https://expenses-project-ce1f9.firebaseapp.com` in `frame-src` with that `authDomain`.
+- **Vercel preview toolbar.** Preview deployments (not production) inject the Vercel toolbar
+  from `https://vercel.live`; its scripts and frames are reported there.
+- There is no `report-uri` / `report-to` endpoint, so violations appear only in the
+  browser's DevTools console.
+
+**Enforcing it later:** open the production site with DevTools, sign in with email and with
+Google, open requests with image and PDF attachments, upload a file, and let an email /
+webhook notification go out. Check PDF previews in Chrome in particular: a `blob:` / `data:`
+PDF frame inherits this policy, and Chrome's built-in PDF viewer is a plugin, so a report
+under `object-src 'none'` there means `object-src` needs `blob: data:` before enforcing.
+When the console shows no `[Report Only]` CSP messages, rename
+the header key to `Content-Security-Policy` (same value) and test sign-in again on a preview
+deployment before merging to `main`.
