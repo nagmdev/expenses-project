@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import {
   Users,
@@ -13,25 +13,30 @@ import {
   Plus,
   Loader2,
   AlertTriangle,
-  Lock
+  Lock,
+  Eye,
+  EyeOff,
+  Copy,
+  Sparkles,
 } from 'lucide-react';
 import { OrganizationMember, Role } from '../types';
 import { isValidEmail, sanitizePhone } from '../utils/validation';
 import { normalizeEmail, type Actor } from '../domain/common';
-// The platform owner is the ONLY super admin (same list as AppContext and the rules). Nobody else can be promoted here.
-import { isPlatformOwnerEmail as isPlatformOwner, membershipProtection } from '../domain/directory';
+import { isPlatformOwnerEmail as isPlatformOwner, membershipProtection, isRealUid } from '../domain/directory';
 import { useSubmitGuard, useKeyedSubmitGuard } from '../hooks/useSubmitGuard';
 import { can } from '../utils/permissions';
 import { OrgMultiSelect } from './OrgMultiSelect';
+import { getDb, doc, updateDoc } from '../lib/firebase';
 
-/** Roles that can be assigned here. Platform super admin is never grantable from the UI. */
-type AssignableRole = Exclude<Role, 'super_admin'>;
+/** Roles that can be assigned here. */
+type AssignableRole = Role;
 /** Edit-form role: an assignable role, or keep a leftover legacy super-admin grant untouched. */
-type EditRoleChoice = AssignableRole | 'keep_super_admin';
+type EditRoleChoice = Role | 'keep_super_admin';
 
 const ALREADY_MEMBER_REASON = 'مسجل بالفعل';
 
-const ROLE_LABELS: Record<AssignableRole, string> = {
+const ROLE_LABELS: Record<Role, string> = {
+  super_admin: 'مشرف عام على المنصة',
   org_admin: 'مدير مؤسسة',
   finance: 'مسؤول الصرف والخزينة',
   employee: 'موظف',
@@ -48,9 +53,9 @@ const unavailableOrgsFor = (index: MembershipIndex, email: string): Record<strin
   return out;
 };
 
-/** The membership's own role, never 'super_admin' (platform access is not a membership role). */
+/** The membership's role or super_admin if granted. */
 const membershipRoleOf = (member: OrganizationMember, isSuper: boolean): AssignableRole =>
-  member.role === 'super_admin' ? (isSuper ? 'org_admin' : 'employee') : member.role;
+  isSuper || member.role === 'super_admin' ? 'super_admin' : member.role;
 
 export const UsersManagement: React.FC = () => {
   const {
@@ -58,11 +63,15 @@ export const UsersManagement: React.FC = () => {
     members,
     allOrganizations,
     organizations,
+    allUsers,
     superAdminEmails,
+    addSuperAdminEmail,
     removeSuperAdminEmail,
     addMemberToOrgs,
+    addMember,
     updateMember,
     removeMember,
+    createCompanyUser,
     adminResetUserPassword,
     activeOrgId,
     currentRole,
@@ -108,6 +117,8 @@ export const UsersManagement: React.FC = () => {
   const [isProvisionModalOpen, setIsProvisionModalOpen] = useState(false);
   const [provName, setProvName] = useState('');
   const [provEmail, setProvEmail] = useState('');
+  const [provPassword, setProvPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(true);
   const [provRole, setProvRole] = useState<AssignableRole>('employee');
   const [provOrgIds, setProvOrgIds] = useState<string[]>([]);
   const [provDept, setProvDept] = useState('الإدارة العامة');
@@ -116,6 +127,46 @@ export const UsersManagement: React.FC = () => {
   const [provError, setProvError] = useState('');
   const provisionGuard = useSubmitGuard();
   const isProvisioning = provisionGuard.pending;
+
+  // Created User Credentials modal state
+  const [createdUserCredentials, setCreatedUserCredentials] = useState<{
+    name: string;
+    email: string;
+    password: string;
+    roleLabel: string;
+    orgNames: string[];
+  } | null>(null);
+  const [copiedCredentials, setCopiedCredentials] = useState(false);
+
+  const generateRandomPassword = (): string => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%';
+    const arr = new Uint8Array(12);
+    crypto.getRandomValues(arr);
+    return Array.from(arr).map(b => chars[b % chars.length]).join('');
+  };
+
+  const handleCopyCredentials = () => {
+    if (!createdUserCredentials) return;
+    const text = [
+      'بيانات الدخول إلى منصة إدارة المصروفات:',
+      '------------------------------------------',
+      `👤 الاسم: ${createdUserCredentials.name}`,
+      `👑 الدور: ${createdUserCredentials.roleLabel}`,
+      `📧 البريد الإلكتروني: ${createdUserCredentials.email}`,
+      `🔑 كلمة المرور: ${createdUserCredentials.password}`,
+      `🏢 الشركات: ${createdUserCredentials.orgNames.join('، ')}`,
+      `🌐 رابط المنصة: ${typeof window !== 'undefined' ? window.location.origin : ''}`,
+      '------------------------------------------',
+      'يرجى تسجيل الدخول وتغيير كلمة المرور عند أول استخدام.',
+    ].join('\n');
+
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedCredentials(true);
+      setTimeout(() => setCopiedCredentials(false), 3000);
+    }).catch(err => {
+      console.warn('[Users] Clipboard error:', err);
+    });
+  };
 
   // Deletion Confirmation
   const [deletingMember, setDeletingMember] = useState<OrganizationMember | null>(null);
@@ -141,7 +192,6 @@ export const UsersManagement: React.FC = () => {
   };
 
   const canManageSuperAdmins = currentRole === 'super_admin';
-  const displayMembers = currentRole === 'super_admin' ? allMembers : members;
   const displayOrgs = currentRole === 'super_admin' ? allOrganizations : organizations;
   // A new user can only join companies that are still active (an archived one refuses the whole operation).
   const provisionOrgs = useMemo(
@@ -150,7 +200,57 @@ export const UsersManagement: React.FC = () => {
   );
 
   const superAdminSet = useMemo(() => new Set(superAdminEmails.map(e => normalizeEmail(e))), [superAdminEmails]);
-  const isSuperAdminEmail = (email?: string | null) => Boolean(email) && superAdminSet.has(normalizeEmail(email));
+  const isSuperAdminEmail = useCallback((email?: string | null) => Boolean(email) && superAdminSet.has(normalizeEmail(email)), [superAdminSet]);
+
+  // Unified list of members: includes company members plus unassigned platform users and super admins
+  const displayMembers = useMemo(() => {
+    if (currentRole !== 'super_admin') return members;
+    const list = [...allMembers];
+    const seenEmails = new Set(list.map(m => normalizeEmail(m.userEmail)).filter(Boolean));
+    const seenUserIds = new Set(list.map(m => m.userId).filter(Boolean));
+
+    for (const u of allUsers || []) {
+      const email = normalizeEmail(u.email);
+      if (seenUserIds.has(u.id) || (email && seenEmails.has(email))) continue;
+      if (email) seenEmails.add(email);
+      seenUserIds.add(u.id);
+
+      const isSuper = isSuperAdminEmail(email) || u.role === 'super_admin';
+      list.push({
+        id: `usr-${u.id}`,
+        orgId: u.orgId || '',
+        userId: u.id,
+        userName: u.name || (email ? email.split('@')[0] : 'مستخدم'),
+        userEmail: u.email || '',
+        role: isSuper ? 'super_admin' : (u.role || 'employee'),
+        department: (u as any).department || (isSuper ? 'إدارة المنصة والنظام' : 'عام'),
+        jobTitle: (u as any).jobTitle || (isSuper ? 'مشرف عام على المنصة' : 'مستخدم نظام'),
+        joinedAt: (u as any).createdAt || (u as any).updatedAt || new Date().toISOString(),
+        active: (u as any).active !== false,
+        phone: u.phone || '',
+      });
+    }
+
+    for (const sEmail of superAdminEmails) {
+      const email = normalizeEmail(sEmail);
+      if (!email || seenEmails.has(email)) continue;
+      seenEmails.add(email);
+      list.push({
+        id: `super-${email.replace(/[^a-zA-Z0-9]/g, '_')}`,
+        orgId: '',
+        userId: '',
+        userName: email.split('@')[0],
+        userEmail: email,
+        role: 'super_admin',
+        department: 'إدارة المنصة والنظام',
+        jobTitle: 'مشرف عام على المنصة',
+        joinedAt: new Date().toISOString(),
+        active: true,
+      });
+    }
+
+    return list;
+  }, [currentRole, allMembers, members, allUsers, superAdminEmails, isSuperAdminEmail]);
 
   // Every known membership, by email (case-insensitive): drives "مسجل بالفعل" in the company pickers.
   const membershipIndex = useMemo<MembershipIndex>(() => {
@@ -185,6 +285,9 @@ export const UsersManagement: React.FC = () => {
     if (!canManageUsers) return;
     provisionGuard.rotateKey();
     setProvError('');
+    setProvPassword(generateRandomPassword());
+    setShowPassword(true);
+    setProvRole(canManageSuperAdmins && provisionOrgs.length === 0 ? 'super_admin' : 'employee');
     setProvOrgIds(defaultProvisionOrgIds().filter(id => !provUnavailable[id]));
     setIsProvisionModalOpen(true);
   };
@@ -264,18 +367,36 @@ export const UsersManagement: React.FC = () => {
     }
   };
 
-  // Super admin can only be REMOVED here (from a leftover legacy grant). The platform owner is the
-  // only super admin: nobody can be promoted, and the owner can never be demoted.
   const handleDemoteSuperAdmin = async (email: string) => {
     if (!email || !canManageSuperAdmins || isPlatformOwner(email) || !isSuperAdminEmail(email)) return;
     if (normalizeEmail(email) === myEmail) return; // never one's own access
     await memberActions.run(`superadmin:${normalizeEmail(email)}`, async () => {
-      if (!confirm(`هل أنت متأكد من سحب صلاحيات المشرف العام من ${email}؟\nلا يمكن منحها مرة أخرى: مالك المنصة هو المشرف العام الوحيد.`)) return;
+      if (!confirm(`هل أنت متأكد من سحب صلاحيات المشرف العام من ${email}؟`)) return;
       try {
         await removeSuperAdminEmail(email);
         showFeedback(`تم سحب صلاحيات المشرف العام من ${email}`);
       } catch (err: any) {
         showFeedback(err?.message || 'فشلت عملية سحب الصلاحية', true);
+      }
+    });
+  };
+
+  const handlePromoteToSuperAdmin = async (mem: OrganizationMember) => {
+    const email = normalizeEmail(mem.userEmail);
+    if (!email || !canManageSuperAdmins) return;
+    if (!confirm(`هل أنت متأكد من ترقية "${mem.userName || email}" إلى مشرف عام على المنصة؟\nسيمتلك صلاحيات شاملة على كامل النظام وجميع الشركات.`)) return;
+    await memberActions.run(`superadmin:${email}`, async () => {
+      try {
+        await addSuperAdminEmail(email, { uid: mem.userId, name: mem.userName });
+        if (mem.userId && isRealUid(mem.userId)) {
+          const db = getDb();
+          if (db) {
+            await updateDoc(doc(db, 'users', mem.userId), { role: 'super_admin', updatedAt: new Date().toISOString() }).catch(() => {});
+          }
+        }
+        showFeedback(`تمت ترقية ${mem.userName || email} إلى مشرف عام على المنصة بنجاح 👑`);
+      } catch (err: any) {
+        showFeedback(err?.message || 'فشلت الترقية', true);
       }
     });
   };
@@ -286,12 +407,9 @@ export const UsersManagement: React.FC = () => {
     setEditError('');
     setEditingMember(member);
     setEditMemberName(member.userName || '');
-    // Only a real grant counts; a stale member role of 'super_admin' is shown as employee so
-    // saving the form can never silently re-grant platform-wide access. A leftover legacy grant
-    // (not the owner) starts as "keep as is"; picking another role removes it.
-    const isSuper = isSuperAdminEmail(member.userEmail);
-    const legacySuper = isSuper && !isPlatformOwner(member.userEmail);
-    setEditMemberRole(legacySuper ? 'keep_super_admin' : membershipRoleOf(member, isSuper));
+    const isSuper = isSuperAdminEmail(member.userEmail) || member.role === 'super_admin';
+    const isOwner = isPlatformOwner(member.userEmail);
+    setEditMemberRole(isOwner ? 'keep_super_admin' : isSuper ? 'super_admin' : (member.role || 'employee'));
     setEditMemberDept(member.department || 'الإدارة العامة');
     setEditMemberTitle(member.jobTitle || '');
     setEditMemberPhone(member.phone || '');
@@ -310,50 +428,85 @@ export const UsersManagement: React.FC = () => {
     }
     setEditError('');
     const target = editingMember;
-    // Own / platform-owner membership: contact details only, role / company / status are never sent.
     const locked = isProtectedMembership(target);
     await editGuard.run(async () => {
-    try {
-    const email = target.userEmail;
-    const isCurrentlySuper = isSuperAdminEmail(email);
+      try {
+        const email = normalizeEmail(target.userEmail);
+        const isCurrentlySuper = isSuperAdminEmail(email) || target.role === 'super_admin';
+        const isPromotingToSuper = canManageSuperAdmins && editMemberRole === 'super_admin' && !isCurrentlySuper;
+        const isDemotingFromSuper = canManageSuperAdmins && isCurrentlySuper && editMemberRole !== 'super_admin' && editMemberRole !== 'keep_super_admin' && !locked;
 
-    // Super admin is never granted here. The only change allowed is removing a leftover legacy
-    // grant (not the owner, who is always a locked row): picking a regular role demotes them.
-    const demoteLegacySuper = !locked && canManageSuperAdmins && isCurrentlySuper && editMemberRole !== 'keep_super_admin';
-    if (demoteLegacySuper && email) {
-      await removeSuperAdminEmail(email);
-    }
+        if (isPromotingToSuper && email) {
+          await addSuperAdminEmail(email, { uid: target.userId, name });
+        } else if (isDemotingFromSuper && email) {
+          await removeSuperAdminEmail(email);
+        }
 
-    const updates: Partial<OrganizationMember> = {
-      userName: name,
-      department: editMemberDept.trim(),
-      jobTitle: editMemberTitle.trim(),
-      phone: editMemberPhone.trim(),
-    };
-    if (!locked) {
-      // The membership keeps a regular role; 'super_admin' is never written to a membership.
-      const targetRole: AssignableRole =
-        editMemberRole === 'keep_super_admin' ? membershipRoleOf(target, isCurrentlySuper) : editMemberRole;
-      const active = editMemberStatus === 'active';
-      // Only what actually changed is sent.
-      if (targetRole !== target.role) updates.role = targetRole;
-      if (active !== (target.active !== false)) updates.active = active;
-      if (editMemberOrgId && editMemberOrgId !== target.orgId) updates.orgId = editMemberOrgId;
-    }
-    await updateMember(target.id, updates);
+        const targetRole: Role =
+          editMemberRole === 'keep_super_admin'
+            ? (isCurrentlySuper ? 'super_admin' : 'employee')
+            : editMemberRole;
 
-    setIsEditModalOpen(false);
-    setEditingMember(null);
-    showFeedback(
-      demoteLegacySuper
-        ? `تم حفظ تعديلات المستخدم ${name} وسحب صلاحيات المشرف العام منه`
-        : `تم حفظ تعديلات المستخدم ${name} بنجاح`,
-      false,
-      4000
-    );
-    } catch (err: any) {
-      setEditError(err?.message || 'تعذر حفظ التعديلات');
-    }
+        const isSyntheticRow = target.id.startsWith('usr-') || target.id.startsWith('super-');
+
+        if (isSyntheticRow) {
+          const db = getDb();
+          const targetUid = target.userId && isRealUid(target.userId) ? target.userId : null;
+          if (db && targetUid) {
+            await updateDoc(doc(db, 'users', targetUid), {
+              name,
+              department: editMemberDept.trim(),
+              jobTitle: editMemberTitle.trim(),
+              phone: editMemberPhone.trim(),
+              role: targetRole,
+              orgId: editMemberOrgId || '',
+              active: editMemberStatus === 'active',
+              updatedAt: new Date().toISOString(),
+            });
+          }
+          if (editMemberOrgId && targetUid) {
+            await addMember({
+              orgId: editMemberOrgId,
+              userId: targetUid,
+              userName: name,
+              userEmail: email,
+              role: targetRole === 'super_admin' ? 'org_admin' : targetRole,
+              department: editMemberDept.trim() || 'الإدارة العامة',
+              jobTitle: editMemberTitle.trim() || 'موظف',
+              phone: editMemberPhone.trim(),
+              active: editMemberStatus === 'active',
+            }).catch(e => console.warn('[Users] Add member to org warning:', e));
+          }
+        } else {
+          const updates: Partial<OrganizationMember> = {
+            userName: name,
+            department: editMemberDept.trim(),
+            jobTitle: editMemberTitle.trim(),
+            phone: editMemberPhone.trim(),
+          };
+          if (!locked) {
+            const active = editMemberStatus === 'active';
+            if (targetRole !== target.role) updates.role = targetRole === 'super_admin' ? 'org_admin' : targetRole;
+            if (active !== (target.active !== false)) updates.active = active;
+            if (editMemberOrgId && editMemberOrgId !== target.orgId) updates.orgId = editMemberOrgId;
+          }
+          await updateMember(target.id, updates);
+        }
+
+        setIsEditModalOpen(false);
+        setEditingMember(null);
+        showFeedback(
+          isPromotingToSuper
+            ? `تم حفظ التعديلات وترقية ${name} إلى مشرف عام 👑`
+            : isDemotingFromSuper
+            ? `تم حفظ التعديلات وسحب صلاحية المشرف العام من ${name}`
+            : `تم حفظ تعديلات المستخدم ${name} بنجاح`,
+          false,
+          4000
+        );
+      } catch (err: any) {
+        setEditError(err?.message || 'تعذر حفظ التعديلات');
+      }
     });
   };
 
@@ -369,10 +522,16 @@ export const UsersManagement: React.FC = () => {
       setProvError('يرجى إدخال بريد إلكتروني صحيح');
       return;
     }
+    const cleanPass = provPassword.trim();
+    if (!cleanPass || cleanPass.length < 6) {
+      setProvError('كلمة المرور يجب ألا تقل عن 6 خانات (أحرف أو أرقام).');
+      return;
+    }
+    const isSuper = provRole === 'super_admin';
     const email = normalizeEmail(provEmail);
     const orgIds = provSelectedOrgIds;
-    if (orgIds.length === 0) {
-      const registeredEverywhere = provisionOrgs.length > 0 && provisionOrgs.every(o => provUnavailable[o.id]);
+    if (!isSuper && provisionOrgs.length > 0 && orgIds.length === 0) {
+      const registeredEverywhere = provisionOrgs.every(o => provUnavailable[o.id]);
       setProvError(
         registeredEverywhere
           ? `هذا البريد الإلكتروني (${email}) مسجل بالفعل في كل الشركات المتاحة لك.`
@@ -383,41 +542,65 @@ export const UsersManagement: React.FC = () => {
 
     const name = provName.trim();
     await provisionGuard.run(async (idempotencyKey) => {
-    try {
-      // One membership per selected company, all in one transaction. Companies where this
-      // email is already registered are skipped (and reported), never failing the others.
-      const result = await addMemberToOrgs({
-        userId: '',
-        userName: name,
-        userEmail: email,
-        role: provRole,
-        department: provDept.trim() || 'الإدارة العامة',
-        jobTitle: provTitle.trim() || 'موظف',
-        phone: provPhone.trim(),
-        active: true,
-      }, orgIds, { idempotencyKey });
+      try {
+        const res = await createCompanyUser({
+          name,
+          email,
+          password: cleanPass,
+          phone: provPhone.trim(),
+          role: provRole,
+          department: provDept.trim(),
+          jobTitle: provTitle.trim(),
+          orgId: orgIds[0] || (isSuper ? '' : undefined),
+          idempotencyKey,
+        });
 
-      provisionGuard.rotateKey();
-      setIsProvisionModalOpen(false);
-      setProvName('');
-      setProvEmail('');
-      setProvTitle('');
-      setProvPhone('');
-      setProvOrgIds([]);
+        if (!res.success) {
+          setProvError(res.message || 'فشلت إضافة المستخدم');
+          return;
+        }
 
-      const added = result.addedOrgIds.map(orgNameOf);
-      const skipped = result.skipped.map(s => {
-        const why = s.reason === 'already_member' ? ALREADY_MEMBER_REASON : 'مكرر';
-        return `${orgNameOf(s.orgId)} (${why}${s.existingName ? ` باسم "${s.existingName}"` : ''})`;
-      });
-      let message = added.length > 0
-        ? `تمت إضافة الموظف ${name} إلى: ${added.join('، ')}.`
-        : `الموظف ${name} مضاف بالفعل إلى الشركات المختارة.`;
-      if (skipped.length > 0) message += ` لم تتم إضافته إلى: ${skipped.join('، ')}.`;
-      showFeedback(message, false, skipped.length > 0 ? 9000 : 5000);
-    } catch (err: any) {
-      setProvError(err?.message || 'فشلت إضافة الموظف');
-    }
+        const creds = res.credentials || { email, password: cleanPass };
+        const userUid = res.uid || '';
+
+        const remainingOrgs = orgIds.slice(1);
+        const addedOrgNames = orgIds[0] ? [orgNameOf(orgIds[0])] : [];
+        if (remainingOrgs.length > 0 && userUid) {
+          try {
+            const extraRes = await addMemberToOrgs({
+              userId: userUid,
+              userName: name,
+              userEmail: email,
+              role: provRole,
+              department: provDept.trim() || 'الإدارة العامة',
+              jobTitle: provTitle.trim() || 'موظف',
+              phone: provPhone.trim(),
+              active: true,
+            }, remainingOrgs, { idempotencyKey: `${idempotencyKey}:more` });
+            addedOrgNames.push(...extraRes.addedOrgIds.map(orgNameOf));
+          } catch (extraErr) {
+            console.warn('[Users] Extra orgs assignment warning:', extraErr);
+          }
+        }
+
+        provisionGuard.rotateKey();
+        setIsProvisionModalOpen(false);
+        setProvName('');
+        setProvEmail('');
+        setProvPassword('');
+        setProvPhone('');
+        setProvOrgIds([]);
+
+        setCreatedUserCredentials({
+          name,
+          email: creds.email,
+          password: creds.password,
+          roleLabel: isSuper ? 'مشرف عام على المنصة (Super Admin) 👑' : ROLE_LABELS[provRole] || provRole,
+          orgNames: addedOrgNames.length > 0 ? addedOrgNames : (isSuper ? ['كامل المنصة وجميع الشركات 👑'] : ['غير منسوب لشركة حالياً']),
+        });
+      } catch (err: any) {
+        setProvError(err?.message || 'فشلت إضافة المستخدم');
+      }
     });
   };
 
@@ -690,8 +873,15 @@ export const UsersManagement: React.FC = () => {
                             <span className="font-bold text-slate-800 block text-xs">{org.name}</span>
                             <span className="text-[10px] text-slate-400 font-mono uppercase block">{org.code || 'TEGY'}</span>
                           </div>
+                        ) : isThisSuperAdmin ? (
+                          <div className="flex items-center gap-1 text-amber-700">
+                            <Crown className="h-3 w-3" />
+                            <span className="font-bold text-xs">كامل المنصة (مشرف عام)</span>
+                          </div>
                         ) : (
-                          <span className="text-slate-400 text-xs">غير محدد</span>
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-500">
+                            غير منسوب لشركة حالياً
+                          </span>
                         )}
                       </td>
 
@@ -797,13 +987,26 @@ export const UsersManagement: React.FC = () => {
                             </span>
                           )}
 
-                          {/* 4. Remove a leftover legacy super-admin grant (never promote; never the owner or oneself) */}
+                          {/* 4. Promote to Super Admin */}
+                          {canManageSuperAdmins && !isThisSuperAdmin && !isThisOwner && (
+                            <button
+                              type="button"
+                              onClick={() => handlePromoteToSuperAdmin(mem)}
+                              disabled={memberActions.isPending(`superadmin:${normalizeEmail(mem.userEmail)}`)}
+                              title="ترقية إلى مشرف عام على المنصة (Super Admin) 👑"
+                              className="p-1.5 rounded-lg border transition cursor-pointer bg-white text-slate-400 border-slate-200 hover:text-amber-600 hover:bg-amber-50 hover:border-amber-300 disabled:opacity-50"
+                            >
+                              <Crown className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+
+                          {/* 5. Demote Super Admin */}
                           {canManageSuperAdmins && isThisSuperAdmin && !isThisOwner && normalizeEmail(mem.userEmail) !== myEmail && (
                             <button
                               type="button"
                               onClick={() => handleDemoteSuperAdmin(mem.userEmail)}
                               disabled={memberActions.isPending(`superadmin:${normalizeEmail(mem.userEmail)}`)}
-                              title="سحب صلاحيات المشرف العام (مالك المنصة هو المشرف العام الوحيد)"
+                              title="سحب صلاحيات المشرف العام"
                               className="p-1.5 rounded-lg border transition cursor-pointer bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200 disabled:opacity-50"
                             >
                               <Crown className="h-3.5 w-3.5" />
@@ -893,7 +1096,10 @@ export const UsersManagement: React.FC = () => {
                     onChange={(e) => setEditMemberRole(e.target.value as EditRoleChoice)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-bold text-slate-800"
                   >
-                    {editingIsLegacySuper && (
+                    {canManageSuperAdmins && (
+                      <option value="super_admin">👑 مشرف عام على المنصة (Super Admin)</option>
+                    )}
+                    {editingIsLegacySuper && !canManageSuperAdmins && (
                       <option value="keep_super_admin">👑 مشرف عام حالياً (صلاحية قديمة، بدون تغيير)</option>
                     )}
                     <option value="org_admin">مدير مؤسسة (Company Admin)</option>
@@ -902,10 +1108,10 @@ export const UsersManagement: React.FC = () => {
                     <option value="data_entry">مدخل بيانات (Data Entry)</option>
                   </select>
                 )}
-                {editingIsLegacySuper && canManageSuperAdmins && (
+                {canManageSuperAdmins && editMemberRole === 'super_admin' && (
                   <p className="mt-1 text-[11px] text-amber-700 font-semibold flex items-start gap-1">
-                    <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
-                    <span>مالك المنصة هو المشرف العام الوحيد. اختيار دور آخر يسحب صلاحية المشرف العام من هذا الحساب ولا يمكن منحها مرة أخرى.</span>
+                    <Crown className="h-3 w-3 shrink-0 mt-0.5" />
+                    <span>المشرف العام يمتلك صلاحيات شاملة على كامل النظام وجميع الشركات.</span>
                   </p>
                 )}
               </div>
@@ -918,6 +1124,7 @@ export const UsersManagement: React.FC = () => {
                     onChange={(e) => setEditMemberOrgId(e.target.value)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-medium text-slate-800"
                   >
+                    <option value="">-- بدون شركة حالياً (مستخدم عام) --</option>
                     {displayOrgs.map(org => {
                       // One membership per company: a company where this email is already
                       // registered (another membership) cannot be chosen.
@@ -1053,14 +1260,59 @@ export const UsersManagement: React.FC = () => {
                 />
               </div>
 
+              {/* Password field with toggle & generator */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="font-bold text-slate-700">كلمة المرور *</label>
+                  <button
+                    type="button"
+                    onClick={() => setProvPassword(generateRandomPassword())}
+                    className="text-[11px] text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1 cursor-pointer"
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    <span>توليد تلقائي</span>
+                  </button>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    value={provPassword}
+                    onChange={(e) => setProvPassword(e.target.value)}
+                    placeholder="كلمة المرور (6 خانات على الأقل)"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-800 pl-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    tabIndex={-1}
+                    className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                  >
+                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+                <p className="mt-1 text-[10px] text-slate-500 font-medium">
+                  ستتمكن من نسخ كلمة المرور وبيانات الدخول فور إضافة المستخدم لإرسالها إليه.
+                </p>
+              </div>
+
+              {provRole === 'super_admin' && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 font-medium flex items-start gap-2">
+                  <Crown className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
+                  <span>المشرف العام يمتلك صلاحيات شاملة على كامل النظام وجميع الشركات (تحديد الشركات اختياري).</span>
+                </div>
+              )}
+
               <OrgMultiSelect
                 orgs={provisionOrgs}
                 selected={provSelectedOrgIds}
                 onChange={setProvOrgIds}
-                label="الشركة التابعة (تحديد متعدد) *"
+                label={provRole === 'super_admin' ? 'الشركات التابعة (اختياري للمشرف العام)' : 'الشركة التابعة (تحديد متعدد) *'}
                 unavailable={provUnavailable}
                 emptyHint={
-                  provisionOrgs.length > 0 && provisionOrgs.every(o => provUnavailable[o.id])
+                  provRole === 'super_admin'
+                    ? '* المشرف العام يمتلك صلاحيات شاملة؛ تحديد الشركات اختياري.'
+                    : provisionOrgs.length > 0 && provisionOrgs.every(o => provUnavailable[o.id])
                     ? '* هذا البريد مسجل بالفعل في كل الشركات المتاحة.'
                     : '* يرجى تحديد شركة واحدة على الأقل.'
                 }
@@ -1075,6 +1327,9 @@ export const UsersManagement: React.FC = () => {
                     onChange={(e) => setProvRole(e.target.value as AssignableRole)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-bold text-slate-800"
                   >
+                    {canManageSuperAdmins && (
+                      <option value="super_admin">👑 مشرف عام على المنصة (Super Admin)</option>
+                    )}
                     <option value="employee">موظف (Employee)</option>
                     <option value="finance">مسؤول مالي (Finance)</option>
                     <option value="org_admin">مدير مؤسسة (Admin)</option>
@@ -1124,14 +1379,19 @@ export const UsersManagement: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsProvisionModalOpen(false)}
-                  className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50"
+                  className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
-                  disabled={isProvisioning || provSelectedOrgIds.length === 0}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 disabled:opacity-50"
+                  disabled={
+                    isProvisioning ||
+                    !provPassword.trim() ||
+                    provPassword.length < 6 ||
+                    (provRole !== 'super_admin' && provisionOrgs.length > 0 && provSelectedOrgIds.length === 0)
+                  }
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                 >
                   {isProvisioning ? (
                     <>
@@ -1142,12 +1402,93 @@ export const UsersManagement: React.FC = () => {
                     <span>
                       {provSelectedOrgIds.length > 1
                         ? `+ إضافة المستخدم إلى ${provSelectedOrgIds.length} شركات`
+                        : provRole === 'super_admin'
+                        ? '👑 إضافة مشرف عام للمنصة'
                         : '+ إضافة المستخدم'}
                     </span>
                   )}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Credentials Modal after user creation */}
+      {createdUserCredentials && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2 text-emerald-600">
+                <CheckCircle2 className="h-6 w-6" />
+                <h3 className="text-base font-bold text-slate-900">تم إنشاء الحساب بنجاح 🎉</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCreatedUserCredentials(null)}
+                className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              تم إنشاء حساب المستخدم وكلمة المرور الخاصة به. يمكنك الآن نسخ بيانات الدخول وإرسالها للمستخدم مباشرة:
+            </p>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2.5 text-xs">
+              <div className="flex justify-between items-center py-1 border-b border-slate-200/60">
+                <span className="text-slate-500 font-medium">الاسم:</span>
+                <span className="font-bold text-slate-900">{createdUserCredentials.name}</span>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-slate-200/60">
+                <span className="text-slate-500 font-medium">الصلاحية / الدور:</span>
+                <span className="font-bold text-indigo-700">{createdUserCredentials.roleLabel}</span>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-slate-200/60">
+                <span className="text-slate-500 font-medium">البريد الإلكتروني:</span>
+                <span className="font-mono font-bold text-slate-800">{createdUserCredentials.email}</span>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-slate-200/60">
+                <span className="text-slate-500 font-medium">كلمة المرور:</span>
+                <span className="font-mono font-bold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-lg border border-emerald-200">
+                  {createdUserCredentials.password}
+                </span>
+              </div>
+              <div className="flex justify-between items-center py-1">
+                <span className="text-slate-500 font-medium">النطاق / الشركات:</span>
+                <span className="font-semibold text-slate-800 text-left max-w-[200px] truncate" title={createdUserCredentials.orgNames.join('، ')}>
+                  {createdUserCredentials.orgNames.join('، ')}
+                </span>
+              </div>
+            </div>
+
+            <div className="pt-2 flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={handleCopyCredentials}
+                className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center justify-center gap-2 cursor-pointer transition"
+              >
+                {copiedCredentials ? (
+                  <>
+                    <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                    <span>تم نسخ بيانات الدخول إلى الحافظة! ✔</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-4 w-4" />
+                    <span>نسخ بيانات الدخول لإرسالها للمستخدم</span>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreatedUserCredentials(null)}
+                className="w-full py-2 px-4 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
+              >
+                إغلاق
+              </button>
+            </div>
           </div>
         </div>
       )}

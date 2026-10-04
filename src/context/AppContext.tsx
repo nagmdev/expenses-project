@@ -465,7 +465,7 @@ interface AppContextType {
 
   // Auth & Roles
   superAdminEmails: string[];
-  addSuperAdminEmail: (email: string) => Promise<void>;
+  addSuperAdminEmail: (email: string, extra?: { uid?: string; name?: string }) => Promise<void>;
   removeSuperAdminEmail: (email: string) => Promise<void>;
   updateSuperAdminRole: (email: string, newRole: Role, targetOrgId?: string) => Promise<void>;
   signInWithGoogle: () => Promise<any>;
@@ -511,6 +511,7 @@ interface AppContextType {
   deleteOrganization: (orgId: string) => Promise<{ success: boolean; message?: string }>;
 
   // Members & User Management
+  allUsers: User[];
   addMember: (member: Omit<OrganizationMember, 'id' | 'joinedAt'>, opts?: MutationOptions) => Promise<void>;
   /** Adds one person to every selected company in ONE operation; companies where they already belong are skipped. */
   addMemberToOrgs: (member: Omit<OrganizationMember, 'id' | 'joinedAt' | 'orgId'>, orgIds: string[], opts?: MutationOptions) => Promise<MultiOrgAddResult>;
@@ -707,6 +708,7 @@ const provisionedAccounts = new Map<string, { uid: string; email: string; passwo
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Raw states: populated ONLY by real-time Firestore listeners (one per collection).
   const [rawOrganizations, setRawOrganizations] = useState<Organization[]>([]);
+  const [rawUsers, setRawUsers] = useState<User[]>([]);
   const [rawMembers, setRawMembers] = useState<OrganizationMember[]>([]);
   const [queriedMemberships, setMyMemberships] = useState<OrganizationMember[]>([]);
   // Records of the user's email in its profile's company (see the profile-company listener below).
@@ -1565,6 +1567,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setRawMembers(list);
       setMembersSnapshotScope(membersScope);
     }, notDummy);
+
+    // Users (system profiles - super admin only)
+    if (isSuperAdmin) {
+      unsubs.push(onSnapshot(collection(db, 'users'), snapshot => {
+        setRawUsers(snapshot.docs.map(d => ({
+          ...d.data(),
+          id: d.id,
+          name: d.data().name || '',
+          email: d.data().email || '',
+          role: d.data().role || 'employee',
+          orgId: d.data().orgId || '',
+          phone: d.data().phone || '',
+          active: d.data().active !== false,
+        } as User)));
+      }, err => {
+        if (err?.code !== 'permission-denied') {
+          console.warn('[Firebase] Users collection listener:', err?.message || err);
+        }
+      }));
+    } else {
+      setRawUsers([]);
+    }
     // Services: the company's own, plus those another company shares with it (orgIds, set by
     // the platform owner). Two queries, one slice of state: their union by id.
     if (isSuperAdmin || !effectiveOrgId) {
@@ -1708,6 +1732,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (firebaseUser) return;
     setRawOrganizations([]);
+    setRawUsers([]);
     setRawMembers([]);
     setMyMemberships([]);
     setRawServices([]);
@@ -1998,26 +2023,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // =========================================================================
   // SUPER ADMIN MANAGEMENT
   // =========================================================================
-  // The platform owner (DEFAULT_SUPER_ADMINS) is the ONLY super admin: nobody else can be
-  // promoted from any screen. Blocked here centrally (updateSuperAdminRole and every
-  // "promote" button go through addSuperAdminEmail). Demoting a leftover legacy super
-  // admin (removeSuperAdminEmail) keeps working; the owner can never be demoted.
-  const addSuperAdminEmail = async (email: string) => {
+  const addSuperAdminEmail = async (email: string, extra?: { uid?: string; name?: string }) => {
     const cleanEmail = normalizeEmail(email);
     if (!cleanEmail) return;
-    if (!DEFAULT_SUPER_ADMINS.includes(cleanEmail)) {
-      throw new DomainError('forbidden', SUPER_ADMIN_OWNER_ONLY_MESSAGE);
+    if (!isSuperAdmin) {
+      throw new DomainError('forbidden', 'ترقية المشرفين متاحة للمشرف العام فقط.');
     }
     await mutate('superAdmin', `add:${cleanEmail}`, async () => {
       const db = getDb()!;
-      await setDoc(doc(db, 'super_admins', cleanEmail), {
+      const nowIso = new Date().toISOString();
+      const adminData = {
         email: cleanEmail,
         role: 'super_admin',
-        promotedAt: new Date().toISOString(),
+        promotedAt: nowIso,
         active: true,
-      }, { merge: true });
+        ...(extra?.uid ? { uid: extra.uid } : {}),
+        ...(extra?.name ? { name: extra.name } : {}),
+        addedBy: actor.id || 'super_admin',
+      };
+      await setDoc(doc(db, 'super_admins', cleanEmail), adminData, { merge: true });
+      if (extra?.uid) {
+        await setDoc(doc(db, 'super_admins', extra.uid), adminData, { merge: true });
+        await updateDoc(doc(db, 'users', extra.uid), { role: 'super_admin', updatedAt: nowIso }).catch(() => {});
+      } else {
+        const snap = await getDocs(query(collection(db, 'users'), where('email', '==', cleanEmail))).catch(() => null);
+        if (snap && !snap.empty) {
+          const userDoc = snap.docs[0];
+          await setDoc(doc(db, 'super_admins', userDoc.id), { ...adminData, uid: userDoc.id }, { merge: true });
+          await updateDoc(userDoc.ref, { role: 'super_admin', updatedAt: nowIso }).catch(() => {});
+        }
+      }
       // Platform notification recipients (a missing list is filled by the backfill below).
-      await updateDoc(doc(db, 'system_settings', 'notification_recipients'), { emails: arrayUnion(cleanEmail), updatedAt: new Date().toISOString() })
+      await updateDoc(doc(db, 'system_settings', 'notification_recipients'), { emails: arrayUnion(cleanEmail), updatedAt: nowIso })
         .catch(err => console.warn('[superAdmin] notification recipients not updated:', err?.message || err));
     });
     setSuperAdminEmails(prev => Array.from(new Set([...prev, cleanEmail])));
@@ -2025,7 +2062,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       actionType: 'role_change',
       entityType: 'member',
       entityId: cleanEmail,
-      entityName: cleanEmail,
+      entityName: extra?.name || cleanEmail,
       details: `تمت ترقية الحساب (${cleanEmail}) إلى سوبر أدمن (مشرف عام على المنصة) 👑`,
     });
   };
@@ -2035,6 +2072,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!cleanEmail) return;
     if (DEFAULT_SUPER_ADMINS.includes(cleanEmail)) {
       throw new DomainError('forbidden', 'لا يمكن إزالة مالك المنصة (المشرف العام الأساسي).');
+    }
+    if (!isSuperAdmin) {
+      throw new DomainError('forbidden', 'سحب صلاحية المشرف العام متاح للمشرفين العموم فقط.');
     }
     await mutate('superAdmin', `remove:${cleanEmail}`, async () => {
       const db = getDb()!;
@@ -2048,6 +2088,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const byEmail = await getDocs(query(collection(db, 'super_admins'), where('email', '==', cleanEmail))).catch(() => null);
       byEmail?.docs.forEach(d => ids.add(d.id));
       for (const id of ids) await deleteFirestoreDoc('super_admins', id);
+      const usersSnap = await getDocs(query(collection(db, 'users'), where('email', '==', cleanEmail))).catch(() => null);
+      if (usersSnap && !usersSnap.empty) {
+        for (const uDoc of usersSnap.docs) {
+          await updateDoc(uDoc.ref, { role: 'employee', updatedAt: new Date().toISOString() }).catch(() => {});
+        }
+      }
       await updateDoc(doc(getDb()!, 'system_settings', 'notification_recipients'), { emails: arrayRemove(cleanEmail), updatedAt: new Date().toISOString() })
         .catch(err => console.warn('[superAdmin] notification recipients not updated:', err?.message || err));
     });
@@ -2062,12 +2108,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   /**
-   * A membership role of 'super_admin' grants nothing under firestore.rules (and would only
-   * mislead the screens): no member may be given it, except the platform owner's own record.
+   * Only super admins may grant the super_admin role.
    */
   const assertNoSuperAdminGrant = (role: Role | undefined, email?: string | null) => {
-    if (role === 'super_admin' && !DEFAULT_SUPER_ADMINS.includes(normalizeEmail(email))) {
-      throw new DomainError('forbidden', SUPER_ADMIN_OWNER_ONLY_MESSAGE);
+    if (role === 'super_admin' && !isSuperAdmin && !DEFAULT_SUPER_ADMINS.includes(normalizeEmail(email))) {
+      throw new DomainError('forbidden', 'منح صلاحية المشرف العام متاح للمشرفين العموم فقط.');
     }
   };
 
@@ -2112,12 +2157,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     orgId?: string;
     idempotencyKey?: string;
   }): Promise<{ success: boolean; message?: string; code?: string; credentials?: { email: string; password: string }; uid?: string }> => {
-    const targetOrgId = data.orgId || effectiveOrgId;
-    if (!targetOrgId || targetOrgId === 'all') {
-      return { success: false, message: 'يرجى تحديد المؤسسة أولاً لإضافة الموظف إليها.' };
+    const isSuperAdminRole = data.role === 'super_admin';
+    const targetOrgId = data.orgId || (effectiveOrgId !== 'all' ? effectiveOrgId : '');
+    if (isSuperAdminRole && !isSuperAdmin) {
+      return { success: false, message: 'إنشاء حساب مشرف عام متاح للمشرفين العموم فقط.' };
     }
-    if (data.role === 'super_admin' && !DEFAULT_SUPER_ADMINS.includes(normalizeEmail(data.email))) {
-      return { success: false, message: SUPER_ADMIN_OWNER_ONLY_MESSAGE };
+    if (!isSuperAdminRole && !targetOrgId && rawOrganizations.length > 0) {
+      return { success: false, message: 'يرجى تحديد المؤسسة أولاً لإضافة الموظف إليها.' };
     }
     const opKey = data.idempotencyKey || newOperationKey();
 
@@ -2146,23 +2192,91 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         }
 
-        const defaultJobTitle = data.role === 'org_admin' ? 'مدير المؤسسة' : data.role === 'finance' ? 'مسؤول الصرف والخزينة' : data.role === 'data_entry' ? 'مدخل بيانات' : 'موظف';
-        await createMember(store, actor, {
-          orgId: targetOrgId,
-          userId: account.uid,
-          userName: data.name.trim(),
-          userEmail: account.email,
-          phone: data.phone?.trim() || '',
-          role: data.role,
-          department: data.department?.trim() || (data.role === 'finance' ? 'المالية والحسابات' : data.role === 'data_entry' ? 'إدخال البيانات والتسجيل' : 'العمليات والتشغيل'),
-          jobTitle: data.jobTitle?.trim() || defaultJobTitle,
-          active: true,
-        }, opKey, { writeUserProfile: true });
+        const nowIso = new Date().toISOString();
+        const defaultJobTitle = isSuperAdminRole
+          ? 'مشرف عام على المنصة'
+          : data.role === 'org_admin'
+          ? 'مدير المؤسسة'
+          : data.role === 'finance'
+          ? 'مسؤول الصرف والخزينة'
+          : data.role === 'data_entry'
+          ? 'مدخل بيانات'
+          : 'موظف';
+
+        if (isSuperAdminRole) {
+          const db = getDb()!;
+          const adminDoc = {
+            uid: account.uid,
+            email: account.email,
+            name: data.name.trim(),
+            role: 'super_admin',
+            active: true,
+            createdAt: nowIso,
+            promotedAt: nowIso,
+            addedBy: actor.id || 'super_admin',
+          };
+          await setDoc(doc(db, 'super_admins', account.email), adminDoc, { merge: true });
+          await setDoc(doc(db, 'super_admins', account.uid), adminDoc, { merge: true });
+          await setDoc(doc(db, 'users', account.uid), {
+            name: data.name.trim(),
+            email: account.email,
+            phone: data.phone?.trim() || '',
+            role: 'super_admin',
+            department: data.department?.trim() || 'إدارة المنصة والنظام',
+            jobTitle: data.jobTitle?.trim() || defaultJobTitle,
+            orgId: targetOrgId || '',
+            memberId: '',
+            active: true,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          }, { merge: true });
+          setSuperAdminEmails(prev => Array.from(new Set([...prev, account.email])));
+          if (targetOrgId) {
+            await createMember(store, actor, {
+              orgId: targetOrgId,
+              userId: account.uid,
+              userName: data.name.trim(),
+              userEmail: account.email,
+              phone: data.phone?.trim() || '',
+              role: 'org_admin',
+              department: data.department?.trim() || 'الإدارة العامة',
+              jobTitle: data.jobTitle?.trim() || defaultJobTitle,
+              active: true,
+            }, opKey, { writeUserProfile: false }).catch(() => {});
+          }
+        } else if (targetOrgId) {
+          await createMember(store, actor, {
+            orgId: targetOrgId,
+            userId: account.uid,
+            userName: data.name.trim(),
+            userEmail: account.email,
+            phone: data.phone?.trim() || '',
+            role: data.role,
+            department: data.department?.trim() || (data.role === 'finance' ? 'المالية والحسابات' : data.role === 'data_entry' ? 'إدخال البيانات والتسجيل' : 'العمليات والتشغيل'),
+            jobTitle: data.jobTitle?.trim() || defaultJobTitle,
+            active: true,
+          }, opKey, { writeUserProfile: true });
+        } else {
+          const db = getDb()!;
+          await setDoc(doc(db, 'users', account.uid), {
+            name: data.name.trim(),
+            email: account.email,
+            phone: data.phone?.trim() || '',
+            role: data.role,
+            department: data.department?.trim() || 'عام',
+            jobTitle: data.jobTitle?.trim() || defaultJobTitle,
+            orgId: '',
+            memberId: '',
+            active: true,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          }, { merge: true });
+        }
 
         provisionedAccounts.delete(opKey);
         return {
           success: true,
-          message: 'تم إنشاء وتفعيل حساب الموظف بنجاح!',
+          message: isSuperAdminRole ? 'تم إنشاء وتفعيل حساب المشرف العام بنجاح!' : 'تم إنشاء وتفعيل حساب الموظف بنجاح!',
           credentials: { email: account.email, password: account.password },
           uid: account.uid,
         };
@@ -3389,6 +3503,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         currentRole: resolvedRole,
         members: scopedMembers,
         allMembers: rawMembers,
+        allUsers: rawUsers,
         services: scopedServices,
         allServices: rawServices,
         providers: scopedProviders,

@@ -181,6 +181,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     updateDepartment,
     deleteDepartment,
     superAdminEmails,
+    addSuperAdminEmail,
     removeSuperAdminEmail,
     updateSuperAdminRole,
     currentRole,
@@ -193,6 +194,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
   } = useApp();
 
   const isSuperAdmin = currentRole === 'super_admin';
+  const isSuperAdminEmail = (email: string) =>
+    superAdminEmails.some(e => normalizeEmail(e) === normalizeEmail(email));
   // What this role may do here (src/utils/permissions.ts mirrors the domain and firestore.rules):
   // an action is shown only to the roles the database accepts.
   const canManageOrgs = can(currentRole, 'manageCompanies');
@@ -698,8 +701,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     const cleanName = memberName.trim() || existingMembershipsForEmail[0]?.userName || '';
     const isExistingAccount = provisionIsExistingAccount;
     const targetOrgIds = provisionTargetOrgIds;
-    // Owner-only super admin: a member is never created with the super admin role.
-    const role: Role = memberRole === 'super_admin' ? 'employee' : memberRole;
+    const isSuper = memberRole === 'super_admin' && canManageOrgs;
+    const role: Role = isSuper ? 'super_admin' : (memberRole === 'super_admin' ? 'employee' : memberRole);
 
     if (!cleanEmail || !isValidEmail(cleanEmail)) {
       setProvisionError('يرجى كتابة بريد إلكتروني صحيح.');
@@ -709,7 +712,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       setProvisionError('يرجى كتابة اسم الموظف.');
       return;
     }
-    if (targetOrgIds.length === 0) {
+    if (!isSuper && targetOrgIds.length === 0) {
       setProvisionError(
         selectedOrgsForMember.length > 0
           ? 'هذا البريد مسجل بالفعل في كل الشركات المختارة. اختر شركة أخرى لم يُسجل بها بعد.'
@@ -769,13 +772,13 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
             role,
             department: department.trim(),
             jobTitle: jobTitle.trim(),
-            orgId: targetOrgIds[0],
+            orgId: targetOrgIds[0] || (isSuper ? '' : undefined),
             idempotencyKey,
           });
           if (res.success && res.credentials) {
             accountEmail = normalizeEmail(res.credentials.email);
             password = res.credentials.password;
-            addedOrgIds.push(targetOrgIds[0]);
+            if (targetOrgIds[0]) addedOrgIds.push(targetOrgIds[0]);
             remainingOrgIds = targetOrgIds.slice(1);
             linkKey = `${idempotencyKey}:more-orgs`;
             // The other companies' memberships use the new login's UID (returned by createCompanyUser).
@@ -851,11 +854,8 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
     setEditMemberName(mem.userName || '');
     setEditMemberPhone(mem.phone || '');
     setEditMemberOrgId(mem.orgId || displayOrgs[0]?.id || '');
-    // Super admin is never a company role (only the platform owner is super admin, via the
-    // super_admins list). A stored 'super_admin' member role grants nothing: show a company
-    // role instead so saving this form never writes 'super_admin'.
-    const isMemberSuperAdmin = superAdminEmails.some(e => normalizeEmail(e) === normalizeEmail(mem.userEmail));
-    setEditMemberRole(mem.role === 'super_admin' ? (isMemberSuperAdmin ? 'org_admin' : 'employee') : mem.role);
+    const isMemberSuperAdmin = isSuperAdminEmail(mem.userEmail) || mem.role === 'super_admin';
+    setEditMemberRole(isMemberSuperAdmin ? 'super_admin' : mem.role);
     setEditMemberDept(mem.department || 'العمليات والتشغيل');
     setEditMemberJob(mem.jobTitle || 'موظف');
     setEditMemberActive(mem.active !== false);
@@ -883,9 +883,13 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
           jobTitle: editMemberJob.trim(),
         };
         if (!locked) {
-          // Platform super admin status is managed only in the super admins section (demote only);
-          // editing a membership never grants or removes it. Only what changed is sent.
-          const role: Role = editMemberRole === 'super_admin' ? 'employee' : editMemberRole;
+          const isSuperTarget = isSuperAdminEmail(target.userEmail);
+          if (canManageOrgs && editMemberRole === 'super_admin' && !isSuperTarget) {
+            await addSuperAdminEmail(target.userEmail, { uid: target.userId, name });
+          } else if (canManageOrgs && isSuperTarget && editMemberRole !== 'super_admin') {
+            await removeSuperAdminEmail(target.userEmail);
+          }
+          const role: Role = editMemberRole === 'super_admin' ? 'org_admin' : editMemberRole;
           if (role !== target.role) updates.role = role;
           if (editMemberActive !== (target.active !== false)) updates.active = editMemberActive;
           if (canManageOrgs && editMemberOrgId && editMemberOrgId !== target.orgId) updates.orgId = editMemberOrgId;
@@ -3813,13 +3817,17 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                     orgs={creatableOrgs}
                     selected={selectedOrgsForMember}
                     onChange={setSelectedOrgsForMember}
-                    label="الشركات أو المؤسسات التابع لها (تحديد متعدد) *"
+                    label={memberRole === 'super_admin' ? 'الشركات أو المؤسسات التابع لها (اختياري للمشرف العام)' : 'الشركات أو المؤسسات التابع لها (تحديد متعدد) *'}
                     unavailable={memberUnavailableOrgs}
-                    emptyHint="* يرجى تحديد شركة واحدة على الأقل لإضافة الموظف إليها."
+                    emptyHint={
+                      memberRole === 'super_admin'
+                        ? '* تحديد الشركات اختياري للمشرف العام (صلاحيات شاملة على كامل المنصة).'
+                        : '* يرجى تحديد شركة واحدة على الأقل لإضافة الموظف إليها.'
+                    }
                     disabled={provisionLoading}
                   />
                 )}
-                {selectedOrgsForMember.length > 0 && provisionTargetOrgIds.length === 0 && (
+                {selectedOrgsForMember.length > 0 && provisionTargetOrgIds.length === 0 && memberRole !== 'super_admin' && (
                   <p className="text-[11px] text-rose-600 font-bold">
                     * البريد مسجل بالفعل في كل الشركات المختارة. اختر شركة أخرى لم يُسجل بها بعد.
                   </p>
@@ -3850,12 +3858,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   </div>
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">الدور الوظيفي *</label>
-                    {/* No super admin option: only the platform owner is super admin. */}
                     <select
                       value={memberRole}
                       onChange={(e) => setMemberRole(e.target.value as Role)}
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
                     >
+                      {canManageOrgs && (
+                        <option value="super_admin">👑 مشرف عام على المنصة (Super Admin)</option>
+                      )}
                       <option value="employee">موظف (Employee)</option>
                       <option value="finance">مسؤول الصرف والخزينة (Finance / Disburser)</option>
                       <option value="org_admin">مدير مؤسسة (Admin)</option>
@@ -3897,13 +3907,15 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   </button>
                   <button
                     type="submit"
-                    disabled={provisionLoading || provisionTargetOrgIds.length === 0}
+                    disabled={provisionLoading || (memberRole !== 'super_admin' && provisionTargetOrgIds.length === 0)}
                     className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs disabled:opacity-50"
                   >
                     {provisionLoading
                       ? 'جاري الحفظ...'
                       : provisionIsExistingAccount
                       ? `إضافة للشركات المختارة (${provisionTargetOrgIds.length})`
+                      : memberRole === 'super_admin'
+                      ? '👑 إنشاء مشرف عام على المنصة'
                       : provisionTargetOrgIds.length > 1
                       ? `حفظ وإنشاء الحساب (${provisionTargetOrgIds.length} شركات)`
                       : 'حفظ وإنشاء الحساب'}
@@ -3919,7 +3931,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
       {editingMember && (() => {
         const editingLocked = isProtectedMembership(editingMember);
         const roleLabel = (role: Role) =>
-          role === 'org_admin' ? 'مدير مؤسسة' : role === 'finance' ? 'مسؤول الصرف والخزينة' : role === 'data_entry' ? 'مدخل بيانات' : 'موظف';
+          role === 'super_admin' ? 'مشرف عام على المنصة 👑' : role === 'org_admin' ? 'مدير مؤسسة' : role === 'finance' ? 'مسؤول الصرف والخزينة' : role === 'data_entry' ? 'مدخل بيانات' : 'موظف';
         return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
           <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl p-6 border border-slate-100 animate-in fade-in zoom-in-95 duration-150 max-h-[92vh] overflow-y-auto">
@@ -3940,7 +3952,7 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                   <span>
                     {isPlatformOwner(editingMember.userEmail)
                       ? 'هذا الحساب هو مالك المنصة (المشرف العام الوحيد).'
-                      : 'هذا الحساب لديه صلاحية مشرف عام قديمة. تعديل الدور هنا لا يغيّرها؛ يمكن سحبها من قسم "المشرفين والصلاحيات".'}
+                      : 'هذا الحساب لديه صلاحية مشرف عام على كامل المنصة.'}
                   </span>
                 </div>
               )}
@@ -3982,12 +3994,14 @@ export const OrganizationsManagement: React.FC<{ initialSection?: AdminSection }
                       <span>{roleLabel(editMemberRole)}</span>
                     </div>
                   ) : (
-                    /* No super admin option: only the platform owner is super admin. */
                     <select
                       value={editMemberRole}
                       onChange={(e) => setEditMemberRole(e.target.value as Role)}
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 outline-hidden font-semibold"
                     >
+                      {canManageOrgs && (
+                        <option value="super_admin">👑 مشرف عام على المنصة (Super Admin)</option>
+                      )}
                       <option value="org_admin">مدير مؤسسة</option>
                       <option value="finance">مسؤول الصرف والخزينة</option>
                       <option value="employee">موظف</option>
