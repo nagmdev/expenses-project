@@ -4,6 +4,7 @@ import {
   getDocsFromServer,
   limit,
   query,
+  updateDoc,
   writeBatch,
   type Firestore,
 } from 'firebase/firestore';
@@ -26,11 +27,13 @@ export interface ResetSummary {
 
 /**
  * Collections to completely wipe when resetting the platform.
- * NOTE: 'users', 'super_admins', 'members', and 'system_settings' are strictly EXCLUDED
- * to preserve user logins, authentication, roles, and platform settings.
+ * NOTE: 'users', 'super_admins', and 'system_settings' are strictly EXCLUDED from deletion
+ * to preserve user logins, authentication, credentials, and platform configurations.
+ * 'members' is wiped because memberships belong to the deleted companies.
  */
 export const RESET_COLLECTIONS = [
   { name: 'organizations', label: 'الشركات والمؤسسات' },
+  { name: 'members', label: 'عضويات وصلاحيات الشركات السابقة' },
   { name: 'paymentAccounts', label: 'الخزائن والحسابات المالية' },
   { name: 'accountTransactions', label: 'حركات الحسابات والقيود' },
   { name: 'requests', label: 'طلبات الصرف' },
@@ -64,6 +67,15 @@ export async function resetDatabaseCollections(
     status: 'pending',
   }));
 
+  // Extra step for unlinking users
+  const userResetStep: ResetStepProgress = {
+    collection: 'users_reset',
+    label: 'إعادة ضبط الحسابات كمستخدمين عاديين غير منسوبين لشركة',
+    deletedCount: 0,
+    status: 'pending',
+  };
+  steps.push(userResetStep);
+
   let totalDeleted = 0;
 
   for (let i = 0; i < steps.length; i++) {
@@ -76,7 +88,28 @@ export async function resetDatabaseCollections(
     onProgress?.([...steps], step.collection);
 
     try {
-      if (step.collection === 'attachments') {
+      if (step.collection === 'users_reset') {
+        // Reset users: detach them from deleted orgs, set role to employee (except super_admins)
+        const snap = await getDocsFromServer(collection(db, 'users'));
+        const nowIso = new Date().toISOString();
+        let resetCount = 0;
+
+        for (const userDoc of snap.docs) {
+          if (signal?.aborted) throw new Error('تم إلغاء العملية.');
+          const data = userDoc.data();
+          const isSuperAdmin = data.role === 'super_admin';
+
+          await updateDoc(userDoc.ref, {
+            orgId: '',
+            memberId: '',
+            role: isSuperAdmin ? 'super_admin' : 'employee',
+            updatedAt: nowIso,
+          });
+          resetCount++;
+          step.deletedCount = resetCount;
+          onProgress?.([...steps], step.collection);
+        }
+      } else if (step.collection === 'attachments') {
         // Special handling for attachments: clean up subcollection 'chunks' then the document
         let hasMore = true;
         while (hasMore) {
@@ -89,7 +122,6 @@ export async function resetDatabaseCollections(
 
           for (const attDoc of snap.docs) {
             if (signal?.aborted) throw new Error('تم إلغاء العملية.');
-            // Delete chunks of this attachment if any
             try {
               const chunksSnap = await getDocsFromServer(collection(db, 'attachments', attDoc.id, 'chunks'));
               if (!chunksSnap.empty) {
@@ -101,7 +133,6 @@ export async function resetDatabaseCollections(
               // Ignore chunk lookup errors
             }
 
-            // Delete metadata document
             const batch = writeBatch(db);
             batch.delete(attDoc.ref);
             await batch.commit();
@@ -139,7 +170,6 @@ export async function resetDatabaseCollections(
         }
 
         if (!listed) {
-          // Fallback to deleting known counter IDs
           const ids = counterIds(new Date());
           for (const cId of ids) {
             if (signal?.aborted) throw new Error('تم إلغاء العملية.');
@@ -200,6 +230,7 @@ export async function resetDatabaseCollections(
     localStorage.removeItem('expenses_active_org_id_v3');
     const legacyKeys = [
       'expenses_organizations_v3',
+      'expenses_members_v3',
       'expenses_services_v3',
       'expenses_providers_v3',
       'expenses_requests_v3',

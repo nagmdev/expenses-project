@@ -7,6 +7,7 @@ describe('Database Reset Configuration', () => {
     
     // Core organizational & operational collections
     expect(names).toContain('organizations');
+    expect(names).toContain('members');
     expect(names).toContain('paymentAccounts');
     expect(names).toContain('accountTransactions');
     expect(names).toContain('requests');
@@ -30,12 +31,11 @@ describe('Database Reset Configuration', () => {
     expect(names).toContain('counters');
   });
 
-  it('strictly excludes users, super_admins, members, and system_settings from deletion', () => {
+  it('strictly excludes users, super_admins, and system_settings from deletion', () => {
     const names = RESET_COLLECTIONS.map(c => c.name);
     
     expect(names).not.toContain('users');
     expect(names).not.toContain('super_admins');
-    expect(names).not.toContain('members');
     expect(names).not.toContain('system_settings');
   });
 
