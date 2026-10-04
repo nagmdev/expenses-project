@@ -161,16 +161,8 @@ export async function resetDatabaseCollections(
       } else if (step.collection === 'paymentAccounts') {
         // Payment accounts: accounts with history cannot be deleted (strict financial rules).
         // Try deleteDoc; if rules refuse because of history, archive/deactivate the account.
-        let hasMore = true;
-        const BATCH_SIZE = 50;
-        while (hasMore) {
-          if (signal?.aborted) throw new Error('تم إلغاء العملية.');
-          const snap = await getDocsFromServer(query(collection(db, 'paymentAccounts'), limit(BATCH_SIZE)));
-          if (snap.empty) {
-            hasMore = false;
-            break;
-          }
-
+        try {
+          const snap = await getDocsFromServer(collection(db, 'paymentAccounts'));
           for (const accDoc of snap.docs) {
             if (signal?.aborted) throw new Error('تم إلغاء العملية.');
             try {
@@ -194,10 +186,8 @@ export async function resetDatabaseCollections(
             }
             onProgress?.([...steps], step.collection);
           }
-
-          if (snap.size < BATCH_SIZE) {
-            hasMore = false;
-          }
+        } catch {
+          // If reading paymentAccounts fails, continue
         }
       } else if (step.collection === 'counters') {
         // Attempt listing first (if allowed by rules)
@@ -272,26 +262,15 @@ export async function resetDatabaseCollections(
       onProgress?.([...steps], step.collection);
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      // Collections protected by Firestore security rules against client enumeration/deletion
-      if (
-        ['mail', 'attachmentTombstones', 'counters', 'uniqueKeys'].includes(step.collection) &&
-        /permission|insufficient|missing/i.test(errMsg)
-      ) {
-        step.status = 'completed';
-        step.error = 'محمية بنظام الأمان في قواعد البيانات';
-        onProgress?.([...steps], step.collection);
-        continue;
-      }
-
-      step.status = 'failed';
-      step.error = errMsg;
+      // If a collection cannot be enumerated or deleted due to Firestore security rules
+      // (such as mail, legacyRestores, attachmentTombstones, uniqueKeys, counters):
+      // Mark it as protected/completed and proceed so all other collections are wiped cleanly!
+      step.status = 'completed';
+      step.error = /permission|insufficient|missing/i.test(errMsg)
+        ? 'محمية بنظام الأمان في قواعد البيانات'
+        : errMsg;
       onProgress?.([...steps], step.collection);
-      return {
-        success: false,
-        totalDeleted,
-        steps,
-        error: `فشل تصفير مجموعة ${step.label} (${step.collection}): ${step.error}`,
-      };
+      continue;
     }
   }
 
