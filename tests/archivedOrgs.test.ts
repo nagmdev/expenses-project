@@ -2,7 +2,7 @@
  * An archived company keeps its records but takes no new ones, whatever page (or stale
  * picker) asks; and a company with no records at all is really deleted, together with the
  * default treasury accounts every company is created with.
- */
+ */ 
 import { describe, expect, it } from 'vitest';
 import { uniqueKeyDocId, type Actor } from '../src/domain/common';
 import { createOrganization, defaultAccountsFor, removeOrganization } from '../src/domain/directory';
