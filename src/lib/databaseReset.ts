@@ -27,32 +27,39 @@ export interface ResetSummary {
 
 /**
  * Collections to completely wipe when resetting the platform.
+ * Ordered in reverse-dependency sequence (children and leaves first, parent organizations last).
  * NOTE: 'users', 'super_admins', and 'system_settings' are strictly EXCLUDED from deletion
  * to preserve user logins, authentication, credentials, and platform configurations.
  * 'members' is wiped because memberships belong to the deleted companies.
  */
 export const RESET_COLLECTIONS = [
-  { name: 'organizations', label: 'الشركات والمؤسسات' },
-  { name: 'members', label: 'عضويات وصلاحيات الشركات السابقة' },
-  { name: 'paymentAccounts', label: 'الخزائن والحسابات المالية' },
-  { name: 'accountTransactions', label: 'حركات الحسابات والقيود' },
+  // 1. Notifications, logs & mail
+  { name: 'mail', label: 'رسائل البريد المجدولة' },
+  { name: 'outbox', label: 'صندوق الإشعارات' },
+  { name: 'email_logs', label: 'سجل البريد الإلكتروني' },
+  { name: 'auditLogs', label: 'سجل التدقيق والعمليات' },
+  { name: 'legacyRestores', label: 'سجلات الاستعادة' },
+  // 2. Attachments & tombstones
+  { name: 'attachmentTombstones', label: 'شواهد المرفقات المحذوفة' },
+  { name: 'attachments', label: 'المرفقات والملفات' },
+  // 3. Financial movements, settlements & requests
+  { name: 'custodySettlements', label: 'تسويات العهد' },
+  { name: 'pettyCashCustodies', label: 'العهد القديمة' },
+  { name: 'custodies', label: 'العهد المالية' },
   { name: 'requests', label: 'طلبات الصرف' },
   { name: 'visaRequests', label: 'طلبات التأشيرات' },
-  { name: 'custodies', label: 'العهد المالية' },
-  { name: 'pettyCashCustodies', label: 'العهد القديمة' },
-  { name: 'custodySettlements', label: 'تسويات العهد' },
+  { name: 'accountTransactions', label: 'حركات الحسابات والقيود' },
+  { name: 'paymentAccounts', label: 'الخزائن والحسابات المالية' },
+  // 4. Directory & catalog
   { name: 'services', label: 'البنود والخدمات' },
   { name: 'providers', label: 'الموردون ومزودو الخدمة' },
   { name: 'departments', label: 'الأقسام الإدارية' },
-  { name: 'auditLogs', label: 'سجل التدقيق والعمليات' },
-  { name: 'outbox', label: 'صندوق الإشعارات' },
-  { name: 'email_logs', label: 'سجل البريد الإلكتروني' },
-  { name: 'mail', label: 'رسائل البريد المجدولة' },
-  { name: 'legacyRestores', label: 'سجلات الاستعادة' },
+  // 5. Unique keys & counters
   { name: 'uniqueKeys', label: 'مفاتيح منع التكرار' },
-  { name: 'attachmentTombstones', label: 'شواهد المرفقات المحذوفة' },
-  { name: 'attachments', label: 'المرفقات والملفات' },
   { name: 'counters', label: 'عدادات الأرقام التسلسلية' },
+  // 6. Members & organizations (deleted last so parent references remain valid during child deletion)
+  { name: 'members', label: 'عضويات وصلاحيات الشركات السابقة' },
+  { name: 'organizations', label: 'الشركات والمؤسسات' },
 ] as const;
 
 export async function resetDatabaseCollections(

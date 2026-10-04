@@ -7,7 +7,10 @@ import {
   ShieldCheck, 
   X,
   RefreshCw,
-  Info
+  Info,
+  Copy,
+  ExternalLink,
+  Check
 } from 'lucide-react';
 import { initFirebase } from '../lib/firebase';
 import { 
@@ -16,6 +19,7 @@ import {
   type ResetSummary, 
   RESET_COLLECTIONS 
 } from '../lib/databaseReset';
+import firestoreRulesRaw from '../../firestore.rules?raw';
 
 export const DatabaseResetCard: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -25,9 +29,21 @@ export const DatabaseResetCard: React.FC = () => {
   const [stepsProgress, setStepsProgress] = useState<ResetStepProgress[]>([]);
   const [result, setResult] = useState<ResetSummary | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [copiedRules, setCopiedRules] = useState(false);
   const abortCtrlRef = useRef<AbortController | null>(null);
 
   const CONFIRMATION_KEYWORD = 'تصفير';
+  const FIREBASE_RULES_URL = 'https://console.firebase.google.com/project/expenses-project-ce1f9/firestore/rules';
+
+  const handleCopyRules = async () => {
+    try {
+      await navigator.clipboard.writeText(firestoreRulesRaw);
+      setCopiedRules(true);
+      setTimeout(() => setCopiedRules(false), 3000);
+    } catch {
+      // Fallback
+    }
+  };
 
   const handleOpenModal = () => {
     setConfirmText('');
@@ -38,7 +54,7 @@ export const DatabaseResetCard: React.FC = () => {
   };
 
   const handleCloseModal = () => {
-    if (isRunning) return; // Prevent closing while running
+    if (isRunning) return;
     setIsModalOpen(false);
     setConfirmText('');
   };
@@ -64,6 +80,7 @@ export const DatabaseResetCard: React.FC = () => {
           setStepsProgress(steps);
           const found = RESET_COLLECTIONS.find(c => c.name === currentCol);
           if (found) setCurrentCollectionLabel(found.label);
+          else if (currentCol === 'users_reset') setCurrentCollectionLabel('إعادة ضبط حسابات المستخدمين');
         },
         abortCtrl.signal
       );
@@ -96,8 +113,9 @@ export const DatabaseResetCard: React.FC = () => {
   };
 
   const completedCount = stepsProgress.filter(s => s.status === 'completed').length;
-  const totalCollections = RESET_COLLECTIONS.length;
+  const totalCollections = RESET_COLLECTIONS.length + 1; // + users_reset
   const progressPercent = totalCollections > 0 ? Math.round((completedCount / totalCollections) * 100) : 0;
+  const isPermissionsError = errorMsg && (errorMsg.includes('Missing or insufficient permissions') || errorMsg.includes('permission-denied'));
 
   return (
     <div className="p-5 bg-rose-50/60 border border-rose-200 rounded-2xl space-y-4">
@@ -187,6 +205,43 @@ export const DatabaseResetCard: React.FC = () => {
                   </p>
                 </div>
 
+                {isPermissionsError && (
+                  <div className="p-4 bg-amber-50 border border-amber-300 rounded-2xl text-xs text-amber-950 space-y-3 animate-in fade-in">
+                    <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                      <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                      <span>قواعد أمان Firebase تحتاج إلى تحديث في Firebase Console:</span>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-amber-800">
+                      محرك فايربيس يمنع حالياً حذف الخزائن التي تحتوي على حركات مالية حتى تقوم بنشر القواعد المحدثة في لوحة تحكم فايربيس. 
+                      لحل هذا في نصف دقيقة:
+                    </p>
+                    <ol className="list-decimal list-inside text-[11px] space-y-1 text-amber-900 font-medium">
+                      <li>انسخ القواعد المحدثة بالضغط على الزر أدناه.</li>
+                      <li>افتح صفحة قواعد أمان فايربيس والصقها هناك ثم اضغط <strong>Publish (نشر)</strong>.</li>
+                      <li>عد واضغط «تأكيد وحذف البيانات» مجدداً.</li>
+                    </ol>
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleCopyRules}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-[11px] transition shadow-xs cursor-pointer"
+                      >
+                        {copiedRules ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                        <span>{copiedRules ? 'تم نسخ القواعد بنجاح!' : 'نسخ قواعد firestore.rules'}</span>
+                      </button>
+                      <a
+                        href={FIREBASE_RULES_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-amber-300 text-amber-900 hover:bg-amber-100 rounded-lg font-bold text-[11px] transition shadow-xs"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        <span>فتح Firebase Console</span>
+                      </a>
+                    </div>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <label className="block text-xs font-bold text-slate-800">
                     لتأكيد البدء، اكتب كلمة <strong className="text-rose-600 bg-rose-50 px-2 py-0.5 rounded font-mono text-sm border border-rose-200">تصفير</strong> في الحقل التالي:
@@ -200,7 +255,7 @@ export const DatabaseResetCard: React.FC = () => {
                   />
                 </div>
 
-                {errorMsg && (
+                {errorMsg && !isPermissionsError && (
                   <div className="p-3 bg-rose-100 border border-rose-300 rounded-xl text-xs text-rose-900 font-bold flex items-center gap-2">
                     <AlertTriangle className="h-4 w-4 shrink-0 text-rose-600" />
                     <span>{errorMsg}</span>
@@ -247,7 +302,7 @@ export const DatabaseResetCard: React.FC = () => {
                     />
                   </div>
                   <div className="flex justify-between text-[11px] font-mono text-slate-500">
-                    <span>{completedCount} من {totalCollections} مجموعة</span>
+                    <span>{completedCount} من {totalCollections} مرحلة</span>
                     <span>{progressPercent}%</span>
                   </div>
                 </div>
@@ -257,7 +312,7 @@ export const DatabaseResetCard: React.FC = () => {
                     <div key={s.collection} className="px-3 py-1.5 flex items-center justify-between">
                       <span className="font-medium text-slate-700">{s.label}</span>
                       <span className="font-mono text-slate-500">
-                        {s.status === 'completed' && <span className="text-emerald-600 font-bold">✓ ({s.deletedCount} مستند)</span>}
+                        {s.status === 'completed' && <span className="text-emerald-600 font-bold">✓ ({s.deletedCount})</span>}
                         {s.status === 'in_progress' && <span className="text-amber-600 font-bold">جارٍ الحذف...</span>}
                         {s.status === 'pending' && <span className="text-slate-400">بانتظار...</span>}
                         {s.status === 'failed' && <span className="text-rose-600 font-bold">فشل!</span>}
