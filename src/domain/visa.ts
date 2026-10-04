@@ -74,7 +74,7 @@ export async function createVisaRequest(
         entityId: id,
         entityName: `طلب تأشيرة: ${visa.travelerName} (${visa.requestNumber})`,
         orgId: visa.orgId,
-        details: `تم إنشاء طلب تأشيرة جديد للمسافر "${visa.travelerName}" برقم جواز (${visa.passportNumber}) إلى (${visa.destinationCountry || 'غير محدد'}) بمبلغ ${formatAmount(total)} ${visa.currency} - المورد: ${visa.serviceProviderName}`,
+        details: `تم إنشاء طلب تأشيرة جديد للمسافر "${visa.travelerName}" برقم جواز (${visa.passportNumber}) إلى (${visa.destinationCountry || 'غير محدد'}) بمبلغ ${formatAmount(total)} ${visa.currency}${visa.serviceProviderName ? ` - المورد: ${visa.serviceProviderName}` : ''}`,
       },
       auditIdFor(operationKey),
       nowIso,

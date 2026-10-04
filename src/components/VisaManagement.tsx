@@ -260,7 +260,7 @@ export const VisaManagement: React.FC = () => {
         req.passportNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
         (req.destinationCountry && req.destinationCountry.toLowerCase().includes(searchTerm.toLowerCase())) ||
         req.requestNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        req.serviceProviderName.toLowerCase().includes(searchTerm.toLowerCase());
+        Boolean(req.serviceProviderName && req.serviceProviderName.toLowerCase().includes(searchTerm.toLowerCase()));
 
       const matchType = selectedTypeFilter === 'all' || req.visaType === selectedTypeFilter;
       const matchStatus = selectedStatusFilter === 'all' || req.status === selectedStatusFilter;
@@ -460,12 +460,9 @@ export const VisaManagement: React.FC = () => {
       errors.visaAttachment = 'المستند مرفوع لشركة أخرى؛ احذفه ثم ارفعه مرة أخرى لهذه الشركة.';
     }
 
-    // 7. Company + Service Provider (مورد التأشيرات المختص - إجباري)
+    // 7. Company (إجباري)
     if (!formOrgId) {
       errors.orgId = 'يرجى اختيار الشركة التابع لها الطلب (إجباري)';
-    }
-    if (!serviceProviderId) {
-      errors.serviceProviderId = 'يرجى اختيار مورد التأشيرات المختص (إجباري)';
     }
 
     // 8. Total Amount (تكلفة التأشيرة الإجمالية - إجباري)
@@ -488,7 +485,7 @@ export const VisaManagement: React.FC = () => {
     setFormErrors({});
     await createGuard.run(async (idempotencyKey) => {
     try {
-      const selectedProviderObj = availableProviders.find(p => p.id === serviceProviderId);
+      const selectedProviderObj = serviceProviderId ? availableProviders.find(p => p.id === serviceProviderId) : undefined;
 
       const created = await createVisaRequest({
         orgId: formOrgId,
@@ -502,8 +499,8 @@ export const VisaManagement: React.FC = () => {
         visaAttachmentUrl,
         visaAttachmentName,
         visaAttachmentSize,
-        serviceProviderId,
-        serviceProviderName: selectedProviderObj?.name || 'مورد تأشيرات معتمد',
+        serviceProviderId: serviceProviderId || undefined,
+        serviceProviderName: selectedProviderObj?.name || (serviceProviderId ? 'مورد معتمد' : 'بدون مورد محدد'),
         // No fixed person: any of the company's managers decides (the actual approver is recorded on the decision)
         assignedApprover: VISA_APPROVER_LABEL,
         totalAmount: Number(totalAmount),
@@ -917,7 +914,7 @@ export const VisaManagement: React.FC = () => {
                       </td>
                       <td className="py-3 px-4 text-slate-700">
                         <div className="truncate max-w-[140px]" title={req.serviceProviderName}>
-                          {req.serviceProviderName}
+                          {req.serviceProviderName || 'بدون مورد محدد'}
                         </div>
                       </td>
                       <td className="py-3 px-4 text-slate-600 font-mono">
@@ -1303,7 +1300,7 @@ export const VisaManagement: React.FC = () => {
                 {/* Service Provider Selection */}
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    شركة / مورد التأشيرات المختص <span className="text-rose-500 font-extrabold">* (إجباري)</span>
+                    شركة / مورد التأشيرات المختص <span className="text-slate-400 font-medium">(اختياري)</span>
                   </label>
                   <select
                     disabled={!visaAttachmentUrl || !formOrgId}
@@ -1324,8 +1321,8 @@ export const VisaManagement: React.FC = () => {
                         : !formOrgId
                         ? '-- اختر الشركة أولاً --'
                         : availableProviders.length === 0
-                        ? '-- لا يوجد موردون مسجلون لهذه الشركة --'
-                        : '-- اختر مورد التأشيرات --'}
+                        ? '-- بدون مورد محدد (اختياري) --'
+                        : '-- بدون مورد محدد / اختر لاحقاً (اختياري) --'}
                     </option>
                     {availableProviders.map(prov => (
                       <option key={prov.id} value={prov.id}>
@@ -1334,8 +1331,8 @@ export const VisaManagement: React.FC = () => {
                     ))}
                   </select>
                   {formOrgId && availableProviders.length === 0 && (
-                    <span className="text-[10px] text-amber-700 font-bold mt-1 block">
-                      لا يوجد أي مورد مسجل لهذه الشركة بعد. أضف مورد التأشيرات من صفحة «الموردين» ثم ارجع لإكمال الطلب.
+                    <span className="text-[10px] text-slate-500 font-medium mt-1 block">
+                      لا يوجد موردون مسجلون لهذه الشركة بعد (يمكنك المتابعة بدون اختيار مورد، أو إضافة موردين لاحقاً من صفحة «الموردين»).
                     </span>
                   )}
                   {!isSuperAdmin && formErrors.orgId && (
@@ -1654,7 +1651,7 @@ export const VisaManagement: React.FC = () => {
                   {/* Provider Info */}
                   <div className="p-3 bg-slate-50 rounded-xl border border-slate-200/70">
                     <span className="text-[10px] text-slate-400 font-bold block mb-1">المورد المسند إليه:</span>
-                    <span className="text-xs font-bold text-slate-900 block">{selectedVisa.serviceProviderName}</span>
+                    <span className="text-xs font-bold text-slate-900 block">{selectedVisa.serviceProviderName || 'بدون مورد محدد'}</span>
                   </div>
 
                   {/* Attachment Preview / Action */}

@@ -283,8 +283,8 @@ export interface VisaRequest {
   visaAttachmentUrl?: string;
   visaAttachmentName?: string;
   visaAttachmentSize?: number;
-  serviceProviderId: string;
-  serviceProviderName: string;
+  serviceProviderId?: string;
+  serviceProviderName?: string;
   
   // Approval Workflow
   status: VisaStatus;
