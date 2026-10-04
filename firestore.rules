@@ -806,11 +806,18 @@ service cloud.firestore {
         let keys = a.diff(b).affectedKeys();
         let from = b.get('status', '');
         let to = a.get('status', '');
-        let approveCase = from in ['pending', 'rejected'] && to in ['approved', 'partially_paid', 'paid'];
+        let expectedApproveStatus = b.get('paidAmount', 0) >= b.get('totalAmount', 0)
+          ? 'paid'
+          : (b.get('paidAmount', 0) > 0 ? 'partially_paid' : 'approved');
+        let approveCase = from in ['pending', 'rejected'] &&
+          to == expectedApproveStatus &&
+          a.get('approvedBy', '') == request.auth.uid;
         let rejectCase = from in ['pending', 'approved'] && to == 'rejected' &&
           b.get('paidAmount', 0) == 0 &&
-          a.get('rejectionReason', null) is string && a.rejectionReason != '';
+          a.get('rejectionReason', null) is string && a.rejectionReason != '' &&
+          a.get('approvedBy', '') == request.auth.uid;
         return (approveCase || rejectCase) &&
+          keys.hasAny(['approvedBy', 'approvedAt']) &&
           !keys.hasAny(['id', 'requestNumber', 'orgId', 'requesterId', 'totalAmount', 'currency',
             'payments', 'paidAmount', 'remainingBalance', 'createdAt', 'travelerName', 'passportNumber', 'serviceProviderId']);
       }

@@ -2321,6 +2321,7 @@ describe('legitimate operations (real domain, every role, legacy data)', () => {
       await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), { paidAmount: 500, remainingBalance: 0, status: 'paid' }));
       // Finance directly jumping status to 'paid' or 'partially_paid' from pending without payment is refused
       await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), { status: 'paid' }));
+      await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), { status: 'partially_paid' }));
       // Finance directly mutating core fields during decision is refused
       await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), { status: 'approved', totalAmount: 1000 }));
       await assertFails(updateDoc(doc(db(FIN), 'visaRequests', 'v-target'), { status: 'approved', requesterId: FIN.uid }));
