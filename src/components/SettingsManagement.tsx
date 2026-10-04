@@ -4,6 +4,7 @@ import { openLegacyRecovery } from './LegacyDataRecovery';
 import { EmailVerificationCard } from './EmailVerificationCard';
 import { FinancialConsistencyCheck } from './FinancialConsistencyCheck';
 import { BackupExportCard } from './BackupExportCard';
+import { DatabaseResetCard } from './DatabaseResetCard';
 import { 
   Bell, 
   Mail, 
@@ -1116,6 +1117,9 @@ export const SettingsManagement: React.FC = () => {
 
           {/* Backup export (Spark plan: no managed backups). Read-only; restore: docs/06 → Backups */}
           <BackupExportCard />
+
+          {/* Database reset (Factory reset of operational data, preserving users and roles) */}
+          <DatabaseResetCard />
         </div>
       )}
 
