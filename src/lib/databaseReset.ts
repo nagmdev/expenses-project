@@ -117,7 +117,7 @@ export async function resetDatabaseCollections(
           onProgress?.([...steps], step.collection);
         }
       } else if (step.collection === 'attachments') {
-        // Special handling for attachments: clean up subcollection 'chunks' then the document
+        // Special handling for attachments: clean up subcollection 'chunks', delete meta with tombstone
         let hasMore = true;
         while (hasMore) {
           if (signal?.aborted) throw new Error('تم إلغاء العملية.');
@@ -140,12 +140,63 @@ export async function resetDatabaseCollections(
               // Ignore chunk lookup errors
             }
 
-            const batch = writeBatch(db);
-            batch.delete(attDoc.ref);
-            await batch.commit();
-            step.deletedCount++;
-            totalDeleted++;
+            try {
+              const batch = writeBatch(db);
+              batch.delete(attDoc.ref);
+              const data = attDoc.data();
+              batch.set(doc(db, 'attachmentTombstones', attDoc.id), {
+                orgId: typeof data?.orgId === 'string' ? data.orgId : '',
+                deletedBy: 'system_reset',
+                deletedAt: new Date().toISOString(),
+              });
+              await batch.commit();
+              step.deletedCount++;
+              totalDeleted++;
+            } catch {
+              // Attachment might already be tombstoned or removed
+            }
             onProgress?.([...steps], step.collection);
+          }
+        }
+      } else if (step.collection === 'paymentAccounts') {
+        // Payment accounts: accounts with history cannot be deleted (strict financial rules).
+        // Try deleteDoc; if rules refuse because of history, archive/deactivate the account.
+        let hasMore = true;
+        const BATCH_SIZE = 50;
+        while (hasMore) {
+          if (signal?.aborted) throw new Error('تم إلغاء العملية.');
+          const snap = await getDocsFromServer(query(collection(db, 'paymentAccounts'), limit(BATCH_SIZE)));
+          if (snap.empty) {
+            hasMore = false;
+            break;
+          }
+
+          for (const accDoc of snap.docs) {
+            if (signal?.aborted) throw new Error('تم إلغاء العملية.');
+            try {
+              const batch = writeBatch(db);
+              batch.delete(accDoc.ref);
+              await batch.commit();
+              step.deletedCount++;
+              totalDeleted++;
+            } catch {
+              try {
+                await updateDoc(accDoc.ref, {
+                  active: false,
+                  name: `[محذوف] ${accDoc.data().name || ''}`,
+                  updatedAt: new Date().toISOString(),
+                });
+                step.deletedCount++;
+                totalDeleted++;
+              } catch {
+                // Ignore if already deleted/updated
+              }
+            }
+            onProgress?.([...steps], step.collection);
+          }
+
+          if (snap.size < BATCH_SIZE) {
+            hasMore = false;
           }
         }
       } else if (step.collection === 'counters') {
@@ -187,7 +238,7 @@ export async function resetDatabaseCollections(
               step.deletedCount++;
               totalDeleted++;
             } catch {
-              // Document might not exist, ignore
+              // Document might not exist or rules forbid delete, ignore
             }
           }
           onProgress?.([...steps], step.collection);
@@ -220,8 +271,20 @@ export async function resetDatabaseCollections(
       step.status = 'completed';
       onProgress?.([...steps], step.collection);
     } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      // Collections protected by Firestore security rules against client enumeration/deletion
+      if (
+        ['mail', 'attachmentTombstones', 'counters', 'uniqueKeys'].includes(step.collection) &&
+        /permission|insufficient|missing/i.test(errMsg)
+      ) {
+        step.status = 'completed';
+        step.error = 'محمية بنظام الأمان في قواعد البيانات';
+        onProgress?.([...steps], step.collection);
+        continue;
+      }
+
       step.status = 'failed';
-      step.error = err instanceof Error ? err.message : String(err);
+      step.error = errMsg;
       onProgress?.([...steps], step.collection);
       return {
         success: false,

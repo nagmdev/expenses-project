@@ -1045,7 +1045,7 @@ service cloud.firestore {
       allow list: if isAuthenticated() && (isSuperAdmin() || isFinance(resource.data.orgId));
       allow create: if accountCreateOk() || isSuperAdmin();
       allow update: if accountUpdateOk() || isSuperAdmin();
-      allow delete: if isSuperAdmin() || (hasNoHistory() && hasOrgRole(resource.data.orgId, ['org_admin']));
+      allow delete: if hasNoHistory() && (hasOrgRole(resource.data.orgId, ['org_admin']) || isSuperAdmin());
     }
 
     // =========================================================================
@@ -1268,10 +1268,9 @@ service cloud.firestore {
           isSuperAdmin();
       }
       allow get: if isAuthenticated();
-      allow list: if isSuperAdmin();
       allow create: if isAuthenticated() && request.resource.data.value == 1 && mayAdvance();
       allow update: if isAuthenticated() && request.resource.data.value == resource.data.value + 1 && mayAdvance();
-      allow delete: if isSuperAdmin();
+      allow delete: if false;
     }
 
     // =========================================================================
@@ -1368,7 +1367,6 @@ service cloud.firestore {
       // numbers another company has. Company-less keys (org codes) and keys in the old id
       // format (company id encoded) are read by the platform owner only.
       allow get: if isAuthenticated() && (isSuperAdmin() || inKeyCompany());
-      allow list: if isSuperAdmin();
       allow create: if isAuthenticated() && request.resource.data.entityId is string && (
         (request.resource.data.orgId != '-' && request.resource.data.orgId == keyOrgId() &&
           claimedByRecord() && inKeyCompany()) ||
@@ -1549,8 +1547,7 @@ service cloud.firestore {
         request.resource.data.metadata.eventId.matches('[^/]+') &&
         exists(outboxPath(request.resource.data.metadata.eventId)) &&
         isDeliveryOf(request.resource.data, get(outboxPath(request.resource.data.metadata.eventId)).data);
-      allow update: if false;
-      allow delete: if isSuperAdmin();
+      allow update, delete: if false;
     }
 
     // =========================================================================
@@ -1651,12 +1648,10 @@ service cloud.firestore {
       // Its creator (while still a member of that company), the company's admins and super admins,
       // always together with its tombstone (same batch), so the id can never be created again.
       allow delete: if isAuthenticated() && (
-        isSuperAdmin() || (
-          (isOrgAdmin(resource.data.orgId) ||
-           (resource.data.createdBy == request.auth.uid && isOrgMember(resource.data.orgId))) &&
-          existsAfter(tombstonePath())
-        )
-      );
+        isSuperAdmin() ||
+        isOrgAdmin(resource.data.orgId) ||
+        (resource.data.createdBy == request.auth.uid && isOrgMember(resource.data.orgId))
+      ) && existsAfter(tombstonePath());
 
       match /chunks/{chunkId} {
         function parentPath() {
@@ -1714,8 +1709,7 @@ service cloud.firestore {
         request.resource.data.orgId == get(deletedAttachmentPath()).data.orgId &&
         request.resource.data.deletedBy == request.auth.uid &&
         request.resource.data.deletedAt is string;
-      allow update: if false;
-      allow delete: if isSuperAdmin();
+      allow update, delete: if false;
     }
   }
 }
