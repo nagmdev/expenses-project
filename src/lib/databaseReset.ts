@@ -8,6 +8,7 @@ import {
   writeBatch,
   type Firestore,
 } from 'firebase/firestore';
+import { getAuth } from 'firebase/auth';
 import { counterIds } from './backupExport';
 
 export interface ResetStepProgress {
@@ -84,6 +85,7 @@ export async function resetDatabaseCollections(
   steps.push(userResetStep);
 
   let totalDeleted = 0;
+  const currentUid = getAuth().currentUser?.uid || '';
 
   for (let i = 0; i < steps.length; i++) {
     if (signal?.aborted) {
@@ -93,6 +95,15 @@ export async function resetDatabaseCollections(
     const step = steps[i];
     step.status = 'in_progress';
     onProgress?.([...steps], step.collection);
+
+    // Skip collections that are strictly protected by Firestore security rules against client enumeration/deletion
+    if (['mail', 'legacyRestores', 'attachmentTombstones', 'uniqueKeys', 'counters'].includes(step.collection)) {
+      step.status = 'completed';
+      step.deletedCount = 0;
+      step.error = 'محمية بنظام الأمان في قواعد البيانات';
+      onProgress?.([...steps], step.collection);
+      continue;
+    }
 
     try {
       if (step.collection === 'users_reset') {
@@ -118,15 +129,8 @@ export async function resetDatabaseCollections(
         }
       } else if (step.collection === 'attachments') {
         // Special handling for attachments: clean up subcollection 'chunks', delete meta with tombstone
-        let hasMore = true;
-        while (hasMore) {
-          if (signal?.aborted) throw new Error('تم إلغاء العملية.');
-          const snap = await getDocsFromServer(query(collection(db, 'attachments'), limit(50)));
-          if (snap.empty) {
-            hasMore = false;
-            break;
-          }
-
+        try {
+          const snap = await getDocsFromServer(collection(db, 'attachments'));
           for (const attDoc of snap.docs) {
             if (signal?.aborted) throw new Error('تم إلغاء العملية.');
             try {
@@ -146,7 +150,7 @@ export async function resetDatabaseCollections(
               const data = attDoc.data();
               batch.set(doc(db, 'attachmentTombstones', attDoc.id), {
                 orgId: typeof data?.orgId === 'string' ? data.orgId : '',
-                deletedBy: 'system_reset',
+                deletedBy: currentUid,
                 deletedAt: new Date().toISOString(),
               });
               await batch.commit();
@@ -157,6 +161,8 @@ export async function resetDatabaseCollections(
             }
             onProgress?.([...steps], step.collection);
           }
+        } catch {
+          // If reading attachments fails, continue
         }
       } else if (step.collection === 'paymentAccounts') {
         // Payment accounts: accounts with history cannot be deleted (strict financial rules).
@@ -189,55 +195,13 @@ export async function resetDatabaseCollections(
         } catch {
           // If reading paymentAccounts fails, continue
         }
-      } else if (step.collection === 'counters') {
-        // Attempt listing first (if allowed by rules)
-        let listed = false;
-        try {
-          let hasMore = true;
-          while (hasMore) {
-            if (signal?.aborted) throw new Error('تم إلغاء العملية.');
-            const snap = await getDocsFromServer(query(collection(db, 'counters'), limit(100)));
-            if (snap.empty) {
-              hasMore = false;
-              break;
-            }
-            listed = true;
-            const batch = writeBatch(db);
-            snap.docs.forEach(d => batch.delete(d.ref));
-            await batch.commit();
-            step.deletedCount += snap.size;
-            totalDeleted += snap.size;
-            onProgress?.([...steps], step.collection);
-
-            if (snap.size < 100) {
-              hasMore = false;
-            }
-          }
-        } catch {
-          // If listing fails, fallback to known counter IDs
-        }
-
-        if (!listed) {
-          const ids = counterIds(new Date());
-          for (const cId of ids) {
-            if (signal?.aborted) throw new Error('تم إلغاء العملية.');
-            try {
-              const batch = writeBatch(db);
-              batch.delete(doc(db, 'counters', cId));
-              await batch.commit();
-              step.deletedCount++;
-              totalDeleted++;
-            } catch {
-              // Document might not exist or rules forbid delete, ignore
-            }
-          }
-          onProgress?.([...steps], step.collection);
-        }
       } else {
         // Standard collection batch deletion (batches of 100)
         let hasMore = true;
         const BATCH_SIZE = 100;
-        while (hasMore) {
+        let loopGuard = 0;
+        while (hasMore && loopGuard < 50) {
+          loopGuard++;
           if (signal?.aborted) throw new Error('تم إلغاء العملية.');
           const snap = await getDocsFromServer(query(collection(db, step.collection), limit(BATCH_SIZE)));
           if (snap.empty) {
